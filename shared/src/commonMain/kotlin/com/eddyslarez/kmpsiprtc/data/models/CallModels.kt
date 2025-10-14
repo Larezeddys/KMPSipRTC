@@ -1,0 +1,124 @@
+package com.eddyslarez.kmpsiprtc.data.models
+
+import com.eddyslarez.kmpsiprtc.platform.log
+import kotlinx.datetime.Clock
+import kotlinx.serialization.Serializable
+
+@Serializable
+enum class CallDirections {
+    INCOMING,
+    OUTGOING
+}
+
+@Serializable
+enum class CallTypes {
+    SUCCESS,
+    MISSED,
+    DECLINED,
+    ABORTED
+}
+
+@Serializable
+enum class RegistrationState {
+    PROGRESS,
+    OK,
+    CLEARED,
+    NONE,
+    IN_PROGRESS,
+    FAILED
+}
+
+@Serializable
+data class CallData(
+    var callId: String = "",
+    val from: String = "",
+    val to: String = "",
+    val direction: CallDirections = CallDirections.OUTGOING,
+    val startTime: Long = Clock.System.now().toEpochMilliseconds(),
+    var toTag: String? = null,
+    var fromTag: String? = null,
+    var remoteContactUri: String? = null,
+    var remoteContactParams: Map<String, String> = emptyMap(),
+    val remoteDisplayName: String = "",
+    var inviteFromTag: String = "",
+    var inviteToTag: String = "",
+    var remoteSdp: String = "",
+    var localSdp: String = "",
+    var inviteViaBranch: String = "",
+    var via: String = "",
+    var originalInviteMessage: String = "",
+    var originalCallInviteMessage: String = "",
+    var isOnHold: Boolean? = null,
+    var lastCSeqValue: Int = 0,
+    var sipName: String = "",
+    val md5Hash: String = "",
+) {
+    fun storeInviteMessage(message: String) {
+        originalInviteMessage = message
+    }
+
+    fun getRemoteParty(): String {
+        val remote = when (direction) {
+            CallDirections.OUTGOING -> to
+            CallDirections.INCOMING -> from
+        }
+        log.d("CallData") { "getRemoteParty: direction=$direction, from=$from, to=$to, remote=$remote" }
+        return remote
+    }
+
+    fun getLocalParty(): String {
+        val local = when (direction) {
+            CallDirections.OUTGOING -> from
+            CallDirections.INCOMING -> to
+        }
+        log.d("CallData") { "getLocalParty: direction=$direction, from=$from, to=$to, local=$local" }
+        return local
+    }
+
+    override fun toString(): String {
+        return "CallData(id=$callId, $from→$to, dir=$direction, started=$startTime, " +
+                "fromTag=$fromTag, toTag=$toTag)"
+    }
+}
+
+@Serializable
+data class CallLog(
+    val id: String,
+    val direction: CallDirections,
+    val to: String,
+    val formattedTo: String,
+    val from: String,
+    val formattedFrom: String,
+    val contact: String?,
+    val formattedStartDate: String,
+    val duration: Int, // in seconds
+    val callType: CallTypes,
+    val localAddress: String
+)
+
+@Serializable
+data class DtmfRequest(
+    val digit: Char,
+    val duration: Int = 160,
+    val useInfo: Boolean = true
+)
+
+@Serializable
+data class DtmfQueueStatus(
+    val queueSize: Int,
+    val isProcessing: Boolean,
+    val pendingDigits: String
+)
+//
+//enum class AppLifecycleEvent {
+//    EnterBackground,
+//    FinishedLaunching,
+//    EnterForeground,
+//    WillTerminate,
+//    ProtectedDataAvailable,
+//    ProtectedDataWillBecomeUnavailable
+//}
+//
+//interface AppLifecycleListener {
+//    fun onEvent(event: AppLifecycleEvent)
+//}

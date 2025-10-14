@@ -1,0 +1,98 @@
+package com.eddyslarez.kmpsiprtc.utils
+
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.datetime.Clock
+import okio.ByteString.Companion.encodeUtf8
+import kotlin.random.Random
+
+fun generateId(): String {
+    return "${Clock.System.now().toEpochMilliseconds()}-${Random.nextInt(100000)}"
+}
+
+fun generateSipTag(): String {
+    return Clock.System.now().toEpochMilliseconds().toString() + "-" + (1000..9999).random()
+}
+fun formatDuration(duration: Int): String {
+    val hours = duration / 3600
+    val minutes = (duration % 3600) / 60
+    val seconds = duration % 60
+
+    return if (hours > 0) {
+        "${hours.twoDigits()}:${minutes.twoDigits()}:${seconds.twoDigits()}"
+    } else {
+        "${minutes.twoDigits()}:${seconds.twoDigits()}"
+    }
+}
+/**
+ * Computes MD5 hash of a string input
+ */
+fun md5(input: String): String {
+    // Using placeholder for actual MD5 implementation
+    // Real implementation would use platform-specific crypto libraries
+    return input.encodeUtf8().md5().hex()
+}
+private fun Int.twoDigits(): String = if (this < 10) "0$this" else "$this"
+
+class ConcurrentMap<K, V> {
+    private val mutex = Mutex()
+    private val map = mutableMapOf<K, V>()
+
+    suspend fun put(key: K, value: V) = mutex.withLock {
+        map[key] = value
+    }
+
+    suspend fun get(key: K): V? = mutex.withLock {
+        map[key]
+    }
+
+    suspend fun remove(key: K): V? = mutex.withLock {
+        map.remove(key)
+    }
+
+    suspend fun clear() = mutex.withLock {
+        map.clear()
+    }
+
+    suspend fun values(): List<V> = mutex.withLock {
+        map.values.toList()
+    }
+
+    suspend fun keys(): List<K> = mutex.withLock {
+        map.keys.toList()
+    }
+
+    suspend fun size(): Int = mutex.withLock {
+        map.size
+    }
+
+    suspend fun containsKey(key: K): Boolean = mutex.withLock {
+        map.containsKey(key)
+    }
+
+    suspend fun forEach(action: suspend (K, V) -> Unit) = mutex.withLock {
+        for ((k, v) in map) action(k, v)
+    }
+
+    // Método seguro para obtener snapshot
+    suspend fun snapshot(): Map<K, V> = mutex.withLock {
+        map.toMap()
+    }
+}
+
+// =================== AccountRecoveryCounter ===================
+class AccountRecoveryCounter {
+    private val mutex = Mutex()
+    private var attempts = 0
+
+    suspend fun increment(): Int = mutex.withLock {
+        attempts += 1
+        attempts
+    }
+
+    suspend fun reset() = mutex.withLock {
+        attempts = 0
+    }
+
+    suspend fun get(): Int = mutex.withLock { attempts }
+}
