@@ -8,18 +8,16 @@ import java.io.FileOutputStream
 import java.time.LocalDate
 import java.util.Properties
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
-
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.kotlinCocoapods)
     alias(libs.plugins.androidLibrary)
     alias(libs.plugins.jetbrainsCompose)
-    id("maven-publish") // <- esto es necesario
+    id("maven-publish")
 
     alias(libs.plugins.compose.compiler)
     alias(libs.plugins.kotlinxSerialization)
     alias(libs.plugins.gradleBuildConfig)
-    // Room plugins
     alias(libs.plugins.ksp)
     alias(libs.plugins.androidx.room)
 }
@@ -33,6 +31,7 @@ kotlin {
                 }
             }
         }
+        publishLibraryVariants("release", "debug")
     }
 
     // iOS targets
@@ -52,24 +51,21 @@ kotlin {
     }
 
     cocoapods {
-        summary = "Some description for the Shared Module"
-        homepage = "Link to the Shared Module homepage"
-        version = "1.0"
+        summary = "KMPSipRTC Shared Module"
+        homepage = "https://github.com/Eddyslarez88/KMPSipRTC"
+        version = "1.0.0"
         ios.deploymentTarget = "16.0"
         framework {
             baseName = "shared"
             isStatic = true
-            // Requerido si usas NativeSQLiteDriver
-            // linkerOpts.add("-lsqlite3")
         }
     }
 
     sourceSets {
-        // Common
+        // Common - SIN WebRTC aquí
         val commonMain by getting {
             dependencies {
                 implementation(libs.androidx.lifecycle.runtime.compose)
-
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
                 implementation("org.jetbrains.kotlinx:kotlinx-datetime:0.6.1")
                 implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
@@ -87,28 +83,24 @@ kotlin {
                 implementation(libs.androidx.sqlite.bundled)
             }
         }
-        val commonTest by getting {
-            dependencies {
-                implementation(libs.kotlin.test)
-            }
-        }
 
-        // Android
+        // Android - WebRTC específico para Android
         val androidMain by getting {
             dependencies {
                 implementation(libs.androidx.lifecycle.process)
-
                 implementation("androidx.core:core-ktx:1.17.0")
                 implementation("io.insert-koin:koin-android:4.1.1")
                 implementation("io.ktor:ktor-client-okhttp:3.3.1")
-                implementation("com.shepeliev:webrtc-kmp:0.125.11")
 
-                // Room SQLite Wrapper (opcional)
+                // WebRTC Android NATIVO
+                implementation("org.webrtc:google-webrtc:1.0.32006")
+
+                // Room Android
                 implementation(libs.androidx.room.sqlite.wrapper)
             }
         }
 
-        // iOS
+        // iOS - WebRTC KMP para iOS
         val iosX64Main by getting
         val iosArm64Main by getting
         val iosSimulatorArm64Main by getting
@@ -125,31 +117,31 @@ kotlin {
             }
         }
 
-        // Desktop
+        // Desktop - WebRTC específico para Desktop (dev.onvoid.webrtc)
         val desktopMain by getting {
             dependencies {
                 implementation(compose.desktop.currentOs)
-
-                implementation("dev.onvoid.webrtc:webrtc-java:0.14.0")
                 implementation("io.ktor:ktor-client-okhttp:3.3.1")
 
-                // Detectar arquitectura automáticamente
+                // WebRTC para Desktop
+                implementation("dev.onvoid.webrtc:webrtc-java:0.14.0")
+
                 val osName = System.getProperty("os.name").lowercase()
                 val osArch = System.getProperty("os.arch").lowercase()
 
                 when {
                     osName.contains("mac") -> {
-                        if (osArch.contains("x86_64") || osArch.contains("arm")) {
-                            runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.10.0:macos-x86_64")
-                        } else {
-                            runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.10.0:macos-aarch64")
+                        if (osArch.contains("x86_64") || osArch.contains("amd64")) {
+                            runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.14.0:macos-x86_64")
+                        } else if (osArch.contains("aarch64") || osArch.contains("arm64")) {
+                            runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.14.0:macos-aarch64")
                         }
                     }
                     osName.contains("win") -> {
-                        runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.10.0:windows-x86_64")
+                        runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.14.0:windows-x86_64")
                     }
                     osName.contains("linux") -> {
-                        runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.10.0:linux-x86_64")
+                        runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.14.0:linux-x86_64")
                     }
                 }
             }
@@ -157,21 +149,57 @@ kotlin {
     }
 }
 
+// CONFIGURACIÓN CORREGIDA DE PUBLICACIÓN - FORMA CORRECTA
 publishing {
     publications {
-        create<MavenPublication>("release") {
+        // Publicación para Kotlin Multiplatform (automática)
+        withType<MavenPublication> {
+            // Configuración común para todas las publicaciones
             groupId = "com.github.Eddyslarez88"
-            artifactId = "KMPSipRTC"
             version = "1.0.0"
 
-            afterEvaluate {
-                // Publica todos los targets de KMP
-                kotlin.targets.forEach { target ->
-                    // Solo targets con componentes
-                    target.components.find { it.name == "kotlin" }?.let { from(it) }
+            // Configurar artifactId basado en el nombre de la publicación
+            when (name) {
+                "kotlinMultiplatform" -> artifactId = "KMPSipRTC"
+                "androidRelease" -> artifactId = "KMPSipRTC-android"
+                "androidDebug" -> artifactId = "KMPSipRTC-android-debug"
+                "desktop" -> artifactId = "KMPSipRTC-desktop"
+                "iosArm64" -> artifactId = "KMPSipRTC-iosarm64"
+                "iosX64" -> artifactId = "KMPSipRTC-iosx64"
+                "iosSimulatorArm64" -> artifactId = "KMPSipRTC-iossimulatorarm64"
+                else -> artifactId = "KMPSipRTC-$name"
+            }
+
+            pom {
+                name.set(artifactId)
+                description.set("Kotlin Multiplatform SIP and WebRTC library - $artifactId")
+                url.set("https://github.com/Eddyslarez88/KMPSipRTC")
+
+                licenses {
+                    license {
+                        name.set("The Apache License, Version 2.0")
+                        url.set("http://www.apache.org/licenses/LICENSE-2.0.txt")
+                    }
+                }
+
+                developers {
+                    developer {
+                        id.set("Eddyslarez88")
+                        name.set("Eddy Slarez")
+                    }
                 }
             }
         }
+    }
+
+    // Configurar repositorios (opcional)
+    repositories {
+        maven {
+            name = "local"
+            url = uri("${buildDir}/repos")
+        }
+        // Para publicar en MavenLocal
+        mavenLocal()
     }
 }
 
@@ -181,25 +209,76 @@ android {
 
     sourceSets["main"].manifest.srcFile("src/androidMain/AndroidManifest.xml")
     sourceSets["main"].res.srcDir("src/androidMain/res")
+
     defaultConfig {
         minSdk = 29
     }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_1_8
         targetCompatibility = JavaVersion.VERSION_1_8
     }
+
+    packagingOptions {
+        resources {
+            excludes += listOf(
+                "META-INF/AL2.0",
+                "META-INF/LGPL2.1",
+                "META-INF/*.kotlin_module",
+                "**/libwebrtc-java.so",
+                "**/webrtc-java.dll",
+                "**/webrtc-java.dylib"
+            )
+        }
+    }
 }
 
-// Configuración de Room
 room {
     schemaDirectory("$projectDir/schemas")
 }
 
-// Dependencias de KSP para cada plataforma
 dependencies {
     add("kspAndroid", libs.androidx.room.compiler)
     add("kspIosSimulatorArm64", libs.androidx.room.compiler)
     add("kspIosX64", libs.androidx.room.compiler)
     add("kspIosArm64", libs.androidx.room.compiler)
     add("kspDesktop", libs.androidx.room.compiler)
+}
+
+// Tarea para verificar las publicaciones
+tasks.register("printPublications") {
+    doLast {
+        println("=== Publicaciones configuradas ===")
+        publishing.publications.forEach { publication ->
+            println("• ${publication.name}:")
+
+        }
+    }
+}
+
+// Configuración para asegurar que las publicaciones se creen correctamente
+afterEvaluate {
+    // Verificar que todas las publicaciones esperadas existen
+    val expectedPublications = listOf(
+        "kotlinMultiplatform",
+        "androidRelease",
+        "androidDebug",
+        "desktop",
+        "iosArm64",
+        "iosX64",
+        "iosSimulatorArm64"
+    )
+
+    tasks.register("verifyAllPublications") {
+        doLast {
+            val existingPublications = publishing.publications.names
+            expectedPublications.forEach { publicationName ->
+                if (existingPublications.contains(publicationName)) {
+                    println("✅ $publicationName")
+                } else {
+                    println("❌ $publicationName - FALTANTE")
+                }
+            }
+        }
+    }
 }
