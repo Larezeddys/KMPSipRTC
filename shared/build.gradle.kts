@@ -160,6 +160,8 @@ android {
     defaultConfig {
         minSdk = 28
     }
+    sourceSets["main"].manifest.srcFile("src/androidMain/AndroidManifest.xml")
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_1_8
         targetCompatibility = JavaVersion.VERSION_1_8
