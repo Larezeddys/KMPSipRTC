@@ -8,24 +8,26 @@ import java.io.FileOutputStream
 import java.time.LocalDate
 import java.util.Properties
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
-
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.kotlinCocoapods)
     alias(libs.plugins.androidLibrary)
     alias(libs.plugins.jetbrainsCompose)
-    id("maven-publish") // <- esto es necesario
-
     alias(libs.plugins.compose.compiler)
     alias(libs.plugins.kotlinxSerialization)
     alias(libs.plugins.gradleBuildConfig)
-    // Room plugins
     alias(libs.plugins.ksp)
     alias(libs.plugins.androidx.room)
+
+    id("maven-publish")
 }
+
+group = "com.github.Eddyslarez88" // Tu usuario de GitHub
+version = "1.0.0"
 
 kotlin {
     androidTarget {
+        publishLibraryVariants("release", "debug")
         compilations.all {
             compileTaskProvider.configure {
                 compilerOptions {
@@ -59,8 +61,6 @@ kotlin {
         framework {
             baseName = "shared"
             isStatic = true
-            // Requerido si usas NativeSQLiteDriver
-            // linkerOpts.add("-lsqlite3")
         }
     }
 
@@ -102,8 +102,6 @@ kotlin {
                 implementation("io.insert-koin:koin-android:4.1.1")
                 implementation("io.ktor:ktor-client-okhttp:3.3.1")
                 implementation("com.shepeliev:webrtc-kmp:0.125.11")
-
-                // Room SQLite Wrapper (opcional)
                 implementation(libs.androidx.room.sqlite.wrapper)
             }
         }
@@ -133,7 +131,6 @@ kotlin {
                 implementation("dev.onvoid.webrtc:webrtc-java:0.14.0")
                 implementation("io.ktor:ktor-client-okhttp:3.3.1")
 
-                // Detectar arquitectura automáticamente
                 val osName = System.getProperty("os.name").lowercase()
                 val osArch = System.getProperty("os.arch").lowercase()
 
@@ -157,67 +154,9 @@ kotlin {
     }
 }
 
-// CONFIGURACIÓN CORREGIDA DE PUBLICACIÓN - FORMA CORRECTA
-publishing {
-    publications {
-        // Publicación para Kotlin Multiplatform (automática)
-        withType<MavenPublication> {
-            // Configuración común para todas las publicaciones
-            groupId = "com.github.larezeddys"
-            version = "1.0.0"
-
-            // Configurar artifactId basado en el nombre de la publicación
-            when (name) {
-                "kotlinMultiplatform" -> artifactId = "KMPSipRTC"
-                "androidRelease" -> artifactId = "KMPSipRTC-android"
-                "androidDebug" -> artifactId = "KMPSipRTC-android-debug"
-                "desktop" -> artifactId = "KMPSipRTC-desktop"
-                "iosArm64" -> artifactId = "KMPSipRTC-iosarm64"
-                "iosX64" -> artifactId = "KMPSipRTC-iosx64"
-                "iosSimulatorArm64" -> artifactId = "KMPSipRTC-iossimulatorarm64"
-                else -> artifactId = "KMPSipRTC-$name"
-            }
-
-            pom {
-                name.set(artifactId)
-                description.set("Kotlin Multiplatform SIP and WebRTC library - $artifactId")
-                url.set("https://github.com/larezeddys/KMPSipRTC")
-
-                licenses {
-                    license {
-                        name.set("The Apache License, Version 2.0")
-                        url.set("http://www.apache.org/licenses/LICENSE-2.0.txt")
-                    }
-                }
-
-                developers {
-                    developer {
-                        id.set("Larezeddys")
-                        name.set("Eddys larez")
-                    }
-                }
-            }
-        }
-    }
-
-    // Configurar repositorios (opcional)
-    repositories {
-        maven {
-            name = "local"
-            url = uri("${buildDir}/repos")
-        }
-        // Para publicar en MavenLocal
-        mavenLocal()
-    }
-}
-
 android {
     namespace = "com.eddyslarez.kmpsiprtc"
     compileSdk = 35
-
-
-    sourceSets["main"].manifest.srcFile("src/androidMain/AndroidManifest.xml")
-    sourceSets["main"].res.srcDir("src/androidMain/res")
     defaultConfig {
         minSdk = 29
     }
@@ -240,3 +179,7 @@ dependencies {
     add("kspIosArm64", libs.androidx.room.compiler)
     add("kspDesktop", libs.androidx.room.compiler)
 }
+
+// CONFIGURACIÓN PARA JITPACK
+// JitPack automáticamente publica todos los targets de KMP
+// No necesitas configurar publishing manualmente
