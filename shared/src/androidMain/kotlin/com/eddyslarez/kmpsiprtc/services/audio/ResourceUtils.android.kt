@@ -1,10 +1,11 @@
 package com.eddyslarez.kmpsiprtc.services.audio
 
 import android.content.Context
+import com.eddyslarez.kmpsiprtc.platform.AndroidContext
 import com.eddyslarez.kmpsiprtc.platform.getAndroidContext
 
 actual fun createResourceUtils(): ResourceUtils = {
-    val context: Context = getAndroidContext()
+    val context: Context = AndroidContext.get()
 
     AndroidResourceUtils(context)
 } as ResourceUtils

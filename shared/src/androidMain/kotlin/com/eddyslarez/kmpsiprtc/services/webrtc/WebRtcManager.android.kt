@@ -18,6 +18,7 @@ import com.eddyslarez.kmpsiprtc.data.models.AudioUnitTypes
 import com.eddyslarez.kmpsiprtc.data.models.DeviceConnectionState
 import com.eddyslarez.kmpsiprtc.data.models.SdpType
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
+import com.eddyslarez.kmpsiprtc.platform.AndroidContext
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.shepeliev.webrtckmp.AudioStreamTrack
 import com.shepeliev.webrtckmp.IceCandidate
@@ -50,17 +51,16 @@ actual fun createWebRtcManager(): WebRtcManager = AndroidWebRtcManager()
 
 
 class AndroidWebRtcManager() : WebRtcManager {
-    private var application: Application? = null
     private val TAG = "AndroidWebRtcManager"
     private val coroutineScope: CoroutineScope = CoroutineScope(Dispatchers.IO)
 
-    private var peerConnection: com.shepeliev.webrtckmp.PeerConnection? = null
+    private var peerConnection: PeerConnection? = null
     private var localAudioTrack: AudioStreamTrack? = null
     private var remoteAudioTrack: AudioStreamTrack? = null
     private var webRtcEventListener: WebRtcEventListener? = null
     private var isInitialized = false
     private var isLocalAudioReady = false
-    private val context: Context = application!!.applicationContext
+   private val context: Context = AndroidContext.get()
 
     // Simplified audio management
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
