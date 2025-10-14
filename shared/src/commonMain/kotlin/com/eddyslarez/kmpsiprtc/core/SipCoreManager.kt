@@ -1089,7 +1089,7 @@ class SipCoreManager private constructor(
         accountInfo: AccountInfo,
         headers: Map<String, String>
     ): MultiplatformWebSocket {
-        val websocket = createWebSocket(config.webSocketUrl)//, headers)
+        val websocket = createWebSocket(config.webSocketUrl, headers)
         setupWebSocketListeners(websocket, accountInfo)
         websocket.connect()
         websocket.startPingTimer(config.pingIntervalMs)

@@ -10,7 +10,7 @@ import platform.darwin.NSInteger
 import platform.darwin.dispatch_async
 import platform.darwin.dispatch_get_main_queue
 
-actual fun createWebSocket(url: String): MultiplatformWebSocket = IOSWebSocket(url)
+actual fun createWebSocket(url: String, headers: Map<String, String>): MultiplatformWebSocket = IOSWebSocket(url,headers)
 
 
 /**

@@ -1,5 +1,6 @@
 package com.eddyslarez.kmpsiprtc.services.webSocket
 
+import com.eddyslarez.kmpsiprtc.platform.log
 import okhttp3.*
 import okio.ByteString
 import java.util.*
@@ -8,7 +9,7 @@ import kotlin.concurrent.timer
 
 
 
-actual fun createWebSocket(url: String): MultiplatformWebSocket = DesktopWebSocket(url)
+actual fun createWebSocket(url: String, headers: Map<String, String>): MultiplatformWebSocket = DesktopWebSocket(url, headers)
 
 class DesktopWebSocket(private val url: String) : MultiplatformWebSocket {
     private var listener: MultiplatformWebSocket.Listener? = null
@@ -16,6 +17,8 @@ class DesktopWebSocket(private val url: String) : MultiplatformWebSocket {
     private var pingTimer: Timer? = null
     private var renewalTimer: Timer? = null
     private var expirationMap = mutableMapOf<String, Long>()
+    private var client: OkHttpClient? = null
+    private var isConnecting = false
 
     override fun connect() {
         val client = OkHttpClient()
@@ -44,9 +47,21 @@ class DesktopWebSocket(private val url: String) : MultiplatformWebSocket {
     }
 
     override fun close(code: Int, reason: String) {
-        webSocket?.close(code, reason)
-        stopPingTimer()
-        stopRegistrationRenewalTimer()
+        try {
+            isConnecting = false
+            stopPingTimer()
+            stopRegistrationRenewalTimer()
+
+            webSocket?.close(code, reason)
+            webSocket = null
+
+            // Cerrar el cliente OkHttp
+            client?.dispatcher?.executorService?.shutdown()
+            client = null
+
+        } catch (e: Exception) {
+            log.e(tag = "AndroidWebSocket") { "Error closing WebSocket: ${e.message}" }
+        }
     }
 
     override fun isConnected(): Boolean = webSocket != null
