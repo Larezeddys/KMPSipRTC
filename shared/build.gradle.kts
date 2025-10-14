@@ -178,6 +178,9 @@ publishing {
 android {
     namespace = "com.eddyslarez.kmpsiprtc"
     compileSdk = 35
+
+    sourceSets["main"].manifest.srcFile("src/androidMain/AndroidManifest.xml")
+    sourceSets["main"].res.srcDir("src/androidMain/res")
     defaultConfig {
         minSdk = 29
     }
