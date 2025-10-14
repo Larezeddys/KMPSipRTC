@@ -93,7 +93,7 @@ kotlin {
                 implementation("io.ktor:ktor-client-okhttp:3.3.1")
 
                 // WebRTC Android NATIVO
-                implementation("org.webrtc:google-webrtc:1.0.32006")
+                implementation("com.shepeliev:webrtc-kmp:0.125.11")
 
                 // Room Android
                 implementation(libs.androidx.room.sqlite.wrapper)
