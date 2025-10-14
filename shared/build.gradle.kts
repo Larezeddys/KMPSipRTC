@@ -22,7 +22,7 @@ plugins {
     id("maven-publish")
 }
 
-group = "com.github.Eddyslarez88" // Tu usuario de GitHub
+group = "com.github.larezeddys"
 version = "1.0.0"
 
 kotlin {
@@ -158,7 +158,7 @@ android {
     namespace = "com.eddyslarez.kmpsiprtc"
     compileSdk = 35
     defaultConfig {
-        minSdk = 29
+        minSdk = 28
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_1_8
