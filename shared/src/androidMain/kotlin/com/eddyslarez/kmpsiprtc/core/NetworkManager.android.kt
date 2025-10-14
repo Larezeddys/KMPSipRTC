@@ -9,6 +9,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import androidx.annotation.RequiresPermission
+import com.eddyslarez.kmpsiprtc.platform.AndroidContext
 
 import kotlinx.coroutines.*
 import java.net.HttpURLConnection
@@ -19,8 +20,8 @@ import kotlin.math.min
 actual fun createNetworkManager(): NetworkManager =AndroidNetworkManager()
 
 class AndroidNetworkManager() : NetworkManager {
-    private lateinit var application: Application
-    private val context: Context = application.applicationContext
+    private val context: Context = AndroidContext.get()
+
 
     companion object {
         private const val TAG = "AndroidNetworkManager"
