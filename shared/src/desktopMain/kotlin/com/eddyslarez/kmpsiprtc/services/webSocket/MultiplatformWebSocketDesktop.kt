@@ -11,7 +11,7 @@ import kotlin.concurrent.timer
 
 actual fun createWebSocket(url: String, headers: Map<String, String>): MultiplatformWebSocket = DesktopWebSocket(url, headers)
 
-class DesktopWebSocket(private val url: String) : MultiplatformWebSocket {
+class DesktopWebSocket(private val url: String, headers: Map<String, String>) : MultiplatformWebSocket {
     private var listener: MultiplatformWebSocket.Listener? = null
     private var webSocket: WebSocket? = null
     private var pingTimer: Timer? = null
