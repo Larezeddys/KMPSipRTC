@@ -61,6 +61,9 @@ class AndroidWebSocket(private val url: String, private val headers: Map<String,
                 }
 
                 override fun onMessage(ws: WebSocket, text: String) {
+                    log.d(tag = "AndroidWebSocket") {
+                        "✅ WebSocket onMessage. : ${ws} , mensaje {$text}"
+                    }
                     listener?.onMessage(text)
                 }
 

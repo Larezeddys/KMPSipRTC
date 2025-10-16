@@ -1101,6 +1101,9 @@ class SipCoreManager private constructor(
         websocket.setListener(object : MultiplatformWebSocket.Listener {
             override fun onOpen() {
                 CoroutineScope(Dispatchers.IO).launch {
+                    log.d(tag = TAG) { "WebSocket open for ${accountInfo}" +
+                            "${accountInfo.username}@${accountInfo.domain}" }
+
                     lastConnectionCheck = Clock.System.now().toEpochMilliseconds()
                     messageHandler.sendRegister(accountInfo, isAppInBackground)
                 }
