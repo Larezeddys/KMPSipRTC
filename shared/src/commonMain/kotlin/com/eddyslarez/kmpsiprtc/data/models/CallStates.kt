@@ -45,6 +45,7 @@ enum class CallErrorReason {
     NETWORK_ERROR,
     AUTHENTICATION_FAILED,
     SERVER_ERROR,
+    MEDIA_ERROR,
     UNKNOWN
 }
 
@@ -100,6 +101,7 @@ object SipErrorMapper {
             CallErrorReason.AUTHENTICATION_FAILED -> "Error de autenticación"
             CallErrorReason.SERVER_ERROR -> "Error del servidor"
             CallErrorReason.UNKNOWN -> "Error desconocido"
+            CallErrorReason.MEDIA_ERROR -> "Error de medios"
         }
     }
 }

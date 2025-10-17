@@ -33,9 +33,9 @@ object SipMessageBuilder {
             "Building REGISTER message:" +
                     "\nAccount: ${accountInfo.username}@${accountInfo.domain}" +
                     "\nIs App In Background: $isAppInBackground" +
-                    "\nToken: ${accountInfo.token}" +
-                    "\nProvider: ${accountInfo.provider}" +
-                    "\nUser Agent: ${accountInfo.userAgent}"
+                    "\nToken: ${accountInfo.token.value}" +
+                    "\nProvider: ${accountInfo.provider.value}" +
+                    "\nUser Agent: ${accountInfo.userAgent.value}"
         }
         val currentCSeq = accountInfo.incrementCSeq()
 
@@ -46,14 +46,14 @@ object SipMessageBuilder {
         builder.append("To: <sip:${accountInfo.username}@${accountInfo.domain}>\r\n")
         builder.append("Call-ID: $callId\r\n")
         builder.append("CSeq: $currentCSeq REGISTER\r\n")
-        builder.append("User-Agent: ${accountInfo.userAgent}\r\n")
+        builder.append("User-Agent: ${accountInfo.userAgent.value}\r\n")
 
         // Contact header based on mode
         builder.append("Contact: <sip:${accountInfo.username}@${accountInfo.domain}")
 
         if (isAppInBackground) {
             log.d(tag = TAG) { "Adding push notification parameters to Contact header" }
-            builder.append(";pn-prid=${accountInfo.token};pn-provider=${accountInfo.provider}")
+            builder.append(";pn-prid=${accountInfo.token.value};pn-provider=${accountInfo.provider.value}")
         } else {
             log.d(tag = TAG) { "Building Contact header WITHOUT push notification parameters" }
         }
@@ -62,8 +62,8 @@ object SipMessageBuilder {
         builder.append("Expires: $DEFAULT_EXPIRES\r\n")
 
         // Authorization if needed
-        if (isAuthenticated && accountInfo.authorizationHeader != null) {
-            builder.append("Authorization: ${accountInfo.authorizationHeader}\r\n")
+        if (isAuthenticated && accountInfo.authorizationHeader.value != null) {
+            builder.append("Authorization: ${accountInfo.authorizationHeader.value}\r\n")
         }
 
         builder.append("Content-Length: 0\r\n\r\n")
@@ -111,7 +111,7 @@ object SipMessageBuilder {
             callId = callId,
             fromTag = fromTag,
             isAppInBackground = false,
-            isAuthenticated = accountInfo.authorizationHeader != null
+            isAuthenticated = accountInfo.authorizationHeader.value != null
         ).replace("Expires: $DEFAULT_EXPIRES", "Expires: $UNREGISTER_EXPIRES")
             .replace("expires=$DEFAULT_EXPIRES", "expires=$UNREGISTER_EXPIRES")
     }
@@ -150,8 +150,8 @@ object SipMessageBuilder {
             builder.append("X-MD5: $md5Hash\r\n")
         }
 
-        if (isAuthenticated && accountInfo.authorizationHeader != null) {
-            builder.append("Authorization: ${accountInfo.authorizationHeader}\r\n")
+        if (isAuthenticated && accountInfo.authorizationHeader.value != null) {
+            builder.append("Authorization: ${accountInfo.authorizationHeader.value}\r\n")
         }
 
         builder.append("Content-Type: application/sdp\r\n")
@@ -608,7 +608,7 @@ object SipMessageBuilder {
                 append("Call-ID: ${callData.callId}\r\n")
                 append("CSeq: $currentCSeq INFO\r\n")
                 append("Contact: <sip:${accountInfo.username}@${accountInfo.domain};transport=ws>\r\n")
-                append("User-Agent: ${accountInfo.userAgent}\r\n")
+                append("User-Agent: ${accountInfo.userAgent.value}\r\n")
                 append("Content-Type: application/dtmf-relay\r\n")
                 append("Content-Length: ${dtmfContent.length}\r\n")
                 append("\r\n")

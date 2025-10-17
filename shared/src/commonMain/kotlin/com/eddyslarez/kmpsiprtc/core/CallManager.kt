@@ -14,6 +14,7 @@ import com.eddyslarez.kmpsiprtc.services.calls.CallHoldManager
 import com.eddyslarez.kmpsiprtc.services.calls.CallStateManager
 import com.eddyslarez.kmpsiprtc.services.calls.MultiCallManager
 import com.eddyslarez.kmpsiprtc.services.sip.SipMessageHandler
+import com.eddyslarez.kmpsiprtc.services.sip.SipMessageParser
 import com.eddyslarez.kmpsiprtc.services.webrtc.WebRtcManager
 import com.eddyslarez.kmpsiprtc.utils.generateId
 import com.eddyslarez.kmpsiprtc.utils.generateSipTag
@@ -101,26 +102,19 @@ class CallManager(
      */
     fun endCall(callId: String? = null) {
         val accountInfo = sipCoreManager.currentAccountInfo ?: run {
-            log.e(tag = TAG) { "No current account available for end call" }
+            log.e(tag = TAG) { "No account" }
             return
         }
 
-        val targetCallData = if (callId != null) {
-            MultiCallManager.getCall(callId)
-        } else {
-            accountInfo.currentCallData.value
-        } ?: run {
-            log.e(tag = TAG) { "No call data available for end" }
+        // Obtener CallData de AccountInfo (fuente primaria)
+        val targetCallData = accountInfo.currentCallData.value ?: run {
+            log.e(tag = TAG) { "No call data" }
             return
         }
 
-        val callState = if (callId != null) {
-            MultiCallManager.getCallState(callId)
-        } else {
-            CallStateManager.getCurrentState()
-        }
+        val callState = CallStateManager.getCurrentState()
 
-        if (callState?.isActive() != true) {
+        if (!callState.isActive()) {
             log.w(tag = TAG) { "No active call to end" }
             return
         }
@@ -130,7 +124,7 @@ class CallManager(
 
         log.d(tag = TAG) { "Ending call: ${targetCallData.callId}" }
 
-        // Detener todos los ringtones inmediatamente
+        // Detener ringtones
         audioManager.stopAllRingtones()
 
         CallStateManager.startEnding(targetCallData.callId)
@@ -138,62 +132,58 @@ class CallManager(
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                // Enviar mensaje SIP apropiado
-                val messageJob = launch {
-                    when (currentState) {
-                        CallState.CONNECTED, CallState.STREAMS_RUNNING, CallState.PAUSED -> {
-                            log.d(tag = TAG) { "Sending BYE for established call" }
-                            messageHandler.sendBye(accountInfo, targetCallData)
-                            sipCoreManager.callHistoryManager.addCallLog(targetCallData, CallTypes.SUCCESS, endTime)
-                        }
-                        CallState.OUTGOING_INIT, CallState.OUTGOING_PROGRESS, CallState.OUTGOING_RINGING -> {
-                            log.d(tag = TAG) { "Sending CANCEL for outgoing call" }
-                            messageHandler.sendCancel(accountInfo, targetCallData)
-                            sipCoreManager.callHistoryManager.addCallLog(targetCallData, CallTypes.ABORTED, endTime)
-                        }
-                        CallState.INCOMING_RECEIVED -> {
-                            log.d(tag = TAG) { "Sending DECLINE for incoming call" }
-                            messageHandler.sendDeclineResponse(accountInfo, targetCallData)
-                            sipCoreManager.callHistoryManager.addCallLog(targetCallData, CallTypes.DECLINED, endTime)
-                        }
-                        else -> {
-                            log.w(tag = TAG) { "Ending call in unexpected state: $currentState" }
-                            messageHandler.sendBye(accountInfo, targetCallData)
-                        }
+                when (currentState) {
+                    CallState.CONNECTED, CallState.STREAMS_RUNNING, CallState.PAUSED -> {
+                        log.d(tag = TAG) { "Sending BYE" }
+                        messageHandler.sendBye(accountInfo, targetCallData)
+                        sipCoreManager.callHistoryManager.addCallLog(
+                            targetCallData,
+                            CallTypes.SUCCESS,
+                            endTime
+                        )
+                    }
+
+                    CallState.OUTGOING_INIT, CallState.OUTGOING_PROGRESS, CallState.OUTGOING_RINGING -> {
+                        log.d(tag = TAG) { "Sending CANCEL" }
+                        messageHandler.sendCancel(accountInfo, targetCallData)
+                        sipCoreManager.callHistoryManager.addCallLog(
+                            targetCallData,
+                            CallTypes.ABORTED,
+                            endTime
+                        )
+                    }
+
+                    CallState.INCOMING_RECEIVED -> {
+                        log.d(tag = TAG) { "Sending DECLINE" }
+                        messageHandler.sendDeclineResponse(accountInfo, targetCallData)
+                        sipCoreManager.callHistoryManager.addCallLog(
+                            targetCallData,
+                            CallTypes.DECLINED,
+                            endTime
+                        )
+                    }
+
+                    else -> {
+                        messageHandler.sendBye(accountInfo, targetCallData)
                     }
                 }
 
-                // Limpieza en paralelo
-                val cleanupJob = launch {
-                    delay(500)
+                delay(500)
+                audioManager.dispose()
 
-                    if (MultiCallManager.getAllCalls().size <= 1) {
-                        audioManager.dispose()
-                        log.d(tag = TAG) { "Audio disposed - no more active calls" }
-                    }
+                delay(500)
+                CallStateManager.callEnded(targetCallData.callId)
+                sipCoreManager.notifyCallStateChanged(CallState.ENDED)
 
-                    delay(500)
-                    CallStateManager.callEnded(targetCallData.callId)
-                    sipCoreManager.notifyCallStateChanged(CallState.ENDED)
+                accountInfo.resetCallState()
+                sipCoreManager.handleCallTermination()
 
-                    if (accountInfo.currentCallData.value?.callId == targetCallData.callId) {
-                        accountInfo.resetCallState()
-                    }
-
-                    sipCoreManager.handleCallTermination()
-                }
-
-                messageJob.join()
-                cleanupJob.join()
-
-                log.d(tag = TAG) { "Call cleanup completed successfully" }
+                log.d(tag = TAG) { "Call cleanup completed" }
 
             } catch (e: Exception) {
-                log.e(tag = TAG) { "Error during call cleanup: ${e.message}" }
+                log.e(tag = TAG) { "Error during cleanup: ${e.message}" }
                 audioManager.stopAllRingtones()
-                if (accountInfo.currentCallData.value?.callId == targetCallData.callId) {
-                    accountInfo.resetCallState()
-                }
+                accountInfo.resetCallState()
             }
         }
     }
@@ -203,58 +193,101 @@ class CallManager(
      */
     fun acceptCall(callId: String? = null) {
         val accountInfo = sipCoreManager.currentAccountInfo ?: run {
-            log.e(tag = TAG) { "No current account available for accepting call" }
+            log.e(tag = TAG) { "❌ No current account" }
             return
         }
 
-        val targetCallData = if (callId != null) {
-            MultiCallManager.getCall(callId)
-        } else {
-            accountInfo.currentCallData.value
-        } ?: run {
-            log.e(tag = TAG) { "No call data available for accepting" }
+        log.d(tag = TAG) { "🟢 Accept call requested for callId: $callId" }
+
+        // ✅ SIEMPRE priorizar AccountInfo
+        val targetCallData = accountInfo.currentCallData.value ?: run {
+            log.e(tag = TAG) { "❌ No call data in AccountInfo" }
             return
         }
 
-        val callState = if (callId != null) {
-            MultiCallManager.getCallState(callId)
-        } else {
-            CallStateManager.getCurrentState()
-        }
-
-        if (targetCallData.direction != CallDirections.INCOMING ||
-            callState?.state != CallState.INCOMING_RECEIVED) {
-            log.w(tag = TAG) { "Cannot accept call - invalid state or direction" }
+        // Validar que es entrante
+        if (targetCallData.direction != CallDirections.INCOMING) {
+            log.w(tag = TAG) { "❌ Cannot accept - not incoming" }
             return
         }
 
+        // Validar estado
+        val callState = CallStateManager.getCurrentState()
+        if (callState.state != CallState.INCOMING_RECEIVED) {
+            log.w(tag = TAG) { "❌ Cannot accept - invalid state: ${callState.state}" }
+            return
+        }
+
+        // ✅ VALIDACIÓN CRÍTICA DEL SDP
+        val remoteSdp = targetCallData.remoteSdp
+
+        log.d(tag = TAG) { "🔍 Validating remote SDP..." }
+        log.d(tag = TAG) { "  - remoteSdp length: ${remoteSdp.length}" }
+
+        if (remoteSdp.isBlank()) {
+            log.e(tag = TAG) { "❌ FATAL: remoteSdp is blank!" }
+            log.e(tag = TAG) { "  - callId: ${targetCallData.callId}" }
+            log.e(tag = TAG) { "  - from: ${targetCallData.from}" }
+            log.e(tag = TAG) { "  - to: ${targetCallData.to}" }
+            log.e(tag = TAG) { "  - originalInviteMessage length: ${targetCallData.originalInviteMessage.length}" }
+
+            CallStateManager.callError(
+                targetCallData.callId,
+                errorReason = CallErrorReason.MEDIA_ERROR
+            )
+            sipCoreManager.sipCallbacks?.onCallFailed("Remote SDP not available")
+            return
+        }
+
+        log.d(tag = TAG) { "✅ SDP validation passed: ${remoteSdp.length} chars" }
         log.d(tag = TAG) { "Accepting call: ${targetCallData.callId}" }
+
         audioManager.stopAllRingtones()
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
+                log.d(tag = TAG) { "🎤 Preparing audio..." }
                 audioManager.prepareAudioForIncomingCall()
-                val sdp = audioManager.createAnswer( targetCallData.remoteSdp)
-                targetCallData.localSdp = sdp
 
+                log.d(tag = TAG) { "📞 Creating answer with remote SDP" }
+                val answerSdp = audioManager.createAnswer(remoteSdp)
+
+                log.d(tag = TAG) { "✅ Answer created: ${answerSdp.length} chars" }
+                targetCallData.localSdp = answerSdp
+
+                log.d(tag = TAG) { "📤 Sending 200 OK..." }
                 messageHandler.sendInviteOkResponse(accountInfo, targetCallData)
 
                 CallStateManager.callConnected(targetCallData.callId, 200)
                 sipCoreManager.notifyCallStateChanged(CallState.CONNECTED)
 
                 delay(500)
+
+                log.d(tag = TAG) { "🔊 Enabling audio..." }
                 audioManager.setAudioEnabled(true)
 
+                log.d(tag = TAG) { "✅ Call accepted successfully" }
+
             } catch (e: Exception) {
-                log.e(tag = TAG) { "Error accepting call: ${e.message}" }
+                log.e(tag = TAG) { "💥 Error accepting call: ${e.message}" }
+                log.e(tag = TAG) { e.stackTraceToString() }
+
                 CallStateManager.callError(
                     targetCallData.callId,
-                    errorReason = CallErrorReason.NETWORK_ERROR
+                    errorReason = CallErrorReason.MEDIA_ERROR
                 )
-                declineCall(callId)
+
+                sipCoreManager.sipCallbacks?.onCallFailed("Failed to accept: ${e.message}")
+
+                try {
+                    declineCall(callId)
+                } catch (declineError: Exception) {
+                    log.e(tag = TAG) { "Error declining after failure: ${declineError.message}" }
+                }
             }
         }
     }
+
 
     /**
      * Rechazar llamada entrante
@@ -265,33 +298,69 @@ class CallManager(
             return
         }
 
-        val targetCallData = if (callId != null) {
-            MultiCallManager.getCall(callId)
-        } else {
-            accountInfo.currentCallData.value
+        // ✅ CORRECCIÓN: Usar misma lógica que acceptCall para obtener CallData
+        val targetCallData = when {
+            callId != null -> {
+                // Primero buscar en AccountInfo
+                val accountCallData = accountInfo.currentCallData.value
+                if (accountCallData?.callId == callId) {
+                    log.d(tag = TAG) { "✅ Found call in AccountInfo (preferred)" }
+                    accountCallData
+                } else {
+                    log.d(tag = TAG) { "Looking in MultiCallManager" }
+                    MultiCallManager.getCall(callId)
+                }
+            }
+
+            else -> {
+                log.d(tag = TAG) { "Using current call from AccountInfo" }
+                accountInfo.currentCallData.value
+            }
         } ?: run {
             log.e(tag = TAG) { "No call data available for declining" }
             return
         }
 
         if (targetCallData.direction != CallDirections.INCOMING) {
-            log.w(tag = TAG) { "Cannot decline call - not incoming" }
+            log.w(tag = TAG) { "Cannot decline call - not incoming. Direction: ${targetCallData.direction}" }
             return
         }
 
         log.d(tag = TAG) { "Declining call: ${targetCallData.callId}" }
 
-        if (targetCallData.toTag?.isEmpty() == true) {
+        // ✅ CORRECCIÓN: Asegurar toTag
+        if (targetCallData.toTag.isNullOrEmpty()) {
             targetCallData.toTag = generateId()
+            log.d(tag = TAG) { "Generated toTag: ${targetCallData.toTag}" }
         }
 
-        audioManager.stopRingtone()
+        // ✅ CORRECCIÓN: Detener todos los ringtones, no solo uno
+        log.d(tag = TAG) { "Stopping all ringtones..." }
+        audioManager.stopAllRingtones()
+
+        // Enviar respuesta de rechazo
+        log.d(tag = TAG) { "Sending 603 Decline response..." }
         messageHandler.sendDeclineResponse(accountInfo, targetCallData)
 
+        // Registrar en historial
         val endTime = Clock.System.now().toEpochMilliseconds()
         sipCoreManager.callHistoryManager.addCallLog(targetCallData, CallTypes.DECLINED, endTime)
+        log.d(tag = TAG) { "Call log recorded as DECLINED" }
 
+        // Actualizar estado
         CallStateManager.callEnded(targetCallData.callId, sipReason = "Declined")
+        sipCoreManager.notifyCallStateChanged(CallState.ENDED)
+
+        // Limpiar recursos
+        if (accountInfo.currentCallData.value?.callId == targetCallData.callId) {
+            CoroutineScope(Dispatchers.IO).launch {
+                accountInfo.resetCallState()
+                log.d(tag = TAG) { "AccountInfo call state reset" }
+
+            }
+        }
+
+        log.d(tag = TAG) { "✅ Call declined successfully: ${targetCallData.callId}" }
     }
 
     /**
@@ -319,7 +388,8 @@ class CallManager(
 
         val currentState = CallStateManager.getCurrentState()
         if (currentState.state != CallState.STREAMS_RUNNING &&
-            currentState.state != CallState.CONNECTED) {
+            currentState.state != CallState.CONNECTED
+        ) {
             log.w(tag = TAG) { "Cannot hold call in current state: ${currentState.state}" }
             return
         }
@@ -452,10 +522,11 @@ class CallManager(
 
     private suspend fun sendSingleDtmf(digit: Char, duration: Int): Boolean {
         val currentAccount = sipCoreManager.currentAccountInfo
-        val callData = currentAccount?.currentCallData
+        val callData = currentAccount?.currentCallData?.value
 
         if (currentAccount == null || callData == null ||
-            !CallStateManager.getCurrentState().isConnected()) {
+            !CallStateManager.getCurrentState().isConnected()
+        ) {
             return false
         }
 
@@ -516,18 +587,31 @@ class CallManager(
      * Manejar cierre de WebRTC
      */
     fun handleWebRtcClosed() {
-        sipCoreManager.currentAccountInfo?.currentCallData?.value.let { callData ->
-            CallStateManager.callEnded(callData?.callId ?: generateId())
+        val callData = sipCoreManager.currentAccountInfo?.currentCallData?.value
+
+        if (callData == null) {
+            log.w(tag = TAG) { "WebRTC closed but no active call data found" }
+            CallStateManager.callEnded(generateId())
+            sipCoreManager.notifyCallStateChanged(CallState.ENDED)
+            return
         }
 
+        // Marca la llamada como terminada
+        CallStateManager.callEnded(callData.callId)
         sipCoreManager.notifyCallStateChanged(CallState.ENDED)
 
-        sipCoreManager.currentAccountInfo?.currentCallData?.value.let { callData ->
-            val endTime = Clock.System.now().toEpochMilliseconds()
-            val callType = determineCallType(callData!!, CallStateManager.getCurrentState().state)
+        // Guarda registro de la llamada si aún existe el CallData
+        val endTime = Clock.System.now().toEpochMilliseconds()
+        val finalState = CallStateManager.getCurrentState().state
+        val callType = determineCallType(callData, finalState)
+
+        try {
             sipCoreManager.callHistoryManager.addCallLog(callData, callType, endTime)
+        } catch (e: Exception) {
+            log.e(tag = TAG) { "Error adding call log after WebRTC closed: ${e.message}" }
         }
     }
+
 
     private fun determineCallType(callData: CallData, finalState: CallState): CallTypes {
         return when (finalState) {
@@ -537,6 +621,7 @@ class CallManager(
             } else {
                 CallTypes.ABORTED
             }
+
             else -> if (callData.direction == CallDirections.INCOMING) {
                 CallTypes.MISSED
             } else {

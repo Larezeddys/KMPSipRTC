@@ -15,6 +15,7 @@ import kotlinx.datetime.Clock
 import com.eddyslarez.kmpsiprtc.utils.generateId
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.services.calls.CallStateManager
+import com.eddyslarez.kmpsiprtc.services.calls.MultiCallManager
 import kotlinx.coroutines.IO
 
 class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
@@ -468,45 +469,64 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
     }
 
     /**
-     * Maneja request INVITE entrante
+     * Maneja request INVITE entrante con preservación robusta de SDP
      */
     private suspend fun handleInviteRequest(lines: List<String>, accountInfo: AccountInfo) {
         try {
-            log.d(tag = TAG) { "Handling incoming INVITE request" }
+            log.d(tag = TAG) { "🔵 [INVITE] Handling incoming INVITE request" }
 
-            // CRÍTICO: Detener cualquier ringtone existente primero
+            // Detener cualquier ringtone existente
             sipCoreManager.audioManager.stopAllRingtones()
-
             sipCoreManager.currentAccountInfo = accountInfo
 
-            // Extraer headers MEJORADO
+            // === EXTRAER SDP ===
+            val fullMessage = lines.joinToString("\r\n")
+            val remoteSdp = SipMessageParser.extractSdpContent(fullMessage)
+
+            if (remoteSdp.isBlank()) {
+                log.e(tag = TAG) { "❌ FATAL: INVITE without SDP body!" }
+                // Enviar error 400
+                val viaHeader = SipMessageParser.extractHeader(lines, "Via")
+                val fromHeader = SipMessageParser.extractHeader(lines, "From")
+                val toHeader = SipMessageParser.extractHeader(lines, "To")
+                val callIdHeader = SipMessageParser.extractHeader(lines, "Call-ID")
+                val cseqHeader = SipMessageParser.extractHeader(lines, "CSeq")
+
+                val errorResponse = buildString {
+                    append("SIP/2.0 400 Bad Request\r\n")
+                    append("Via: $viaHeader\r\n")
+                    append("From: $fromHeader\r\n")
+                    append("To: $toHeader\r\n")
+                    append("Call-ID: $callIdHeader\r\n")
+                    append("CSeq: $cseqHeader\r\n")
+                    append("Content-Length: 0\r\n\r\n")
+                }
+                accountInfo.webSocketClient.value?.send(errorResponse)
+                return
+            }
+
+            log.d(tag = TAG) { "✅ SDP validated: ${remoteSdp.length} chars" }
+
+            // === EXTRAER HEADERS ===
             val fromHeader = SipMessageParser.extractHeader(lines, "From")
             val toHeader = SipMessageParser.extractHeader(lines, "To")
             val callIdHeader = SipMessageParser.extractHeader(lines, "Call-ID")
             val viaHeader = SipMessageParser.extractHeader(lines, "Via")
             val contactHeader = SipMessageParser.extractHeader(lines, "Contact")
             val cseqHeader = SipMessageParser.extractHeader(lines, "CSeq")
-            val remoteSdp = SipMessageParser.extractSdpContent(lines.joinToString("\r\n"))
 
-            // VALIDACIÓN CRÍTICA
-            if (callIdHeader.isEmpty() || fromHeader.isEmpty() || viaHeader.isEmpty()) {
-                log.e(tag = TAG) { "ERROR: Missing required headers in INVITE" }
-                return
-            }
-
+            // === PARSEAR CAMPOS ===
             val fromUri = SipMessageParser.extractUriFromHeader(fromHeader)
             val fromUser = SipMessageParser.extractUserFromUri(fromUri)
             val fromTag = SipMessageParser.extractTag(fromHeader)
             val displayName = SipMessageParser.extractDisplayName(fromHeader)
-
-            // CRÍTICO: Extraer Contact URI correctamente
             val remoteContactUri = if (contactHeader.isNotEmpty()) {
                 SipMessageParser.extractUriFromContact(contactHeader)
             } else {
                 "sip:$fromUser@${accountInfo.domain}"
             }
 
-            // Crear datos de llamada entrante
+            // === CREAR CALLDATA UNA SOLA VEZ ===
             val callData = CallData(
                 callId = callIdHeader,
                 from = fromUser,
@@ -515,30 +535,34 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 startTime = Clock.System.now().toEpochMilliseconds(),
                 fromTag = fromTag,
                 toTag = generateId(),
-                remoteContactUri = remoteContactUri, // CRÍTICO: Guardar correctamente
+                remoteContactUri = remoteContactUri,
                 remoteDisplayName = displayName,
-                remoteSdp = remoteSdp,
+                remoteSdp = remoteSdp, // ✅ Asignar inmediatamente
+                localSdp = "",
                 via = viaHeader,
-                originalInviteMessage = lines.joinToString("\r\n")
+                originalInviteMessage = fullMessage
             )
 
-            // CRÍTICO: Extraer y almacenar CSeq
+            // Extraer CSeq
             val cseqParts = cseqHeader.split(" ")
             if (cseqParts.size >= 2) {
                 callData.lastCSeqValue = cseqParts[0].toIntOrNull() ?: 1
             }
 
+            // ✅ GUARDAR EN UN SOLO LUGAR
             accountInfo.currentCallData.value = callData
-            callData.storeInviteMessage(lines.joinToString("\r\n"))
 
-            // CRÍTICO: Actualizar CSeq del account para respuestas
+            // ✅ AGREGAR A MULTICALL MANAGER UNA SOLA VEZ
+            MultiCallManager.addCall(callData)
+
+            // Actualizar CSeq si corresponde
             SipMessageParser.updateCSeqIfPresent(lines, accountInfo)
 
-            // Estado de llamada entrante
+            // === CAMBIO DE ESTADO ===
             CallStateManager.incomingCallReceived(callData.callId, fromUser)
             sipCoreManager.notifyCallStateChanged(CallState.INCOMING_RECEIVED)
 
-            // Enviar respuestas SIP
+            // === ENVIAR RESPUESTAS SIP ===
             val tryingResponse = SipMessageBuilder.buildTryingResponse(accountInfo, callData)
             accountInfo.webSocketClient.value?.send(tryingResponse)
 
@@ -548,50 +572,69 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 accountInfo.webSocketClient.value?.send(ringingResponse)
 
                 delay(200)
-
                 sipCoreManager.audioManager.playIncomingRingtone(syncVibration = true)
             }
 
-            log.d(tag = TAG) { "Incoming call setup completed for ${callData.callId}" }
+            log.d(tag = TAG) { "✅ [INVITE] Incoming call setup completed" }
 
         } catch (e: Exception) {
-            log.e(tag = TAG) { "Error handling incoming INVITE: ${e.message}" }
+            log.e(tag = TAG) { "💥 Exception in handleInviteRequest: ${e.message}" }
+            log.e(tag = TAG) { e.stackTraceToString() }
             sipCoreManager.audioManager.stopAllRingtones()
         }
     }
-
-    /**
-     * Maneja request BYE
-     */
     /**
      * Maneja request BYE
      */
     private fun handleByeRequest(lines: List<String>, accountInfo: AccountInfo) {
-        log.d(tag = TAG) { "Handling BYE request" }
+        log.d(tag = TAG) { "🔴 Handling BYE request" }
 
         try {
-            // Detener todos los ringtones
+            // ✅ DETENER RINGTONES INMEDIATAMENTE
             sipCoreManager.audioManager.stopAllRingtones()
 
             // Enviar 200 OK para BYE
             val okResponse = SipMessageBuilder.buildByeOkResponse(accountInfo, lines)
             accountInfo.webSocketClient.value?.send(okResponse)
+            log.d(tag = TAG) { "✅ 200 OK sent for BYE" }
 
-            // Actualizar estado de llamada
+            // Obtener callData
             accountInfo.currentCallData.value?.let { callData ->
+                log.d(tag = TAG) { "Processing BYE for call: ${callData.callId}" }
+
+                // Actualizar estado
                 CallStateManager.callEnded(callData.callId, sipReason = "Remote hangup")
                 sipCoreManager.notifyCallStateChanged(CallState.ENDED)
 
-                // NUEVO: Notificar al PushModeManager que la llamada terminó para esta cuenta específica
+                // Notificar cuenta específica
                 val accountKey = "${accountInfo.username}@${accountInfo.domain}"
                 sipCoreManager.notifyCallEndedForSpecificAccount(accountKey)
 
-                // Limpiar recursos
-                cleanupCall(callData)
+                // ✅ LIMPIEZA ASÍNCRONA PERO RÁPIDA
+                CoroutineScope(Dispatchers.IO).launch {
+                    try {
+                        // Limpiar WebRTC
+                        sipCoreManager.webRtcManager.dispose()
+                        delay(200)
+
+                        // Limpiar AccountInfo
+                        accountInfo.resetCallState()
+
+                        // Limpiar MultiCallManager
+                        MultiCallManager.removeCall(callData.callId)
+
+                        log.d(tag = TAG) { "✅ BYE cleanup completed" }
+                    } catch (e: Exception) {
+                        log.e(tag = TAG) { "Error in BYE cleanup: ${e.message}" }
+                    }
+                }
+            } ?: run {
+                log.w(tag = TAG) { "⚠️ No call data found for BYE" }
             }
 
         } catch (e: Exception) {
-            log.e(tag = TAG) { "Error handling BYE request: ${e.message}" }
+            log.e(tag = TAG) { "❌ Error handling BYE request: ${e.message}" }
+            sipCoreManager.audioManager.stopAllRingtones()
         }
     }
 
@@ -599,43 +642,63 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
      * Maneja request CANCEL
      */
     private fun handleCancelRequest(lines: List<String>, accountInfo: AccountInfo) {
-        log.d(tag = TAG) { "Handling CANCEL request" }
+        log.d(tag = TAG) { "🟡 Handling CANCEL request" }
 
         try {
-            // CRÍTICO: Detener ringtone INMEDIATAMENTE y DEFINITIVAMENTE
+            // ✅ DETENER RINGTONES INMEDIATAMENTE Y DEFINITIVAMENTE
             sipCoreManager.audioManager.stopAllRingtones()
 
-            // Dar tiempo para que se detenga completamente
+            // ✅ DOBLE VERIFICACIÓN CON DELAY
             CoroutineScope(Dispatchers.IO).launch {
-                delay(100) // Pequeño delay para asegurar que se detiene
-                sipCoreManager.audioManager.stopAllRingtones() // Doble verificación
+                delay(100)
+                sipCoreManager.audioManager.stopAllRingtones()
             }
 
             // Enviar 200 OK para CANCEL
             val cancelOkResponse = SipMessageBuilder.buildCancelOkResponse(accountInfo, lines)
             accountInfo.webSocketClient.value?.send(cancelOkResponse)
+            log.d(tag = TAG) { "✅ 200 OK sent for CANCEL" }
 
             // Enviar 487 Request Terminated para el INVITE original
             accountInfo.currentCallData.value?.let { callData ->
-                val requestTerminatedResponse =
-                    SipMessageBuilder.buildRequestTerminatedResponse(accountInfo, callData)
+                val requestTerminatedResponse = SipMessageBuilder.buildRequestTerminatedResponse(
+                    accountInfo,
+                    callData
+                )
                 accountInfo.webSocketClient.value?.send(requestTerminatedResponse)
+                log.d(tag = TAG) { "✅ 487 Request Terminated sent" }
 
                 // Actualizar estado
                 CallStateManager.callEnded(callData.callId, 487, "Request Terminated")
                 sipCoreManager.notifyCallStateChanged(CallState.ENDED)
 
-                // NUEVO: Notificar al PushModeManager que la llamada terminó para esta cuenta específica
+                // Notificar cuenta específica
                 val accountKey = "${accountInfo.username}@${accountInfo.domain}"
                 sipCoreManager.notifyCallEndedForSpecificAccount(accountKey)
 
-                // Limpiar recursos
-                cleanupCall(callData)
+                // ✅ LIMPIEZA ASÍNCRONA
+                CoroutineScope(Dispatchers.IO).launch {
+                    try {
+                        // Asegurar que ringtones estén detenidos
+                        sipCoreManager.audioManager.stopAllRingtones()
+                        delay(200)
+
+                        // Limpiar recursos
+                        accountInfo.resetCallState()
+                        MultiCallManager.removeCall(callData.callId)
+
+                        log.d(tag = TAG) { "✅ CANCEL cleanup completed" }
+                    } catch (e: Exception) {
+                        log.e(tag = TAG) { "Error in CANCEL cleanup: ${e.message}" }
+                    }
+                }
+            } ?: run {
+                log.w(tag = TAG) { "⚠️ No call data found for CANCEL" }
             }
 
         } catch (e: Exception) {
-            log.e(tag = TAG) { "Error handling CANCEL request: ${e.message}" }
-            // En caso de error, forzar detención de ringtones
+            log.e(tag = TAG) { "❌ Error handling CANCEL request: ${e.message}" }
+            // ✅ FORZAR DETENCIÓN DE RINGTONES EN CASO DE ERROR
             sipCoreManager.audioManager.stopAllRingtones()
         }
     }
@@ -748,9 +811,12 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
         method: String
     ) {
         try {
-            log.d(tag = TAG) { "Handling authentication challenge for $method" }
+            log.d(tag = TAG) { "Handling authentication challenge for $method au" }
 
             val authData = AuthenticationHandler.extractAuthenticationData(lines)
+
+            log.d(tag = TAG) { "Handling authentication  authData ,  authData $authData" }
+
             if (authData == null) {
                 log.e(tag = TAG) { "Failed to extract authentication data" }
                 return
@@ -759,14 +825,19 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             val response =
                 AuthenticationHandler.calculateAuthResponse(accountInfo, authData, method)
             AuthenticationHandler.updateAccountAuthInfo(accountInfo, authData, response, method)
+            log.d(tag = TAG) { "Handling authentication  response ,  response $response" }
 
             // Reenviar request con autenticación
             when (method) {
                 "REGISTER" -> {
+
                     val authenticatedRegister = SipMessageBuilder.buildAuthenticatedRegisterMessage(
                         accountInfo,
                         sipCoreManager.isAppInBackground
                     )
+
+                    log.d(tag = TAG) { "Handling authentication  REGISTER ,  authenticatedRegister $authenticatedRegister" }
+
                     accountInfo.webSocketClient.value?.send(authenticatedRegister)
                 }
 
@@ -805,7 +876,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 sipCoreManager.currentAccountInfo?.resetCallState()
 
                 // Limpiar DTMF
-                sipCoreManager.callManager.clearDtmfQueue()
+                sipCoreManager.callManager?.clearDtmfQueue()
 
                 log.d(tag = TAG) { "Call cleanup completed for ${callData.callId}" }
 

@@ -100,8 +100,8 @@ class SipReconnectionManager(
             "reconnectionInProgress" to (reconnectionJob?.isActive == true),
             "networkStabilityJobActive" to (networkStabilityJob?.isActive == true),
             "reconnectionAttempts" to reconnectionAttemptsCopy,
-            "cachedAccountsCount" to cachedAccounts.size(), // suspend
-            "accountRecoveryAttempts" to accountRecoveryAttempts.get(), // suspend
+            "cachedAccountsCount" to cachedAccounts.size(),
+            "accountRecoveryAttempts" to accountRecoveryAttempts.get(),
             "lastAccountSync" to lastAccountSync,
             "cachedAccountsKeys" to cachedKeys
         )

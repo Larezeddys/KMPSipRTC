@@ -39,7 +39,7 @@ data class CallData(
     var fromTag: String? = null,
     var remoteContactUri: String? = null,
     var remoteContactParams: Map<String, String> = emptyMap(),
-    val remoteDisplayName: String = "",
+    var remoteDisplayName: String = "",
     var inviteFromTag: String = "",
     var inviteToTag: String = "",
     var remoteSdp: String = "",

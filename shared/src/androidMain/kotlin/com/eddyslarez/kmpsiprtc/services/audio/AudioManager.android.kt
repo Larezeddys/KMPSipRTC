@@ -13,6 +13,7 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import androidx.annotation.RequiresPermission
 import androidx.core.net.toUri
+import com.eddyslarez.kmpsiprtc.platform.AndroidContext
 import kotlinx.coroutines.*
 
 actual fun createAudioManager(): AudioManager = AndroidAudioManagerImpl()
@@ -25,7 +26,7 @@ class AndroidAudioManagerImpl : AudioManager {
     private var vibrationSyncJob: Job? = null
     private val audioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    private lateinit var application: Application
+    private var application= AndroidContext.getApplication()
     private val TAG = "AndroidAudioManager"
     private var incomingRingtone: MediaPlayer? = null
     private var outgoingRingtone: MediaPlayer? = null

@@ -75,7 +75,7 @@ class SipCoreManager private constructor(
     // Managers
     internal lateinit var audioManager: SipAudioManager
     private lateinit var reconnectionManager: SipReconnectionManager
-    internal lateinit var callManager: CallManager
+    internal var callManager: CallManager? = null
      val networkManager = createNetworkManager()
     val webRtcManager = createWebRtcManager()
     private val platformRegistration = PlatformRegistration()
@@ -140,7 +140,7 @@ class SipCoreManager private constructor(
         log.d(tag = TAG) { "Initializing SIP Core with integrated managers" }
 
         // Inicializar managers en orden
-        initializeNetworkManager()
+//        initializeNetworkManager()
         initializeAudioManager()
         initializeReconnectionManager()
         initializeCallManager()
@@ -663,8 +663,8 @@ class SipCoreManager private constructor(
 
             override fun onConnectionStateChange(state: WebRtcConnectionState) {
                 when (state) {
-                    WebRtcConnectionState.CONNECTED -> callManager.handleWebRtcConnected()
-                    WebRtcConnectionState.CLOSED -> callManager.handleWebRtcClosed()
+                    WebRtcConnectionState.CONNECTED -> callManager?.handleWebRtcConnected()
+                    WebRtcConnectionState.CLOSED -> callManager?.handleWebRtcClosed()
                     else -> {}
                 }
             }
@@ -793,12 +793,15 @@ class SipCoreManager private constructor(
 
         try {
             log.d(tag = TAG) { "Starting register for $accountKey (push=$forcePushMode)" }
-
+            val account = databaseManager?.getActiveSipAccounts()
+            log.d(tag = TAG) { "accountr ${account}" }
             // Guardar o actualizar en BD en background
             CoroutineScope(Dispatchers.IO).launch {
                 try {
                     val dbManager = getDatabaseManager() ?: return@launch
                     val dbAccounts = dbManager.getRegisteredSipAccounts().first()
+                    log.d(tag = TAG) { "dbAccounts ${dbAccounts}" }
+
                     val existingAccount = dbAccounts.firstOrNull { it.username == username && it.domain == domain }
 
                     val finalPassword = if (password.isNotEmpty()) password else existingAccount?.password ?: ""
@@ -987,15 +990,15 @@ class SipCoreManager private constructor(
         }
 
         currentAccountInfo = accountInfo
-        callManager.makeCall(phoneNumber, accountInfo)
+        callManager?.makeCall(phoneNumber, accountInfo)
     }
 
-    fun endCall(callId: String? = null) = callManager.endCall(callId)
-    fun acceptCall(callId: String? = null) = callManager.acceptCall(callId)
-    fun declineCall(callId: String? = null) = callManager.declineCall(callId)
-    fun rejectCall(callId: String? = null) = callManager.declineCall(callId)
-    fun holdCall(callId: String? = null) = callManager.holdCall(callId)
-    fun resumeCall(callId: String? = null) = callManager.resumeCall(callId)
+    fun endCall(callId: String? = null) = callManager?.endCall(callId)
+    fun acceptCall(callId: String? = null) = callManager?.acceptCall(callId)
+    fun declineCall(callId: String? = null) = callManager?.declineCall(callId)
+    fun rejectCall(callId: String? = null) = callManager?.declineCall(callId)
+    fun holdCall(callId: String? = null) = callManager?.holdCall(callId)
+    fun resumeCall(callId: String? = null) = callManager?.resumeCall(callId)
 
     // Métodos de audio (delegados a SipAudioManager)
     fun mute() = audioManager.toggleMute()
@@ -1014,9 +1017,9 @@ class SipCoreManager private constructor(
         audioManager.saveRingtoneUris(incomingUri, outgoingUri, databaseManager)
 
     // Métodos DTMF (delegados a CallManager)
-    fun sendDtmf(digit: Char, duration: Int = 160) = callManager.sendDtmf(digit, duration)
+    fun sendDtmf(digit: Char, duration: Int = 160) = callManager?.sendDtmf(digit, duration)
     fun sendDtmfSequence(digits: String, duration: Int = 160) =
-        callManager.sendDtmfSequence(digits, duration)
+        callManager?.sendDtmfSequence(digits, duration)
 
     // Métodos de conectividad (delegados a SipReconnectionManager)
     suspend fun forceReconnection() {
@@ -1118,7 +1121,10 @@ class SipCoreManager private constructor(
             override fun onClose(code: Int, reason: String) {
                 log.d(tag = TAG) { "WebSocket closed for ${accountInfo.username}@${accountInfo.domain}" }
 
+
                 val account = databaseManager?.getActiveSipAccounts()
+                log.d(tag = TAG) { "accountr ${accountInfo.username}@${accountInfo.domain}" }
+
                 if (code != 1000 && !isShuttingDown) {
                     // Delegar reconexión al SipReconnectionManager
 
@@ -1489,8 +1495,8 @@ class SipCoreManager private constructor(
         return if (registeredAccounts.isNotEmpty()) RegistrationState.OK else RegistrationState.NONE
     }
 
-    fun currentCall(): Boolean = callManager.hasActiveCall()
-    fun currentCallConnected(): Boolean = callManager.hasConnectedCall()
+    fun currentCall(): Boolean = callManager?.hasActiveCall() ?: false
+    fun currentCallConnected(): Boolean = callManager?.hasConnectedCall() ?:false
     fun getCurrentCallState(): CallStateInfo = CallStateManager.getCurrentState()
 
     fun getAllActiveCalls(): List<CallData> = MultiCallManager.getAllCalls()
@@ -1700,7 +1706,7 @@ class SipCoreManager private constructor(
             audioManager.stopAllRingtones()
 
             if (CallStateManager.getCurrentState().isActive()) {
-                callManager.endCall()
+                callManager?.endCall()
             }
 
             if (activeAccounts.isNotEmpty()) {

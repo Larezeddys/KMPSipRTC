@@ -28,4 +28,4 @@ fun buildSipDatabase(
 /**
  * Función expect para obtener el builder específico de cada plataforma
  */
-expect fun getDatabaseBuilder(context: Any? = null): RoomDatabase.Builder<SipDatabase>
+expect fun getDatabaseBuilder(): RoomDatabase.Builder<SipDatabase>

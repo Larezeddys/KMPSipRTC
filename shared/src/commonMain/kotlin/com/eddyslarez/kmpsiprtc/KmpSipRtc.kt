@@ -196,17 +196,41 @@ class KmpSipRtc private constructor() {
                     )
                 )
 
+                // IMPORTANTE: Esperar a que la inicialización complete
                 sipCoreManager?.initialize()
+
+                // NUEVO: Verificar que los managers críticos estén listos
+                val manager = sipCoreManager
+                if (manager == null) {
+                    throw SipLibraryException("Failed to create SipCoreManager")
+                }
+
+                // Esperar un poco más para asegurar que los managers internos estén listos
+                var retries = 0
+                val maxRetries = 50 // 5 segundos máximo
+                while (retries < maxRetries) {
+                    if (manager.isSipCoreManagerHealthy()) {
+                        log.d(tag = TAG) { "✅ All managers initialized successfully" }
+                        break
+                    }
+                    delay(100)
+                    retries++
+                }
+
+                if (retries >= maxRetries) {
+                    log.w(tag = TAG) { "⚠️ Initialization timeout - some managers may not be ready" }
+                }
+
                 clearInitialStates()
                 setupInternalListeners()
 
                 databaseManager = DatabaseManager.getInstance()
 
                 isInitialized = true
-                log.d(tag = TAG) { "KmpSipRtc initialized successfully" }
+                log.d(tag = TAG) { "✅ KmpSipRtc initialized successfully" }
 
             } catch (e: Exception) {
-                log.e(tag = TAG) { "Error initializing library: ${e.message}" }
+                log.e(tag = TAG) { "❌ Error initializing library: ${e.message}" }
                 throw SipLibraryException("Failed to initialize library", e)
             }
         }

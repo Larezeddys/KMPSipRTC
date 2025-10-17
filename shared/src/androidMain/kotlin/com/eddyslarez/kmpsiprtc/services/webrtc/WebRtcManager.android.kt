@@ -61,7 +61,7 @@ class AndroidWebRtcManager() : WebRtcManager {
     private var webRtcEventListener: WebRtcEventListener? = null
     private var isInitialized = false
     private var isLocalAudioReady = false
-   private val context: Context = AndroidContext.get()
+    private val context: Context = AndroidContext.get()
 
     // Simplified audio management
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -135,6 +135,8 @@ class AndroidWebRtcManager() : WebRtcManager {
             isLocalAudioReady = ensureLocalAudioTrack()
         }
 
+        selectDefaultAudioDeviceWithPriority()
+
         val options = OfferAnswerOptions(voiceActivityDetection = true)
         val sessionDescription = peerConn.createOffer(options)
         peerConn.setLocalDescription(sessionDescription)
@@ -145,43 +147,92 @@ class AndroidWebRtcManager() : WebRtcManager {
         return sessionDescription.sdp
     }
 
-    override suspend fun createAnswer( offerSdp: String): String {
-        log.d(TAG) { "Creating SDP answer..." }
+    override suspend fun createAnswer(offerSdp: String): String {
+        log.d(TAG) { "📝 Creating SDP answer..." }
+
+        // ✅ Validación temprana y detallada
+        if (offerSdp.isBlank()) {
+            throw IllegalArgumentException("❌ Offer SDP cannot be null or empty")
+        }
+
+        log.d(TAG) { "✅ Offer SDP validation passed" }
+        log.d(TAG) { "  - Length: ${offerSdp.length} chars" }
+        log.d(TAG) { "  - Preview: ${offerSdp.take(150)}..." }
 
         if (!isInitialized) {
+            log.d(TAG) { "Initializing WebRTC..." }
             initialize()
         } else {
+            log.d(TAG) { "Starting audio manager..." }
             startAudioManager()
         }
 
         val peerConn = peerConnection ?: run {
+            log.d(TAG) { "PeerConnection not found, creating new one..." }
             initializePeerConnection()
             peerConnection ?: throw IllegalStateException("PeerConnection initialization failed")
         }
 
         if (!isLocalAudioReady) {
+            log.d(TAG) { "Local audio not ready, ensuring audio track..." }
             isLocalAudioReady = ensureLocalAudioTrack()
+            if (!isLocalAudioReady) {
+                throw IllegalStateException("Failed to initialize local audio track")
+            }
+            log.d(TAG) { "✅ Local audio track ready" }
         }
 
-        val remoteOffer = SessionDescription(
-            type = SessionDescriptionType.Offer,
-            sdp = offerSdp
-        )
-        peerConn.setRemoteDescription(remoteOffer)
+        try {
+            // ✅ Crear remote offer con validación
+            log.d(TAG) { "Creating SessionDescription from offer..." }
+            val remoteOffer = SessionDescription(
+                type = SessionDescriptionType.Offer,
+                sdp = offerSdp
+            )
 
-        val options = OfferAnswerOptions(voiceActivityDetection = true)
-        val sessionDescription = peerConn.createAnswer(options)
-        peerConn.setLocalDescription(sessionDescription)
+            // ✅ Verificar que SessionDescription es válido
+            if (remoteOffer.sdp.isBlank()) {
+                throw IllegalStateException("SessionDescription SDP is blank after creation")
+            }
 
-        setAudioEnabled(true)
-        audioManager.isMicrophoneMute = false
+            log.d(TAG) { "✅ Remote SessionDescription created successfully" }
+            log.d(TAG) { "Setting remote description on PeerConnection..." }
 
-        log.d(TAG) { "Created answer SDP" }
-        return sessionDescription.sdp
+            peerConn.setRemoteDescription(remoteOffer)
+            log.d(TAG) { "✅ Remote description set successfully" }
+
+            log.d(TAG) { "Creating answer..." }
+            val options = OfferAnswerOptions(voiceActivityDetection = true)
+            val sessionDescription = peerConn.createAnswer(options)
+
+            // ✅ Verificar answer antes de usarlo
+            if (sessionDescription.sdp.isBlank()) {
+                throw IllegalStateException("Created answer SDP is blank")
+            }
+
+            log.d(TAG) { "✅ Answer created, length: ${sessionDescription.sdp.length} chars" }
+            log.d(TAG) { "Setting local description (answer)..." }
+
+            peerConn.setLocalDescription(sessionDescription)
+            log.d(TAG) { "✅ Local description set successfully" }
+
+            setAudioEnabled(true)
+            audioManager.isMicrophoneMute = false
+
+            log.d(TAG) { "✅ Answer SDP created successfully" }
+            log.d(TAG) { "  - Length: ${sessionDescription.sdp.length} chars" }
+            log.d(TAG) { "  - Preview: ${sessionDescription.sdp.take(150)}..." }
+
+            return sessionDescription.sdp
+
+        } catch (e: Exception) {
+            log.e(TAG) { "❌ Error in createAnswer: ${e.message}" }
+            log.e(TAG) { "Stack trace: ${e.stackTraceToString()}" }
+            throw e
+        }
     }
-
     override suspend fun setRemoteDescription(sdp: String, type: SdpType) {
-            log.d(TAG) { "Setting remote description type: $type" }
+        log.d(TAG) { "Setting remote description type: $type" }
 
         if (!isInitialized) {
             initialize()
@@ -429,7 +480,7 @@ class AndroidWebRtcManager() : WebRtcManager {
     }
 
     override fun setListener(listener: WebRtcEventListener?) {
-            webRtcEventListener = listener
+        webRtcEventListener = listener
     }
 
     override fun prepareAudioForIncomingCall() {
@@ -481,7 +532,11 @@ class AndroidWebRtcManager() : WebRtcManager {
 
         // Update available devices and select with priority
         updateAvailableAudioDevices()
-        selectDefaultAudioDeviceWithPriority()
+
+        // ✅ CORRECCIÓN: Asegurar que siempre se selecciona un dispositivo
+        Handler(Looper.getMainLooper()).postDelayed({
+            selectDefaultAudioDeviceWithPriority()
+        }, 100) // Pequeño delay para asegurar que todo esté inicializado
     }
 
     fun stopAudioManager() {
