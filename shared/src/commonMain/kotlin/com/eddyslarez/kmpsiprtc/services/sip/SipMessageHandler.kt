@@ -614,7 +614,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 CoroutineScope(Dispatchers.IO).launch {
                     try {
                         // Limpiar WebRTC
-                        sipCoreManager.webRtcManager.dispose()
+                        sipCoreManager.webRtcManager.closePeerConnection()
                         delay(200)
 
                         // Limpiar AccountInfo
@@ -870,7 +870,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 sipCoreManager.audioManager.stopAllRingtones()
 
                 // Limpiar WebRTC
-                sipCoreManager.webRtcManager.dispose()
+                sipCoreManager.webRtcManager.closePeerConnection()
 
                 // Limpiar datos de cuenta
                 sipCoreManager.currentAccountInfo?.resetCallState()

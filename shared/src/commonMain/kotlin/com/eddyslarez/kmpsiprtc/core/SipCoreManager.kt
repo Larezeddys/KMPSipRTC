@@ -26,7 +26,6 @@ import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.services.calls.CallStateManager
 import com.eddyslarez.kmpsiprtc.services.calls.MultiCallManager
 import com.eddyslarez.kmpsiprtc.services.sip.SipMessageHandler
-import com.eddyslarez.kmpsiprtc.services.sip.initializeBootRegistration
 import com.eddyslarez.kmpsiprtc.services.webSocket.MultiplatformWebSocket
 import com.eddyslarez.kmpsiprtc.services.webSocket.createWebSocket
 import com.eddyslarez.kmpsiprtc.services.webrtc.WebRtcEventListener
@@ -58,6 +57,7 @@ import kotlin.text.set
 import kotlin.to
 import com.eddyslarez.kmpsiprtc.services.audio.AudioManager
 import com.eddyslarez.kmpsiprtc.services.audio.createAudioManager
+import kotlinx.coroutines.withContext
 
 class SipCoreManager private constructor(
     private val config: SipConfig,
@@ -76,7 +76,7 @@ class SipCoreManager private constructor(
     internal lateinit var audioManager: SipAudioManager
     private lateinit var reconnectionManager: SipReconnectionManager
     internal var callManager: CallManager? = null
-     val networkManager = createNetworkManager()
+    val networkManager = createNetworkManager()
     val webRtcManager = createWebRtcManager()
     private val platformRegistration = PlatformRegistration()
     internal val messageHandler = SipMessageHandler(this)
@@ -106,12 +106,8 @@ class SipCoreManager private constructor(
         private const val REGISTRATION_CHECK_INTERVAL_MS = 30 * 1000L
         private const val ACCOUNT_SYNC_INTERVAL_MS = 60 * 1000L
 
-        fun createInstance(
-            config: SipConfig
-        ): SipCoreManager {
-            return SipCoreManager(
-                config = config,
-            )
+        fun createInstance(config: SipConfig): SipCoreManager {
+            return SipCoreManager(config = config)
         }
     }
 
@@ -139,30 +135,54 @@ class SipCoreManager private constructor(
     suspend fun initialize() {
         log.d(tag = TAG) { "Initializing SIP Core with integrated managers" }
 
-        // Inicializar managers en orden
-//        initializeNetworkManager()
-        initializeAudioManager()
-        initializeReconnectionManager()
-        initializeCallManager()
+        try {
+            // CRÍTICO: Inicializar DatabaseManager primero usando getInitializedInstance
+            log.d(tag = TAG) { "⏳ Waiting for database initialization..." }
 
-        loadConfigurationFromDatabase()
-        setupWebRtcEventListener()
-        setupPlatformLifecycleObservers()
+            val dbManager = try {
+                DatabaseManager.getInitializedInstance(timeoutMs = 15000)
+            } catch (e: Exception) {
+                log.e(tag = TAG) { "❌ Database initialization failed: ${e.message}" }
+                throw Exception("Database initialization failed: ${e.message}")
+            }
 
-        // NUEVO: Inicializar sistema de recuperación de boot
-        setupBootRegistrationRecovery()
-        initializeRegistrationGuardian()
+            databaseManager = dbManager
+            log.d(tag = TAG) { "✅ Database initialized and ready" }
 
-        startAccountSyncTask()
-        CallStateManager.initialize()
+            // Inicializar managers en orden
+            initializeAudioManager()
+            initializeReconnectionManager()
+            initializeCallManager()
 
-        log.d(tag = TAG) { "SIP Core initialization completed" }
+            loadConfigurationFromDatabase()
+            setupWebRtcEventListener()
+            setupPlatformLifecycleObservers()
+
+            // Inicializar sistema de recuperación de boot
+            initializeRegistrationGuardian()
+            setupBootRegistrationRecovery()
+
+            startAccountSyncTask()
+            CallStateManager.initialize()
+
+            log.d(tag = TAG) { "✅ SIP Core initialization completed" }
+
+        } catch (e: Exception) {
+            log.e(tag = TAG) { "❌ Critical error during initialization: ${e.message}" }
+            throw e
+        }
     }
+
     private fun initializeRegistrationGuardian() {
         try {
+            val dbManager = databaseManager ?: run {
+                log.e(tag = TAG) { "Cannot initialize RegistrationGuardian: database not available" }
+                return
+            }
+
             registrationGuardian = RegistrationGuardianManager(
                 sipCoreManager = this,
-                databaseManager = getDatabaseManager()!!
+                databaseManager = dbManager
             )
             registrationGuardian.initialize()
             log.d(tag = TAG) { "RegistrationGuardian initialized successfully" }
@@ -170,6 +190,7 @@ class SipCoreManager private constructor(
             log.e(tag = TAG) { "Error initializing RegistrationGuardian: ${e.message}" }
         }
     }
+
     private fun setupBootRegistrationRecovery() {
         CoroutineScope(Dispatchers.IO).launch {
             try {
@@ -193,6 +214,89 @@ class SipCoreManager private constructor(
             }
         }
     }
+
+    private suspend fun initializeBootRegistration() {
+        try {
+            log.d(tag = TAG) { "🚀 Starting boot registration initialization..." }
+
+            val dbManager = databaseManager ?: run {
+                log.e(tag = TAG) { "❌ Database not available for boot registration" }
+                return
+            }
+
+            // Obtener cuentas desde BD
+            val dbAccounts = withContext(Dispatchers.IO) {
+                try {
+                    dbManager.getRegisteredSipAccounts().first()
+                } catch (e: Exception) {
+                    log.e(tag = TAG) { "Error loading accounts from database: ${e.message}" }
+                    emptyList()
+                }
+            }
+
+            log.d(tag = TAG) { "📋 Found ${dbAccounts.size} accounts in database for boot registration" }
+
+            if (dbAccounts.isEmpty()) {
+                log.d(tag = TAG) { "No accounts to register at boot" }
+                return
+            }
+
+            // Registrar cada cuenta
+            val registrationResults = mutableMapOf<String, Boolean>()
+
+            dbAccounts.forEach { dbAccount ->
+                try {
+                    val accountKey = "${dbAccount.username}@${dbAccount.domain}"
+                    log.d(tag = TAG) { "🔄 Processing boot registration for: $accountKey" }
+
+                    // Crear AccountInfo
+                    val accountInfo = AccountInfo(
+                        username = dbAccount.username,
+                        password = dbAccount.password,
+                        domain = dbAccount.domain
+                    ).apply {
+                        token.value = dbAccount.pushToken ?: ""
+                        provider.value = dbAccount.pushProvider ?: "fcm"
+                        userAgent.value = "${userAgent()} Push"
+                        isRegistered.value = false
+                    }
+
+                    // Agregar a cuentas activas
+                    activeAccounts[accountKey] = accountInfo
+                    updateRegistrationState(accountKey, RegistrationState.NONE)
+
+                    // Intentar registro con modo push
+                    delay(1000) // Delay entre registros
+
+                    updateRegistrationState(accountKey, RegistrationState.IN_PROGRESS)
+                    val success = safeRegister(accountInfo, isBackground = true)
+
+                    registrationResults[accountKey] = success
+
+                    if (success) {
+                        log.d(tag = TAG) { "✅ Boot registration initiated for: $accountKey" }
+                    } else {
+                        log.w(tag = TAG) { "⚠️ Boot registration failed for: $accountKey, will retry" }
+                        scheduleRegisterRetry(accountInfo)
+                    }
+
+                } catch (e: Exception) {
+                    log.e(tag = TAG) { "❌ Error in boot registration for account: ${e.message}" }
+                    registrationResults["${dbAccount.username}@${dbAccount.domain}"] = false
+                }
+            }
+
+            // Resumen
+            val successful = registrationResults.values.count { it }
+            val failed = registrationResults.size - successful
+
+            log.d(tag = TAG) { "🏁 Boot registration completed: $successful successful, $failed failed" }
+
+        } catch (e: Exception) {
+            log.e(tag = TAG) { "💥 Critical error in boot registration initialization: ${e.message}" }
+        }
+    }
+
     private suspend fun shouldPerformBootRecovery(): Boolean {
         return try {
             // 1. Verificar si hay cuentas en memoria
@@ -200,7 +304,7 @@ class SipCoreManager private constructor(
             log.d(tag = TAG) { "Active accounts in memory: $activeAccountsCount" }
 
             // 2. Verificar si hay cuentas en BD
-            val dbManager = getDatabaseManager()
+            val dbManager = databaseManager
             val dbAccountsCount = dbManager?.getRegisteredSipAccounts()?.first()?.size ?: 0
             log.d(tag = TAG) { "Accounts in database: $dbAccountsCount" }
 
@@ -209,9 +313,6 @@ class SipCoreManager private constructor(
             log.d(tag = TAG) { "Currently registered accounts: $registeredCount" }
 
             // Necesita recuperación si:
-            // - Hay cuentas en BD pero no en memoria, O
-            // - Hay cuentas en memoria pero ninguna registrada, O
-            // - Menos cuentas en memoria que en BD
             val needsRecovery = when {
                 dbAccountsCount > 0 && activeAccountsCount == 0 -> {
                     log.d(tag = TAG) { "Recovery needed: accounts in DB but none in memory" }
@@ -235,38 +336,32 @@ class SipCoreManager private constructor(
 
         } catch (e: Exception) {
             log.e(tag = TAG) { "Error determining if boot recovery is needed: ${e.message}" }
-            // En caso de error, mejor intentar recuperación por seguridad
-            true
+            true // En caso de error, mejor intentar recuperación
         }
     }
 
-
-    fun prepareAudioForCall(){
+    fun prepareAudioForCall() {
         webRtcManager.prepareAudioForCall()
     }
-    fun onBluetoothConnectionChanged(isConnected: Boolean){
+
+    fun onBluetoothConnectionChanged(isConnected: Boolean) {
         webRtcManager.onBluetoothConnectionChanged(isConnected)
     }
-    fun refreshAudioDevicesWithBluetoothPriority(){
+
+    fun refreshAudioDevicesWithBluetoothPriority() {
         webRtcManager.refreshAudioDevicesWithBluetoothPriority()
     }
-    fun applyAudioRouteChange(audioUnitType: AudioUnitTypes): Boolean{
+
+    fun applyAudioRouteChange(audioUnitType: AudioUnitTypes): Boolean {
         return webRtcManager.applyAudioRouteChange(audioUnitType)
     }
-    fun getAvailableAudioUnits(): Set<AudioUnit>{
+
+    fun getAvailableAudioUnits(): Set<AudioUnit> {
         return webRtcManager.getAvailableAudioUnits()
     }
-    fun getCurrentActiveAudioUnit(): AudioUnit?{
-        return webRtcManager.getCurrentActiveAudioUnit()
-    }
 
-    private fun initializeNetworkManager() {
-        try {
-            networkManager.initialize()
-            log.d(tag = TAG) { "NetworkManager initialized successfully" }
-        } catch (e: Exception) {
-            log.e(tag = TAG) { "Error initializing NetworkManager: ${e.message}" }
-        }
+    fun getCurrentActiveAudioUnit(): AudioUnit? {
+        return webRtcManager.getCurrentActiveAudioUnit()
     }
 
     private fun initializeAudioManager() {
@@ -285,19 +380,16 @@ class SipCoreManager private constructor(
 
     private suspend fun initializeReconnectionManager() {
         try {
-            // IMPORTANTE: Pasar referencia de SipCoreManager al constructor
             reconnectionManager = SipReconnectionManager(
                 messageHandler = messageHandler,
-                sipCoreManager = this // Esto permite acceso a activeAccounts
+                sipCoreManager = this
             )
 
-            // Configurar listener de reconexión mejorado
             reconnectionManager.setReconnectionListener(object : ReconnectionListener {
                 override fun onNetworkLost() {
                     log.w(tag = TAG) { "🌐 Network lost detected by ReconnectionManager" }
                     lifecycleCallback?.invoke("NETWORK_LOST")
 
-                    // Marcar todas las cuentas como no registradas
                     activeAccounts.values.forEach { account ->
                         account.isRegistered.value = false
                         val accountKey = "${account.username}@${account.domain}"
@@ -373,9 +465,6 @@ class SipCoreManager private constructor(
         }
     }
 
-    /**
-     * NUEVO: Iniciar tarea de sincronización de cuentas con BD
-     */
     private fun startAccountSyncTask() {
         accountSyncJob = CoroutineScope(Dispatchers.IO).launch {
             while (isActive && !isShuttingDown) {
@@ -390,20 +479,15 @@ class SipCoreManager private constructor(
         log.d(tag = TAG) { "Account sync task started" }
     }
 
-    /**
-     * NUEVO: Sincronizar cuentas entre memoria y BD
-     */
     private suspend fun syncAccountsWithDatabase() {
         accountSyncMutex.withLock {
             try {
-                val dbManager = getDatabaseManager() ?: return
+                val dbManager = databaseManager ?: return
 
-                // Obtener cuentas registradas de BD
                 val dbAccounts = dbManager.getRegisteredSipAccounts().first()
 
                 log.d(tag = TAG) { "Syncing accounts - Memory: ${activeAccounts.size}, DB: ${dbAccounts.size}" }
 
-                // Verificar si alguna cuenta en BD no está en memoria
                 dbAccounts.forEach { dbAccount ->
                     val accountKey = "${dbAccount.username}@${dbAccount.domain}"
 
@@ -426,7 +510,6 @@ class SipCoreManager private constructor(
                     }
                 }
 
-                // Actualizar estados de registro en BD
                 activeAccounts.forEach { (accountKey, accountInfo) ->
                     if (accountInfo.isRegistered.value) {
                         val dbAccount = dbAccounts.find {
@@ -437,7 +520,7 @@ class SipCoreManager private constructor(
                             dbManager.updateSipAccountRegistrationState(
                                 it.id,
                                 RegistrationState.OK,
-                                Clock.System.now().toEpochMilliseconds() + 3600000L // 1 hora
+                                Clock.System.now().toEpochMilliseconds() + 3600000L
                             )
                         }
                     }
@@ -451,14 +534,11 @@ class SipCoreManager private constructor(
         }
     }
 
-    /**
-     * NUEVO: Recuperar cuentas desde BD cuando se pierden en memoria
-     */
     suspend fun recoverAccountsFromDatabase(): List<AccountInfo> {
         return try {
             log.d(tag = TAG) { "🔍 Recovering accounts from database..." }
 
-            val dbManager = getDatabaseManager() ?: return emptyList()
+            val dbManager = databaseManager ?: return emptyList()
             val dbAccounts = dbManager.getRegisteredSipAccounts().first()
 
             val recoveredAccounts = dbAccounts.mapNotNull { dbAccount ->
@@ -476,7 +556,6 @@ class SipCoreManager private constructor(
                         isRegistered.value = false
                     }
 
-                    // Agregar a cuentas activas
                     activeAccounts[accountKey] = accountInfo
                     updateRegistrationState(accountKey, RegistrationState.NONE)
 
@@ -500,16 +579,19 @@ class SipCoreManager private constructor(
 
     internal fun getDatabaseManager(): DatabaseManager? {
         if (databaseManager == null) {
-            databaseManager = DatabaseManager.getInstance()
+            try {
+                databaseManager = DatabaseManager.getInstance()
+            } catch (e: Exception) {
+                log.e(tag = TAG) { "Error getting database manager: ${e.message}" }
+            }
         }
         return databaseManager
     }
 
-
     private fun loadConfigurationFromDatabase() {
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val dbManager = getDatabaseManager()
+                val dbManager = databaseManager
                 loadedConfig = dbManager?.loadOrCreateDefaultConfig()
                 loadedConfig?.let { config ->
                     audioManager.loadAudioConfigFromDatabase(config)
@@ -525,7 +607,6 @@ class SipCoreManager private constructor(
         this.sipCallbacks = callbacks
         log.d(tag = TAG) { "SipCallbacks configured" }
     }
-
 
     fun updateRegistrationState(accountKey: String, newState: RegistrationState) {
         log.d(tag = TAG) { "Updating registration state for $accountKey: $newState" }
@@ -555,20 +636,19 @@ class SipCoreManager private constructor(
                 }
 
                 else -> {
-                    // Estados intermedios, no cambiar flag interno
+                    // Estados intermedios
                 }
             }
 
             // Actualizar BD en background
             CoroutineScope(Dispatchers.IO).launch {
                 try {
-                    val dbManager = getDatabaseManager()
-                    val dbAccount =
-                        dbManager?.getSipAccountByCredentials(account.username, account.domain)
+                    val dbManager = databaseManager
+                    val dbAccount = dbManager?.getSipAccountByCredentials(account.username, account.domain)
 
                     dbAccount?.let {
                         val expiry = if (newState == RegistrationState.OK) {
-                            Clock.System.now().toEpochMilliseconds() + 3600000L // 1 hora
+                            Clock.System.now().toEpochMilliseconds() + 3600000L
                         } else null
 
                         dbManager.updateSipAccountRegistrationState(it.id, newState, expiry)
@@ -631,7 +711,8 @@ class SipCoreManager private constructor(
             when (state) {
                 CallState.INCOMING_RECEIVED -> {
                     currentAccountInfo?.currentCallData?.let { callData ->
-                        sipCallbacks?.onIncomingCall(callData.value?.from ?: "",
+                        sipCallbacks?.onIncomingCall(
+                            callData.value?.from ?: "",
                             callData.value?.remoteDisplayName
                         )
                     }
@@ -653,7 +734,6 @@ class SipCoreManager private constructor(
             log.e(tag = TAG) { "Error notifying call state change: ${e.message}" }
         }
     }
-
 
     private fun setupWebRtcEventListener() {
         webRtcManager.setListener(object : WebRtcEventListener {
@@ -677,7 +757,14 @@ class SipCoreManager private constructor(
                 log.d(tag = TAG) { "Audio device changed: ${device?.name}" }
                 audioManager.refreshAudioDevices()
             }
+
+            override fun onRemoteAudioData(audioBytes: ByteArray) {
+                log.d(tag = TAG) { "Audio device audioBytes: ${audioBytes}" }
+
+            }
+
         })
+
     }
 
     private fun setupPlatformLifecycleObservers() {
@@ -715,7 +802,6 @@ class SipCoreManager private constructor(
         sipCallbacks?.onCallTerminated()
     }
 
-
     private suspend fun refreshAllRegistrationsWithNewUserAgent() {
         if (CallStateManager.getCurrentState().isActive()) {
             log.d(tag = TAG) { "Skipping registration refresh - call is active" }
@@ -740,7 +826,6 @@ class SipCoreManager private constructor(
             try {
                 log.d(tag = TAG) { "🔄 Refreshing registration for: $accountKey" }
 
-                // CRÍTICO: Verificar conectividad WebSocket antes de refrescar
                 if (!ensureWebSocketConnectivity(accountInfo)) {
                     log.e(tag = TAG) { "❌ Cannot ensure WebSocket connectivity for refresh: $accountKey" }
                     updateRegistrationState(accountKey, RegistrationState.FAILED)
@@ -748,7 +833,6 @@ class SipCoreManager private constructor(
                     return@forEach
                 }
 
-                // Verificar que el WebSocket está realmente conectado y saludable
                 if (!accountInfo.isWebSocketHealthy()) {
                     log.e(tag = TAG) { "❌ WebSocket not healthy after connectivity check for refresh: $accountKey" }
                     updateRegistrationState(accountKey, RegistrationState.FAILED)
@@ -756,13 +840,8 @@ class SipCoreManager private constructor(
                     return@forEach
                 }
 
-                // Actualizar user agent
                 accountInfo.userAgent.value = userAgent()
-
-                // Marcar como en progreso
                 updateRegistrationState(accountKey, RegistrationState.IN_PROGRESS)
-
-                // Enviar registro actualizado
                 messageHandler.sendRegister(accountInfo, isAppInBackground)
 
                 log.d(tag = TAG) { "✅ Registration refreshed successfully for: $accountKey" }
@@ -793,20 +872,24 @@ class SipCoreManager private constructor(
 
         try {
             log.d(tag = TAG) { "Starting register for $accountKey (push=$forcePushMode)" }
-            val account = databaseManager?.getActiveSipAccounts()
-            log.d(tag = TAG) { "accountr ${account}" }
+
             // Guardar o actualizar en BD en background
             CoroutineScope(Dispatchers.IO).launch {
                 try {
-                    val dbManager = getDatabaseManager() ?: return@launch
+                    val dbManager = databaseManager ?: return@launch
                     val dbAccounts = dbManager.getRegisteredSipAccounts().first()
-                    log.d(tag = TAG) { "dbAccounts ${dbAccounts}" }
+                    log.d(tag = TAG) { "dbAccounts ${dbAccounts.size}" }
 
-                    val existingAccount = dbAccounts.firstOrNull { it.username == username && it.domain == domain }
+                    val existingAccount = dbAccounts.firstOrNull {
+                        it.username == username && it.domain == domain
+                    }
 
-                    val finalPassword = if (password.isNotEmpty()) password else existingAccount?.password ?: ""
-                    val finalToken = if (token.isNotEmpty()) token else existingAccount?.pushToken ?: ""
-                    val finalProvider = if (provider.isNotEmpty()) provider else existingAccount?.pushProvider ?: "fcm"
+                    val finalPassword = if (password.isNotEmpty()) password
+                    else existingAccount?.password ?: ""
+                    val finalToken = if (token.isNotEmpty()) token
+                    else existingAccount?.pushToken ?: ""
+                    val finalProvider = if (provider.isNotEmpty()) provider
+                    else existingAccount?.pushProvider ?: "fcm"
 
                     if (finalPassword.isEmpty()) {
                         log.e(tag = TAG) { "Cannot register $accountKey: no password available" }
@@ -843,7 +926,6 @@ class SipCoreManager private constructor(
             activeAccounts[accountKey] = accountInfo
 
             if (forcePushMode) {
-                // registro con reintentos automáticos
                 CoroutineScope(Dispatchers.IO).launch {
                     updateRegistrationState(accountKey, RegistrationState.IN_PROGRESS)
                     val success = safeRegister(accountInfo, isBackground = true)
@@ -860,96 +942,55 @@ class SipCoreManager private constructor(
         }
     }
 
-
     private fun scheduleRegisterRetry(accountInfo: AccountInfo) {
         val accountKey = "${accountInfo.username}@${accountInfo.domain}"
 
         CoroutineScope(Dispatchers.IO).launch {
             var retryCount = 0
             val maxRetries = 5
-            val baseDelay = 5000L // 5 segundos base
+            val baseDelay = 5000L
 
             while (retryCount < maxRetries) {
                 retryCount++
-                val delay = baseDelay * retryCount // Delay incremental
+                val delay = baseDelay * retryCount
 
-                log.d(tag = TAG) { "Scheduling register2 retry $retryCount for $accountKey in ${delay}ms" }
+                log.d(tag = TAG) { "Scheduling register retry $retryCount for $accountKey in ${delay}ms" }
                 delay(delay)
 
-                // Verificar si ya está registrado
                 if (accountInfo.isRegistered.value) {
                     log.d(tag = TAG) { "Account $accountKey already registered, canceling retry" }
                     break
                 }
 
-                // Verificar conectividad
                 if (!networkManager.isNetworkAvailable()) {
                     log.d(tag = TAG) { "Network not available for retry $retryCount of $accountKey" }
                     continue
                 }
 
                 try {
-                    log.d(tag = TAG) { "Attempting register2 retry $retryCount for $accountKey" }
+                    log.d(tag = TAG) { "Attempting register retry $retryCount for $accountKey" }
                     updateRegistrationState(accountKey, RegistrationState.IN_PROGRESS)
 
                     val success = safeRegister(accountInfo, isBackground = true)
 
                     if (success) {
-                        log.d(tag = TAG) { "Register2 retry $retryCount successful for $accountKey" }
+                        log.d(tag = TAG) { "Register retry $retryCount successful for $accountKey" }
                         break
                     } else {
-                        log.w(tag = TAG) { "Register2 retry $retryCount failed for $accountKey" }
+                        log.w(tag = TAG) { "Register retry $retryCount failed for $accountKey" }
                         updateRegistrationState(accountKey, RegistrationState.FAILED)
                     }
 
                 } catch (e: Exception) {
-                    log.e(tag = TAG) { "Error in register2 retry $retryCount for $accountKey: ${e.message}" }
+                    log.e(tag = TAG) { "Error in register retry $retryCount for $accountKey: ${e.message}" }
                     updateRegistrationState(accountKey, RegistrationState.FAILED)
                 }
             }
 
-            // Si llegamos aquí, todos los reintentos fallaron
             if (retryCount >= maxRetries) {
-                log.e(tag = TAG) { "All register2 retries exhausted for $accountKey" }
+                log.e(tag = TAG) { "All register retries exhausted for $accountKey" }
                 updateRegistrationState(accountKey, RegistrationState.FAILED)
             }
-        }
-    }
-
-    /**
-     * NUEVO: Registro seguro de cuenta
-     */
-    private suspend fun register3(
-        username: String,
-        password: String,
-        domain: String,
-        provider: String,
-        token: String
-    ) {
-        val accountKey = "$username@$domain"
-
-        try {
-            // Crear AccountInfo
-            val accountInfo = AccountInfo(username, password, domain)
-            activeAccounts[accountKey] = accountInfo
-
-            accountInfo.token.value = token
-            accountInfo.provider.value = provider
-            accountInfo.userAgent.value = userAgent()
-
-            updateRegistrationState(accountKey, RegistrationState.IN_PROGRESS)
-
-            // Usar registro seguro
-            val success = safeRegister(accountInfo, isAppInBackground)
-
-            if (!success) {
-                log.e(tag = TAG) { "Safe register failed during account creation for: $accountKey" }
-                updateRegistrationState(accountKey, RegistrationState.FAILED)
-            }
-
-        } catch (e: Exception) {
-            log.e(tag = TAG) { "Error in safe account registration for $accountKey: ${e.message}" }
-            updateRegistrationState(accountKey, RegistrationState.FAILED)
         }
     }
 
@@ -964,7 +1005,7 @@ class SipCoreManager private constructor(
             updateRegistrationState(accountKey, RegistrationState.NONE)
 
             // Eliminar de BD
-            val dbManager = getDatabaseManager()
+            val dbManager = databaseManager
             val dbAccount = dbManager?.getSipAccountByCredentials(username, domain)
             dbAccount?.let {
                 dbManager.deleteSipAccount(it.id)
@@ -1024,7 +1065,6 @@ class SipCoreManager private constructor(
     // Métodos de conectividad (delegados a SipReconnectionManager)
     suspend fun forceReconnection() {
         val accountsToReconnect = if (activeAccounts.isEmpty()) {
-            // Si no hay cuentas en memoria, intentar recuperar desde BD
             CoroutineScope(Dispatchers.IO).launch {
                 val recoveredAccounts = recoverAccountsFromDatabase()
                 reconnectionManager.forceReconnection(recoveredAccounts)
@@ -1039,7 +1079,6 @@ class SipCoreManager private constructor(
 
     suspend fun verifyAndFixConnectivity() {
         val accountsToCheck = if (activeAccounts.isEmpty()) {
-            // Si no hay cuentas en memoria, intentar recuperar desde BD
             CoroutineScope(Dispatchers.IO).launch {
                 val recoveredAccounts = recoverAccountsFromDatabase()
                 reconnectionManager.verifyAndFixConnectivity(recoveredAccounts)
@@ -1104,9 +1143,7 @@ class SipCoreManager private constructor(
         websocket.setListener(object : MultiplatformWebSocket.Listener {
             override fun onOpen() {
                 CoroutineScope(Dispatchers.IO).launch {
-                    log.d(tag = TAG) { "WebSocket open for ${accountInfo}" +
-                            "${accountInfo.username}@${accountInfo.domain}" }
-
+                    log.d(tag = TAG) { "WebSocket open for ${accountInfo.username}@${accountInfo.domain}" }
                     lastConnectionCheck = Clock.System.now().toEpochMilliseconds()
                     messageHandler.sendRegister(accountInfo, isAppInBackground)
                 }
@@ -1121,13 +1158,7 @@ class SipCoreManager private constructor(
             override fun onClose(code: Int, reason: String) {
                 log.d(tag = TAG) { "WebSocket closed for ${accountInfo.username}@${accountInfo.domain}" }
 
-
-                val account = databaseManager?.getActiveSipAccounts()
-                log.d(tag = TAG) { "accountr ${accountInfo.username}@${accountInfo.domain}" }
-
                 if (code != 1000 && !isShuttingDown) {
-                    // Delegar reconexión al SipReconnectionManager
-
                     reconnectionManager.startReconnectionProcess(listOf(accountInfo))
                 }
             }
@@ -1149,7 +1180,6 @@ class SipCoreManager private constructor(
                     if (account != null && account.webSocketClient.value?.isConnected() == true) {
                         messageHandler.sendRegister(account, isAppInBackground)
                     } else {
-                        // Delegar reconexión al manager
                         account?.let {
                             reconnectionManager.reconnectAccountWithRetry(it)
                         }
@@ -1163,7 +1193,6 @@ class SipCoreManager private constructor(
 
     fun handleRegistrationError(accountInfo: AccountInfo, reason: String) {
         val accountKey = "${accountInfo.username}@${accountInfo.domain}"
-
         handleRegistrationFailure(accountKey, reason)
     }
 
@@ -1188,6 +1217,7 @@ class SipCoreManager private constructor(
             )
         }
     }
+
     suspend fun forceGuardianRecovery(): String {
         return try {
             registrationGuardian.forceRecoverAllAccounts()
@@ -1196,7 +1226,6 @@ class SipCoreManager private constructor(
         }
     }
 
-    // NUEVO: Diagnóstico del guardian
     suspend fun getGuardianDiagnostic(): String {
         return try {
             registrationGuardian.getDiagnosticInfo()
@@ -1205,14 +1234,10 @@ class SipCoreManager private constructor(
         }
     }
 
-
     private fun handleRegistrationFailure(accountKey: String, reason: String) {
         log.e(tag = TAG) { "Handling registration failure for $accountKey: $reason" }
-
         val accountInfo = activeAccounts[accountKey] ?: return
-
         updateRegistrationState(accountKey, RegistrationState.FAILED)
-        
     }
 
     private fun scheduleDelayedRecovery(accountKey: String, delayMs: Long) {
@@ -1224,26 +1249,22 @@ class SipCoreManager private constructor(
                 log.d(tag = TAG) { "Attempting delayed recovery for $accountKey" }
 
                 try {
-                    // Verificar red primero
                     if (!networkManager.isNetworkAvailable()) {
                         log.w(tag = TAG) { "Network unavailable for delayed recovery of $accountKey" }
                         return@launch
                     }
 
-                    // Intentar recuperación desde BD si es necesario
-                    val dbManager = getDatabaseManager()
+                    val dbManager = databaseManager
                     val dbAccount = dbManager?.getSipAccountByCredentials(
                         accountInfo.username,
                         accountInfo.domain
                     )
 
                     if (dbAccount != null) {
-                        // Actualizar credenciales desde BD
                         accountInfo.password = dbAccount.password
                         accountInfo.token.value = dbAccount.pushToken ?: ""
                         accountInfo.provider.value = dbAccount.pushProvider ?: "fcm"
 
-                        // Intentar registro
                         val success = safeRegister(accountInfo, true)
 
                         if (success) {
@@ -1271,14 +1292,12 @@ class SipCoreManager private constructor(
         val corrections = mutableListOf<String>()
 
         try {
-            // 1. Verificar cuentas en memoria vs BD
-            val dbManager = getDatabaseManager()
+            val dbManager = databaseManager
             val dbAccounts = runBlocking { dbManager?.getRegisteredSipAccounts()?.first() ?: emptyList() }
 
             report.appendLine("Active accounts in memory: ${activeAccounts.size}")
             report.appendLine("Accounts in database: ${dbAccounts.size}")
 
-            // 2. Verificar estados inconsistentes
             activeAccounts.forEach { (accountKey, accountInfo) ->
                 val registrationState = getRegistrationState(accountKey)
                 val webSocketConnected = accountInfo.webSocketClient.value?.isConnected() == true
@@ -1288,12 +1307,9 @@ class SipCoreManager private constructor(
                 report.appendLine("  Internal Flag: ${accountInfo.isRegistered}")
                 report.appendLine("  WebSocket Connected: $webSocketConnected")
 
-                // Detectar inconsistencias
                 when {
                     registrationState == RegistrationState.FAILED -> {
                         issues.add("$accountKey has FAILED state")
-
-                        // Intentar corrección automática
                         CoroutineScope(Dispatchers.IO).launch {
                             log.d(tag = TAG) { "Auto-correcting FAILED state for $accountKey" }
                             handleRegistrationFailure(accountKey, "Health check detected failure")
@@ -1303,8 +1319,6 @@ class SipCoreManager private constructor(
 
                     registrationState == RegistrationState.OK && !webSocketConnected -> {
                         issues.add("$accountKey marked as OK but WebSocket not connected")
-
-                        // Corregir estado
                         updateRegistrationState(accountKey, RegistrationState.NONE)
                         accountInfo.isRegistered.value = false
                         corrections.add("Corrected state for $accountKey to NONE")
@@ -1312,8 +1326,6 @@ class SipCoreManager private constructor(
 
                     registrationState == RegistrationState.NONE && webSocketConnected -> {
                         issues.add("$accountKey has WebSocket connected but state is NONE")
-
-                        // Verificar si realmente está registrado
                         if (accountInfo.isRegistered.value) {
                             updateRegistrationState(accountKey, RegistrationState.OK)
                             corrections.add("Corrected state for $accountKey to OK")
@@ -1321,13 +1333,9 @@ class SipCoreManager private constructor(
                     }
 
                     registrationState == RegistrationState.IN_PROGRESS -> {
-                        // Verificar si lleva mucho tiempo en progreso
-                        val stateHistory = CallStateManager.getStateHistory()
-                        // Si es necesario, resetear estado
                         issues.add("$accountKey stuck in IN_PROGRESS state")
-
                         CoroutineScope(Dispatchers.IO).launch {
-                            delay(5000) // Dar tiempo para completarse
+                            delay(5000)
                             if (getRegistrationState(accountKey) == RegistrationState.IN_PROGRESS) {
                                 updateRegistrationState(accountKey, RegistrationState.FAILED)
                                 handleRegistrationFailure(accountKey, "Stuck in progress")
@@ -1338,13 +1346,11 @@ class SipCoreManager private constructor(
                 }
             }
 
-            // 3. Verificar cuentas en BD que no están en memoria
             dbAccounts.forEach { dbAccount ->
                 val accountKey = "${dbAccount.username}@${dbAccount.domain}"
                 if (!activeAccounts.containsKey(accountKey)) {
                     issues.add("Account $accountKey exists in DB but not in memory")
 
-                    // Recuperar cuenta
                     CoroutineScope(Dispatchers.IO).launch {
                         try {
                             val accountInfo = AccountInfo(
@@ -1361,7 +1367,6 @@ class SipCoreManager private constructor(
                             activeAccounts[accountKey] = accountInfo
                             updateRegistrationState(accountKey, RegistrationState.NONE)
 
-                            // Intentar registro
                             val success = safeRegister(accountInfo, true)
                             log.d(tag = TAG) { "Recovery attempt for $accountKey: $success" }
 
@@ -1373,7 +1378,6 @@ class SipCoreManager private constructor(
                 }
             }
 
-            // 4. Resumen
             report.appendLine("\n=== SUMMARY ===")
             report.appendLine("Issues found: ${issues.size}")
             report.appendLine("Corrections applied: ${corrections.size}")
@@ -1402,7 +1406,6 @@ class SipCoreManager private constructor(
         return finalReport
     }
 
-
     suspend fun forceReregisterAllAccounts(): String {
         log.d(tag = TAG) { "=== FORCING RE-REGISTRATION OF ALL ACCOUNTS ===" }
 
@@ -1414,7 +1417,6 @@ class SipCoreManager private constructor(
             report.appendLine("Accounts to re-register: ${accountsToReregister.size}")
 
             if (accountsToReregister.isEmpty()) {
-                // Intentar recuperar desde BD
                 val recoveredAccounts = recoverAccountsFromDatabase()
                 report.appendLine("Recovered accounts from database: ${recoveredAccounts.size}")
 
@@ -1430,15 +1432,13 @@ class SipCoreManager private constructor(
                 try {
                     report.appendLine("\nProcessing: $accountKey")
 
-                    // 1. Limpiar estado actual
                     accountInfo.webSocketClient.value?.close()
                     accountInfo.webSocketClient.value = null
                     accountInfo.isRegistered.value = false
                     updateRegistrationState(accountKey, RegistrationState.NONE)
 
-                    delay(1000) // Esperar limpieza
+                    delay(1000)
 
-                    // 2. Intentar registro fresh
                     updateRegistrationState(accountKey, RegistrationState.IN_PROGRESS)
                     val success = safeRegister(accountInfo, true)
 
@@ -1451,10 +1451,9 @@ class SipCoreManager private constructor(
                     log.e(tag = TAG) { "Error force re-registering $accountKey: ${e.message}" }
                 }
 
-                delay(2000) // Delay entre cuentas
+                delay(2000)
             }
 
-            // Resumen final
             val successful = results.values.count { it }
             val failed = results.size - successful
 
@@ -1469,8 +1468,6 @@ class SipCoreManager private constructor(
 
             if (failed > 0) {
                 report.appendLine("⚠️ Some accounts failed re-registration - automatic recovery scheduled")
-
-                // Programar recovery para cuentas fallidas
                 results.filter { !it.value }.keys.forEach { accountKey ->
                     scheduleDelayedRecovery(accountKey, 10000L)
                 }
@@ -1490,13 +1487,12 @@ class SipCoreManager private constructor(
 
     fun getCallStatistics() = callHistoryManager.getCallStatistics()
     fun getRegistrationState(): RegistrationState {
-        val registeredAccounts =
-            _registrationStates.value.values.filter { it == RegistrationState.OK }
+        val registeredAccounts = _registrationStates.value.values.filter { it == RegistrationState.OK }
         return if (registeredAccounts.isNotEmpty()) RegistrationState.OK else RegistrationState.NONE
     }
 
     fun currentCall(): Boolean = callManager?.hasActiveCall() ?: false
-    fun currentCallConnected(): Boolean = callManager?.hasConnectedCall() ?:false
+    fun currentCallConnected(): Boolean = callManager?.hasConnectedCall() ?: false
     fun getCurrentCallState(): CallStateInfo = CallStateManager.getCurrentState()
 
     fun getAllActiveCalls(): List<CallData> = MultiCallManager.getAllCalls()
@@ -1523,8 +1519,6 @@ class SipCoreManager private constructor(
     suspend fun onAppForegrounded() {
         log.d(tag = TAG) { "App foregrounded - updating registrations and checking connectivity" }
         isAppInBackground = false
-
-        // Verificar conectividad al regresar del background
         verifyAndFixConnectivity()
         refreshAllRegistrationsWithNewUserAgent()
     }
@@ -1536,9 +1530,7 @@ class SipCoreManager private constructor(
             }
         }
     }
-    /**
-     * Cambia una cuenta específica a modo push con verificación previa de conectividad
-     */
+
     suspend fun switchToPushMode(username: String, domain: String) {
         val accountKey = "$username@$domain"
         val accountInfo = activeAccounts[accountKey] ?: run {
@@ -1555,26 +1547,22 @@ class SipCoreManager private constructor(
         updateRegistrationState(accountKey, RegistrationState.IN_PROGRESS)
 
         try {
-            // CRÍTICO: Asegurar conectividad WebSocket antes del cambio
             if (!ensureWebSocketConnectivity(accountInfo)) {
                 log.e(tag = TAG) { "❌ Cannot ensure WebSocket connectivity for push mode switch: $accountKey" }
                 updateRegistrationState(accountKey, RegistrationState.FAILED)
                 return
             }
 
-            // Verificar una vez más que el WebSocket está saludable
             if (!accountInfo.isWebSocketHealthy()) {
                 log.e(tag = TAG) { "❌ WebSocket not healthy after connectivity check for push mode: $accountKey" }
                 updateRegistrationState(accountKey, RegistrationState.FAILED)
                 return
             }
 
-            // Cambiar a modo push
             val pushUserAgent = "${userAgent()} Push"
             accountInfo.userAgent.value = pushUserAgent
             isAppInBackground = true
 
-            // Enviar registro en modo push
             messageHandler.sendRegister(accountInfo, true)
 
             log.d(tag = TAG) { "✅ Account switched to push mode successfully: $accountKey" }
@@ -1585,9 +1573,6 @@ class SipCoreManager private constructor(
         }
     }
 
-    /**
-     * Cambia una cuenta específica a modo foreground con verificación previa de conectividad
-     */
     suspend fun switchToForegroundMode(username: String, domain: String) {
         val accountKey = "$username@$domain"
         val accountInfo = activeAccounts[accountKey] ?: run {
@@ -1604,25 +1589,21 @@ class SipCoreManager private constructor(
         updateRegistrationState(accountKey, RegistrationState.IN_PROGRESS)
 
         try {
-            // CRÍTICO: Asegurar conectividad WebSocket antes del cambio
             if (!ensureWebSocketConnectivity(accountInfo)) {
                 log.e(tag = TAG) { "❌ Cannot ensure WebSocket connectivity for foreground mode switch: $accountKey" }
                 updateRegistrationState(accountKey, RegistrationState.FAILED)
                 return
             }
 
-            // Verificar una vez más que el WebSocket está saludable
             if (!accountInfo.isWebSocketHealthy()) {
                 log.e(tag = TAG) { "❌ WebSocket not healthy after connectivity check for foreground mode: $accountKey" }
                 updateRegistrationState(accountKey, RegistrationState.FAILED)
                 return
             }
 
-            // Cambiar a modo foreground
             accountInfo.userAgent.value = userAgent()
             isAppInBackground = false
 
-            // Enviar registro en modo foreground
             messageHandler.sendRegister(accountInfo, false)
 
             log.d(tag = TAG) { "✅ Account switched to foreground mode successfully: $accountKey" }
@@ -1632,7 +1613,6 @@ class SipCoreManager private constructor(
             updateRegistrationState(accountKey, RegistrationState.FAILED)
         }
     }
-
     /**
      * Cambiar TODAS las cuentas activas a modo push con verificación de conectividad
      */
@@ -1798,9 +1778,9 @@ class SipCoreManager private constructor(
      */
     suspend fun searchCallLogsInDatabase(query: String): List<CallLog> {
         return try {
-            val dbManager = DatabaseManager.getInstance()
-            val searchResults = dbManager.searchCallLogs(query).first()
-            searchResults.toCallLogs()
+            val dbManager = databaseManager
+            val searchResults = dbManager?.searchCallLogs(query)?.first()
+            searchResults!!.toCallLogs()
         } catch (e: Exception) {
             log.e(tag = TAG) { "Error searching call logs in database: ${e.message}" }
             emptyList()
@@ -1812,9 +1792,9 @@ class SipCoreManager private constructor(
      */
     suspend fun getMissedCallsFromDatabase(): List<CallLog> {
         return try {
-            val dbManager = DatabaseManager.getInstance()
-            val missedCallsWithContact = dbManager.getMissedCallLogs().first()
-            missedCallsWithContact.toCallLogs()
+            val dbManager = databaseManager
+            val missedCallsWithContact = dbManager?.getMissedCallLogs()?.first()
+            missedCallsWithContact!!.toCallLogs()
         } catch (e: Exception) {
             log.e(tag = TAG) { "Error getting missed calls from database: ${e.message}" }
             callHistoryManager.getMissedCalls()
@@ -1824,9 +1804,9 @@ class SipCoreManager private constructor(
     suspend fun getCallLogsFromDatabase(limit: Int = 50): List<CallLog> {
         return try {
             val dbIntegration = DatabaseAutoIntegration.getInstance( this)
-            val dbManager = DatabaseManager.getInstance()
-            val callLogsWithContact = dbManager.getRecentCallLogs(limit).first()
-            callLogsWithContact.toCallLogs()
+            val dbManager = databaseManager
+            val callLogsWithContact = dbManager?.getRecentCallLogs(limit)?.first()
+            callLogsWithContact!!.toCallLogs()
         } catch (e: Exception) {
             log.e(tag = TAG) { "Error getting call logs from database: ${e.message}" }
             callHistoryManager.getAllCallLogs()
@@ -1846,7 +1826,7 @@ class SipCoreManager private constructor(
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val dbManager = DatabaseManager.getInstance()
+                val dbManager = databaseManager
                 val currentAccount = currentAccountInfo
 
                 if (currentAccount == null) {
@@ -1855,13 +1835,13 @@ class SipCoreManager private constructor(
                 }
 
                 // Buscar o crear cuenta en BD
-                var account = dbManager.getSipAccountByCredentials(
+                var account = dbManager?.getSipAccountByCredentials(
                     currentAccount.username,
                     currentAccount.domain
                 )
 
                 if (account == null) {
-                    account = dbManager.createOrUpdateSipAccount(
+                    account = dbManager?.createOrUpdateSipAccount(
                         username = currentAccount.username,
                         password = currentAccount.password,
                         domain = currentAccount.domain
@@ -1886,12 +1866,14 @@ class SipCoreManager private constructor(
                         // Calcular endTime basado en duración
                         val endTime = callData.startTime + (callLog.duration * 1000)
 
-                        dbManager.createCallLog(
-                            accountId = account.id,
-                            callData = callData,
-                            callType = callLog.callType,
-                            endTime = endTime
-                        )
+                        account?.let {
+                            dbManager?.createCallLog(
+                                accountId = it.id,
+                                callData = callData,
+                                callType = callLog.callType,
+                                endTime = endTime
+                            )
+                        }
 
                     } catch (e: Exception) {
                         log.e(tag = TAG) { "Error syncing individual call log ${callLog.id}: ${e.message}" }

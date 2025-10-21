@@ -97,11 +97,11 @@ kotlin {
         val androidMain by getting {
             dependencies {
                 implementation(libs.androidx.lifecycle.process)
-
+                implementation("io.github.webrtc-sdk:android:137.7151.04")
                 implementation("androidx.core:core-ktx:1.17.0")
                 implementation("io.insert-koin:koin-android:4.1.1")
                 implementation("io.ktor:ktor-client-okhttp:3.3.1")
-                implementation("com.shepeliev:webrtc-kmp:0.125.11")
+//                implementation("com.shepeliev:webrtc-kmp:0.125.11")
                 implementation(libs.androidx.room.sqlite.wrapper)
             }
         }

@@ -327,60 +327,6 @@ fun AccountInfo.isWebSocketHealthy(): Boolean {
     return webSocket.isConnected()
 }
 
-// 4. MÉTODO MEJORADO EN SIPCOREMAGER
-fun SipCoreManager.initializeBootRegistration() {
-    CoroutineScope(Dispatchers.IO).launch {
-        try {
-            log.d(tag = "SipCoreManager") { "Starting boot registration process..." }
-
-            val dbManager = getDatabaseManager()
-            if (dbManager == null) {
-                log.e(tag = "SipCoreManager") { "Database manager not available for boot registration" }
-                return@launch
-            }
-
-            val bootRegistrationManager = BootRegistrationManager(this@initializeBootRegistration, dbManager)
-            val result = bootRegistrationManager.recoverAndRegisterAllAccounts()
-
-            when (result) {
-                is RegistrationRecoveryResult.AllSuccessful -> {
-                    log.d(tag = "SipCoreManager") { "All ${result.results.size} accounts registered successfully at boot" }
-                    notifyBootRegistrationSuccess(result.results)
-                }
-                is RegistrationRecoveryResult.PartialSuccess -> {
-                    log.w(tag = "SipCoreManager") { "Boot registration partial success: ${result.successful} successful, ${result.failed} failed" }
-                    notifyBootRegistrationPartial(result.results, result.successful, result.failed)
-
-                    // Programar reintentos para cuentas fallidas
-                    scheduleFailedAccountRetries(result.results.filterValues { it == RegistrationState.FAILED }.keys)
-                }
-                is RegistrationRecoveryResult.AllFailed -> {
-                    log.e(tag = "SipCoreManager") { "All boot registrations failed" }
-                    notifyBootRegistrationFailure(result.results)
-
-                    // Programar reintento completo después de un delay
-                    scheduleCompleteRegistrationRetry(30000L) // 30 segundos
-                }
-                is RegistrationRecoveryResult.NetworkUnavailable -> {
-                    log.w(tag = "SipCoreManager") { "Network unavailable during boot registration" }
-
-                    // Esperar conectividad y reintentar
-                    observeNetworkAndRetryRegistration()
-                }
-                is RegistrationRecoveryResult.CriticalError -> {
-                    log.e(tag = "SipCoreManager") { "Critical error in boot registration: ${result.error}" }
-                }
-                else -> {
-                    log.d(tag = "SipCoreManager") { "Boot registration result: $result" }
-                }
-            }
-
-        } catch (e: Exception) {
-            log.e(tag = "SipCoreManager") { "Unexpected error in boot registration: ${e.message}" }
-        }
-    }
-}
-
 // 5. MÉTODOS DE NOTIFICACIÓN Y REINTENTOS
 private fun SipCoreManager.notifyBootRegistrationSuccess(results: Map<String, RegistrationState>) {
     sipCallbacks?.let { callbacks ->
@@ -435,38 +381,38 @@ private fun SipCoreManager.scheduleFailedAccountRetries(failedAccounts: Set<Stri
         }
     }
 }
-
-private fun SipCoreManager.scheduleCompleteRegistrationRetry(delayMs: Long) {
-    CoroutineScope(Dispatchers.IO).launch {
-        delay(delayMs)
-
-        log.d(tag = "SipCoreManager") { "Attempting complete registration retry" }
-
-        try {
-            initializeBootRegistration()
-        } catch (e: Exception) {
-            log.e(tag = "SipCoreManager") { "Error in complete registration retry: ${e.message}" }
-        }
-    }
-}
-
-private fun SipCoreManager.observeNetworkAndRetryRegistration() {
-    networkManager.setConnectivityListener(object : NetworkConnectivityListener {
-        override fun onNetworkRestored() {
-            log.d(tag = "SipCoreManager") { "Network restored, retrying boot registration" }
-
-            CoroutineScope(Dispatchers.IO).launch {
-                delay(3000L) // Esperar estabilización
-                initializeBootRegistration()
-            }
-        }
-
-        override fun onNetworkLost(): Job {
-            return Job()
-        }
-
-
-        override fun onReconnectionStarted() {}
-        override fun onReconnectionCompleted(successful: Boolean) {}
-    })
-}
+//
+//private fun SipCoreManager.scheduleCompleteRegistrationRetry(delayMs: Long) {
+//    CoroutineScope(Dispatchers.IO).launch {
+//        delay(delayMs)
+//
+//        log.d(tag = "SipCoreManager") { "Attempting complete registration retry" }
+//
+//        try {
+//            initializeBootRegistration()
+//        } catch (e: Exception) {
+//            log.e(tag = "SipCoreManager") { "Error in complete registration retry: ${e.message}" }
+//        }
+//    }
+//}
+//
+//private fun SipCoreManager.observeNetworkAndRetryRegistration() {
+//    networkManager.setConnectivityListener(object : NetworkConnectivityListener {
+//        override fun onNetworkRestored() {
+//            log.d(tag = "SipCoreManager") { "Network restored, retrying boot registration" }
+//
+//            CoroutineScope(Dispatchers.IO).launch {
+//                delay(3000L) // Esperar estabilización
+//                initializeBootRegistration()
+//            }
+//        }
+//
+//        override fun onNetworkLost(): Job {
+//            return Job()
+//        }
+//
+//
+//        override fun onReconnectionStarted() {}
+//        override fun onReconnectionCompleted(successful: Boolean) {}
+//    })
+//}

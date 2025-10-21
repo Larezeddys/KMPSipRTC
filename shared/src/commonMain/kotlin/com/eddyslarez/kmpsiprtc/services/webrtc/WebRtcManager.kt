@@ -150,6 +150,7 @@ interface WebRtcEventListener {
      * Called when a new ICE candidate is generated
      */
     fun onIceCandidate(candidate: String, sdpMid: String, sdpMLineIndex: Int)
+    fun onRemoteAudioData(audioBytes: ByteArray) {}
 
     /**
      * Called when the connection state changes

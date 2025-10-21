@@ -1,11 +1,12 @@
 package com.eddyslarez.kmpsiprtc.data.database
 
-import com.eddyslarez.kmpsiprtc.data.database.converters.DatabaseConverters
+
 import androidx.room.Database
 import androidx.room.RoomDatabase
 import androidx.room.ConstructedBy
 import androidx.room.RoomDatabaseConstructor
 import androidx.room.TypeConverters
+import com.eddyslarez.kmpsiprtc.data.database.converters.DatabaseConverters
 import com.eddyslarez.kmpsiprtc.data.database.dao.*
 import com.eddyslarez.kmpsiprtc.data.database.entities.*
 
@@ -30,6 +31,10 @@ abstract class SipDatabase : RoomDatabase() {
     abstract fun contactDao(): ContactDao
     abstract fun callStateDao(): CallHistoryDao
     abstract fun appConfigDao(): AppConfigDao
+
+    companion object {
+        const val DATABASE_NAME = "sip.db"
+    }
 }
 
 @Suppress("NO_ACTUAL_FOR_EXPECT")

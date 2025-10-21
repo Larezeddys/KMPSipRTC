@@ -7,10 +7,11 @@ import com.eddyslarez.kmpsiprtc.platform.AndroidContext
 
 
 actual fun getDatabaseBuilder(): RoomDatabase.Builder<SipDatabase> {
-     val context: Context = AndroidContext.get()
-    val dbFile = context.getDatabasePath("sip.db")
-    return Room.databaseBuilder<SipDatabase>(
-        context = context.applicationContext,
+    val appContext: Context = AndroidContext.get()
+    val dbFile = appContext.getDatabasePath(SipDatabase.DATABASE_NAME)
+    return Room.databaseBuilder(
+        context = appContext,
         name = dbFile.absolutePath
+
     )
 }

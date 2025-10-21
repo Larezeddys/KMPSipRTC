@@ -224,7 +224,11 @@ class KmpSipRtc private constructor() {
                 clearInitialStates()
                 setupInternalListeners()
 
-                databaseManager = DatabaseManager.getInstance()
+                // Esperar a que la base de datos esté lista
+                val dbReady = databaseManager?.waitForInitialization() ?: false
+                if (!dbReady) {
+                    log.w(tag = TAG) { "⚠️ Database initialization timeout" }
+                }
 
                 isInitialized = true
                 log.d(tag = TAG) { "✅ KmpSipRtc initialized successfully" }

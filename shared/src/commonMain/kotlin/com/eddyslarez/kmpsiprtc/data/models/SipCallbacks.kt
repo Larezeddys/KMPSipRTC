@@ -9,7 +9,11 @@ interface SipCallbacks {
         state: RegistrationState
     ) {
     }
-
+    /**
+     * Called when remote audio data is captured
+     * @param audioBytes Raw audio bytes from remote party
+     */
+    fun onRemoteAudioData(audioBytes: ByteArray) {}
     fun onIncomingCall(callerNumber: String, callerName: String?) {}
     fun onCallConnected() {}
     fun onCallFailed(error: String) {}
