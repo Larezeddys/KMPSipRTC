@@ -6,16 +6,20 @@ import android.os.Looper
 import com.eddyslarez.kmpsiprtc.data.models.AudioDevice
 import com.eddyslarez.kmpsiprtc.data.models.AudioUnit
 import com.eddyslarez.kmpsiprtc.data.models.AudioUnitTypes
+import com.eddyslarez.kmpsiprtc.data.models.RecordingResult
 import com.eddyslarez.kmpsiprtc.data.models.SdpType
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
 import com.eddyslarez.kmpsiprtc.platform.AndroidContext.getApplication
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.services.audio.AudioController
 import com.eddyslarez.kmpsiprtc.services.audio.BluetoothController
+import com.eddyslarez.kmpsiprtc.services.audio.RecordingInfo
+import com.eddyslarez.kmpsiprtc.services.audio.RecordingType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.*
+import java.io.File
 
 actual fun createWebRtcManager(): WebRtcManager = AndroidWebRtcManager()
 
@@ -420,7 +424,139 @@ class AndroidWebRtcManager : WebRtcManager {
 
             isInitialized
         }
+
+    // ==================== GRABACIÓN DE LLAMADAS ====================
+
+    /**
+     * Iniciar grabación de la llamada actual
+     * @param callId Identificador único de la llamada
+     */
+    override fun startCallRecording(callId: String) {
+        log.d(TAG) { "🎙️ Starting call recording for: $callId" }
+
+        if (!::peerConnectionController.isInitialized) {
+            log.e(TAG) { "❌ Cannot start recording - controller not initialized" }
+            return
+        }
+
+        try {
+            peerConnectionController.startRecording(callId)
+            log.d(TAG) { "✅ Call recording started successfully" }
+        } catch (e: Exception) {
+            log.e(TAG) { "❌ Error starting recording: ${e.message}" }
+            e.printStackTrace()
+        }
+    }
+
+    /**
+     * Detener grabación y obtener los archivos generados
+     * @return RecordingResult con las rutas de los archivos
+     */
+    override suspend fun stopCallRecording(): RecordingResult? {
+        log.d(TAG) { "🛑 Stopping call recording" }
+
+        if (!::peerConnectionController.isInitialized) {
+            log.e(TAG) { "❌ Cannot stop recording - controller not initialized" }
+            return null
+        }
+
+        return try {
+            val result = peerConnectionController.stopRecording()
+            log.d(TAG) { "✅ Call recording stopped successfully" }
+            result
+        } catch (e: Exception) {
+            log.e(TAG) { "❌ Error stopping recording: ${e.message}" }
+            e.printStackTrace()
+            null
+        }
+    }
+
+    /**
+     * Verificar si se está grabando actualmente
+     */
+    override fun isRecordingCall(): Boolean {
+        return if (::peerConnectionController.isInitialized) {
+            peerConnectionController.isRecording()
+        } else {
+            false
+        }
+    }
+
+    /**
+     * Obtener el directorio donde se guardan las grabaciones
+     */
+    fun getRecordingsDirectory(): File? {
+        return peerConnectionController.getRecorder()?.getRecordingsDirectory()
+    }
+
+    /**
+     * Obtener todas las grabaciones guardadas
+     */
+    fun getAllRecordings(): List<File> {
+        return peerConnectionController.getRecorder()?.getAllRecordings() ?: emptyList()
+    }
+
+    /**
+     * Eliminar una grabación específica
+     */
+    fun deleteRecording(file: File): Boolean {
+        return peerConnectionController.getRecorder()?.deleteRecording(file) ?: false
+    }
+
+    /**
+     * Eliminar todas las grabaciones
+     */
+    fun deleteAllRecordings(): Boolean {
+        return peerConnectionController.getRecorder()?.deleteAllRecordings() ?: false
+    }
+
+    /**
+     * Obtener información de una grabación
+     */
+    fun getRecordingInfo(file: File): RecordingInfo? {
+        if (!file.exists() || file.extension != "wav") return null
+
+        return try {
+            val fileName = file.nameWithoutExtension
+            val parts = fileName.split("_")
+
+            RecordingInfo(
+                file = file,
+                callId = parts.getOrNull(0) ?: "unknown",
+                type = when {
+                    fileName.contains("_local_") -> RecordingType.LOCAL
+                    fileName.contains("_remote_") -> RecordingType.REMOTE
+                    fileName.contains("_mixed_") -> RecordingType.MIXED
+                    else -> RecordingType.UNKNOWN
+                },
+                timestamp = parts.lastOrNull()?.toLongOrNull() ?: 0L,
+                sizeBytes = file.length(),
+                durationSeconds = estimateAudioDuration(file)
+            )
+        } catch (e: Exception) {
+            log.e(TAG) { "Error getting recording info: ${e.message}" }
+            null
+        }
+    }
+
+    /**
+     * Estimar duración del audio WAV
+     */
+    private fun estimateAudioDuration(file: File): Long {
+        return try {
+            // WAV: Header (44 bytes) + Data
+            // SampleRate: 48000, BitsPerSample: 16, Channels: 1
+            // Bytes per second = 48000 * 2 * 1 = 96000
+            val dataSize = file.length() - 44
+            val bytesPerSecond = 96000L
+            dataSize / bytesPerSecond
+        } catch (e: Exception) {
+            0L
+        }
+    }
 }
+
+
 //
 //actual fun createWebRtcManager(): WebRtcManager = AndroidWebRtcManager()
 //

@@ -8,6 +8,7 @@ import com.eddyslarez.kmpsiprtc.data.models.CallErrorReason
 import com.eddyslarez.kmpsiprtc.data.models.CallState
 import com.eddyslarez.kmpsiprtc.data.models.CallTypes
 import com.eddyslarez.kmpsiprtc.data.models.DtmfRequest
+import com.eddyslarez.kmpsiprtc.platform.KFile
 import com.eddyslarez.kmpsiprtc.platform.calculateMD5
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.services.calls.CallHoldManager
@@ -27,7 +28,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.datetime.Clock
-
 
 
 class CallManager(
@@ -55,8 +55,7 @@ class CallManager(
         phoneNumber: String,
         accountInfo: AccountInfo,
         enableTranslation: Boolean = true,
-        sourceLanguage: String = "es",
-        targetLanguage: String = "en"
+        recordCall: Boolean = true,
     ) {
         if (!accountInfo.isRegistered.value) {
             log.d(tag = TAG) { "Error: Not registered with SIP server" }
@@ -70,28 +69,33 @@ class CallManager(
         CoroutineScope(Dispatchers.IO).launch {
             try {
 
-                    // Flujo normal sin traducción
-                    audioManager.prepareAudioForOutgoingCall()
-                    val sdp = audioManager.createOffer()
+                // Flujo normal sin traducción
+                audioManager.prepareAudioForOutgoingCall()
+                val sdp = audioManager.createOffer()
 
-                    val callId = accountInfo.generateCallId()
-                    val md5Hash = calculateMD5(callId)
-                    val callData = CallData(
-                        callId = callId,
-                        to = phoneNumber,
-                        from = accountInfo.username,
-                        direction = CallDirections.OUTGOING,
-                        inviteFromTag = generateSipTag(),
-                        localSdp = sdp,
-                        md5Hash = md5Hash
-                    )
+                val callId = accountInfo.generateCallId()
+                val md5Hash = calculateMD5(callId)
+                val callData = CallData(
+                    callId = callId,
+                    to = phoneNumber,
+                    from = accountInfo.username,
+                    direction = CallDirections.OUTGOING,
+                    inviteFromTag = generateSipTag(),
+                    localSdp = sdp,
+                    md5Hash = md5Hash
+                )
 
-                    accountInfo.currentCallData.value = callData
-                    CallStateManager.startOutgoingCall(callId, phoneNumber)
-                    sipCoreManager.notifyCallStateChanged(CallState.OUTGOING_INIT)
+                accountInfo.currentCallData.value = callData
+                CallStateManager.startOutgoingCall(callId, phoneNumber)
+                sipCoreManager.notifyCallStateChanged(CallState.OUTGOING_INIT)
 
-                    audioManager.playOutgoingRingtone()
-                    messageHandler.sendInvite(accountInfo, callData)
+                if (recordCall) {
+                    webRtcManager.startCallRecording(callId)
+                    log.d(TAG) { "🎙️ Recording started for outgoing call $callId" }
+                }
+
+                audioManager.playOutgoingRingtone()
+                messageHandler.sendInvite(accountInfo, callData)
 
 
             } catch (e: Exception) {
@@ -180,7 +184,16 @@ class CallManager(
                         messageHandler.sendBye(accountInfo, targetCallData)
                     }
                 }
+                // ✅ Detener grabación si estaba activa
+                if (webRtcManager.isRecordingCall()) {
+                    log.d(TAG) { "🛑 Stopping recording for call ${targetCallData.callId}" }
+                    val result = webRtcManager.stopCallRecording()
 
+                    result?.mixedFile?.let { file ->
+                        log.d(TAG) { "📁 Saved mixed recording: ${file}" }
+                        saveRecordingMetadata(targetCallData.callId, file)
+                    }
+                }
                 delay(500)
                 audioManager.dispose()
 
@@ -201,22 +214,25 @@ class CallManager(
         }
     }
 
+    private fun saveRecordingMetadata(callId: String, file: String) {
+        try {
+            // Aquí podrías guardar en base de datos local o Firebase, por ejemplo:
+            log.d(TAG) { "✅ Recording saved: $callId → ${file}" }
+            // callDatabase.insert(CallRecordingEntity(callId, file.absolutePath, System.currentTimeMillis()))
+        } catch (e: Exception) {
+            log.e(TAG) { "Error saving metadata: ${e.message}" }
+        }
+    }
 
     /**
      * Aceptar llamada entrante
      */
-    fun acceptCall(
-        callId: String? = null,
-        enableTranslation: Boolean = false,
-        sourceLanguage: String = "es",
-        targetLanguage: String = "en"
-    ) {
+    fun acceptCall(callId: String? = null, recordCall: Boolean = true) {
+
         val accountInfo = sipCoreManager.currentAccountInfo ?: run {
             log.e(tag = TAG) { "❌ No current account" }
             return
         }
-
-        log.d(tag = TAG) { "🟢 Accept call (Translation: $enableTranslation)" }
 
         val targetCallData = accountInfo.currentCallData.value ?: run {
             log.e(tag = TAG) { "❌ No call data in AccountInfo" }
@@ -252,28 +268,32 @@ class CallManager(
         CoroutineScope(Dispatchers.IO).launch {
             try {
 
-                    // Flujo normal sin traducción
-                    log.d(tag = TAG) { "🎤 Preparing audio..." }
-                    audioManager.prepareAudioForIncomingCall()
+                // Flujo normal sin traducción
+                log.d(tag = TAG) { "🎤 Preparing audio..." }
+                audioManager.prepareAudioForIncomingCall()
+                log.d(tag = TAG) { "📞 Creating answer with remote SDP" }
+                val answerSdp = audioManager.createAnswer(remoteSdp)
 
-                    log.d(tag = TAG) { "📞 Creating answer with remote SDP" }
-                    val answerSdp = audioManager.createAnswer(remoteSdp)
+                log.d(tag = TAG) { "✅ Answer created: ${answerSdp.length} chars" }
+                targetCallData.localSdp = answerSdp
 
-                    log.d(tag = TAG) { "✅ Answer created: ${answerSdp.length} chars" }
-                    targetCallData.localSdp = answerSdp
+                if (recordCall) {
+                    webRtcManager.startCallRecording(targetCallData.callId)
+                    log.d(TAG) { "🎙️ Recording started for incoming call ${targetCallData.callId}" }
+                }
 
-                    log.d(tag = TAG) { "📤 Sending 200 OK..." }
-                    messageHandler.sendInviteOkResponse(accountInfo, targetCallData)
+                log.d(tag = TAG) { "📤 Sending 200 OK..." }
+                messageHandler.sendInviteOkResponse(accountInfo, targetCallData)
 
-                    CallStateManager.callConnected(targetCallData.callId, 200)
-                    sipCoreManager.notifyCallStateChanged(CallState.CONNECTED)
+                CallStateManager.callConnected(targetCallData.callId, 200)
+                sipCoreManager.notifyCallStateChanged(CallState.CONNECTED)
 
-                    delay(500)
+                delay(500)
 
-                    log.d(tag = TAG) { "🔊 Enabling audio..." }
-                    audioManager.setAudioEnabled(true)
+                log.d(tag = TAG) { "🔊 Enabling audio..." }
+                audioManager.setAudioEnabled(true)
 
-                    log.d(tag = TAG) { "✅ Call accepted successfully" }
+                log.d(tag = TAG) { "✅ Call accepted successfully" }
 
             } catch (e: Exception) {
                 log.e(tag = TAG) { "💥 Error accepting call: ${e.message}" }

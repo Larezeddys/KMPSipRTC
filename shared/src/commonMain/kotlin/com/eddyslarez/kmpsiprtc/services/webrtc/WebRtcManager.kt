@@ -3,6 +3,7 @@ package com.eddyslarez.kmpsiprtc.services.webrtc
 import com.eddyslarez.kmpsiprtc.data.models.AudioDevice
 import com.eddyslarez.kmpsiprtc.data.models.AudioUnit
 import com.eddyslarez.kmpsiprtc.data.models.AudioUnitTypes
+import com.eddyslarez.kmpsiprtc.data.models.RecordingResult
 import com.eddyslarez.kmpsiprtc.data.models.SdpType
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
 
@@ -28,8 +29,9 @@ interface WebRtcManager {
     fun getActiveAudioRoute(): AudioUnitTypes?
 
     fun getAvailableAudioRoutes(): Set<AudioUnitTypes>
-
-
+    fun startCallRecording(callId: String)
+    suspend fun stopCallRecording(): RecordingResult?
+    fun isRecordingCall(): Boolean
     /**
      * Create an SDP answer in response to an offer
      * @param accountInfo The current account information
