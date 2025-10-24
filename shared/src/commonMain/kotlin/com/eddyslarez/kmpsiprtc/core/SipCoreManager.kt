@@ -58,6 +58,8 @@ import kotlin.text.set
 import kotlin.to
 import com.eddyslarez.kmpsiprtc.services.audio.AudioManager
 import com.eddyslarez.kmpsiprtc.services.audio.createAudioManager
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 class SipCoreManager private constructor(
     private val config: SipConfig,
@@ -145,19 +147,38 @@ class SipCoreManager private constructor(
         initializeReconnectionManager()
         initializeCallManager()
 
-        loadConfigurationFromDatabase()
-        setupWebRtcEventListener()
-        setupPlatformLifecycleObservers()
+            loadConfigurationFromDatabase()
+            setupWebRtcEventListener()
+            setupPlatformLifecycleObservers()
 
-        // NUEVO: Inicializar sistema de recuperación de boot
-        setupBootRegistrationRecovery()
-        initializeRegistrationGuardian()
+            setupBootRegistrationRecovery()
+            initializeRegistrationGuardian()
 
-        startAccountSyncTask()
-        CallStateManager.initialize()
+            startAccountSyncTask()
+            CallStateManager.initialize()
 
         log.d(tag = TAG) { "SIP Core initialization completed" }
     }
+
+    private fun cleanupOnFailure() {
+        try {
+            webRtcManager.dispose()
+        } catch (e: Exception) {
+            log.e(tag = TAG) { "Error during cleanup: ${e.message}" }
+        }
+    }
+
+    fun isHealthyForCalls(): Boolean {
+        return try {
+            webRtcManager.isInitialized() &&
+                    audioManager.isWebRtcInitialized() &&
+                    activeAccounts.isNotEmpty()
+        } catch (e: Exception) {
+            log.e(tag = TAG) { "Error checking health: ${e.message}" }
+            false
+        }
+    }
+
     private fun initializeRegistrationGuardian() {
         try {
             registrationGuardian = RegistrationGuardianManager(
@@ -1212,7 +1233,7 @@ class SipCoreManager private constructor(
         val accountInfo = activeAccounts[accountKey] ?: return
 
         updateRegistrationState(accountKey, RegistrationState.FAILED)
-        
+
     }
 
     private fun scheduleDelayedRecovery(accountKey: String, delayMs: Long) {

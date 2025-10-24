@@ -44,7 +44,7 @@ data class AudioDevice(
     val nativeDevice: Any? = null,       // Platform-specific device object
     val isOutput: Boolean,               // Input/Output flag
     val audioUnit: AudioUnit,            // Enhanced audio unit information
-    val connectionState: DeviceConnectionState = DeviceConnectionState.AVAILABLE,
+    var connectionState: DeviceConnectionState = DeviceConnectionState.AVAILABLE,
     val signalStrength: Int? = null,     // For Bluetooth devices (0-100)
     val batteryLevel: Int? = null,       // For Bluetooth devices (0-100)
     val isWireless: Boolean = false,     // Bluetooth, WiFi, etc.

@@ -274,7 +274,7 @@ class SipAudioManager(
      */
     fun dispose() {
         audioManager.stopAllRingtones()
-        webRtcManager.dispose()
+        webRtcManager.closePeerConnection()
     }
 
     /**

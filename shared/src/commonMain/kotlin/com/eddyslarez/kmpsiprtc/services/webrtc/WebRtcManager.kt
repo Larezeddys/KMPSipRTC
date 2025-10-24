@@ -6,47 +6,6 @@ import com.eddyslarez.kmpsiprtc.data.models.AudioUnitTypes
 import com.eddyslarez.kmpsiprtc.data.models.SdpType
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
 
-//interface WebRtcManager {
-//
-//    val isInitialized: Boolean
-//    val availableAudioDevices: StateFlow<Set<AudioDevice>>
-//    val currentAudioDevice: StateFlow<AudioDevice?>
-//
-//    fun initialize()
-//    fun dispose()
-//
-//    // Audio Management
-//    fun prepareAudioForCall()
-//    fun onBluetoothConnectionChanged(isConnected: Boolean)
-//    fun refreshAudioDevicesWithBluetoothPriority()
-//    fun applyAudioRouteChange(audioUnitType: AudioUnitTypes): Boolean
-//    fun getAvailableAudioUnits(): Set<AudioUnit>
-//    fun getCurrentActiveAudioUnit(): AudioUnit?
-//
-//    // WebRTC Core
-//    fun createOffer(onSuccess: (String) -> Unit, onError: (String) -> Unit)
-//    fun createAnswer(remoteSdp: String, onSuccess: (String) -> Unit, onError: (String) -> Unit)
-//    fun setRemoteDescription(
-//        sdp: String,
-//        type: String,
-//        onSuccess: () -> Unit,
-//        onError: (String) -> Unit
-//    )
-//
-//    fun addIceCandidate(candidate: String, sdpMid: String, sdpMLineIndex: Int)
-//    fun closePeerConnection()
-//
-//    fun setListener(listener: WebRtcEventListener)
-//
-//
-//    interface WebRtcEventListener {
-//        fun onIceCandidate(candidate: String, sdpMid: String, sdpMLineIndex: Int)
-//        fun onConnectionStateChange(state: WebRtcConnectionState)
-//        fun onRemoteAudioTrack()
-//        fun onAudioDeviceChanged(device: AudioDevice?)
-//    }
-//}
-
 interface WebRtcManager {
     /**
      * Initialize the WebRTC subsystem
