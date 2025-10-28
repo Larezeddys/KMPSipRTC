@@ -3,7 +3,6 @@ package com.eddyslarez.kmpsiprtc.core
 import com.eddyslarez.kmpsiprtc.data.database.DatabaseManager
 import com.eddyslarez.kmpsiprtc.data.models.AccountInfo
 import com.eddyslarez.kmpsiprtc.data.models.RegistrationState
-import com.eddyslarez.kmpsiprtc.data.models.isWebSocketHealthy
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.utils.ConcurrentMap
 import kotlinx.coroutines.CoroutineScope
@@ -55,11 +54,14 @@ class RegistrationGuardianManager(
      */
     fun initialize() {
         log.d(tag = TAG) { "🛡️ Initializing Registration Guardian" }
+
+        // ✅ INICIALIZAR EL NETWORK MANAGER
+        networkManager.initialize()
+
         isActive = true
         startHealthCheckMonitor()
         startAccountRecoveryFromDatabase()
     }
-
     /**
      * Monitor de salud continuo - El corazón del sistema
      */
@@ -92,15 +94,12 @@ class RegistrationGuardianManager(
 
         log.d(tag = TAG) { "🏥 Performing health check..." }
 
-        // 1. Obtener todas las cuentas (memoria + BD)
         val allAccounts = getAllAccountsFromAllSources()
-
         log.d(tag = TAG) { "Found ${allAccounts.size} accounts to check" }
 
-        // 2. Verificar cada cuenta
         allAccounts.forEach { (accountKey, accountInfo) ->
             checkAndFixAccountHealth(accountKey, accountInfo)
-        } as (String, AccountInfo) -> Unit
+        }
     }
 
     /**
@@ -154,10 +153,10 @@ class RegistrationGuardianManager(
      */
     private fun checkAndFixAccountHealth(accountKey: String, accountInfo: AccountInfo) {
         val currentState = sipCoreManager.getRegistrationState(accountKey)
-        val isWebSocketHealthy = accountInfo.isWebSocketHealthy()
+        val isWebSocketHealthy = sipCoreManager.sharedWebSocketManager.isWebSocketHealthy()
 
         log.d(tag = TAG) {
-            "🔍 Health check for $accountKey: state=$currentState, wsHealthy=$isWebSocketHealthy, registered=${accountInfo.isRegistered}"
+            "🔍 Health check for $accountKey: state=$currentState, registered=${accountInfo.isRegistered.value}"
         }
 
         // Detectar problemas
@@ -175,7 +174,8 @@ class RegistrationGuardianManager(
             }
 
             // Caso 3: Estado OK pero WebSocket no saludable
-            currentState == RegistrationState.OK && !isWebSocketHealthy -> {
+            currentState == RegistrationState.OK && !isWebSocketHealthy
+                -> {
                 log.w(tag = TAG) { "⚠️ Account $accountKey is OK but WebSocket unhealthy" }
                 true
             }
@@ -287,15 +287,8 @@ class RegistrationGuardianManager(
      */
     private suspend fun cleanupAccountState(accountInfo: AccountInfo) {
         try {
-            // Cerrar WebSocket existente
-            accountInfo.webSocketClient.value.let { ws ->
-                ws?.let {
-                    if (it.isConnected()) {
-                        ws.close()
-                    }
-                }
-            }
-            accountInfo.webSocketClient.value = null
+
+            sipCoreManager.sharedWebSocketManager.disconnect()
             accountInfo.isRegistered.value = false
 
             log.d(tag = TAG) { "🧹 Cleaned up state for ${accountInfo.username}@${accountInfo.domain}" }
@@ -460,7 +453,7 @@ class RegistrationGuardianManager(
             appendLine("\n--- Account States ---")
             activeAccounts.forEach { (accountKey, accountInfo) ->
                 val state = sipCoreManager.getRegistrationState(accountKey)
-                val wsHealthy = accountInfo.isWebSocketHealthy()
+                val wsHealthy = !sipCoreManager.sharedWebSocketManager.isWebSocketHealthy()
                 appendLine("$accountKey: state=$state, registered=${accountInfo.isRegistered}, wsHealthy=$wsHealthy")
             }
         }
@@ -482,5 +475,8 @@ class RegistrationGuardianManager(
             retryCounters.clear()
             lastRetryTimestamp.clear()
         }
+
+        // ✅ LIMPIAR EL NETWORK MANAGER
+        networkManager.dispose()
     }
 }

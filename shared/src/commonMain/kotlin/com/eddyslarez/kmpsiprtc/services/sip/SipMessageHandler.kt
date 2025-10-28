@@ -21,6 +21,9 @@ import kotlinx.coroutines.IO
 class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
 
     private val TAG = "SipMessageHandler"
+    private suspend fun sendViaSharedWebSocket(message: String): Boolean {
+        return sipCoreManager.sharedWebSocketManager.sendMessage(message)
+    }
 
     /**
      * Maneja mensajes SIP entrantes
@@ -102,7 +105,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                         Clock.System.now().toEpochMilliseconds() + (expiresValue * 1000L)
 
                     // Configurar renovación automática
-                    accountInfo.webSocketClient.value?.setRegistrationExpiration(
+                    sipCoreManager.sharedWebSocketManager.setRegistrationExpiration(
                         accountKey,
                         expirationTime
                     )
@@ -278,7 +281,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
     /**
      * NUEVO: Maneja 200 OK para re-INVITE (hold/resume)
      */
-    private fun handle200OKForReInvite(
+    private suspend fun handle200OKForReInvite(
         lines: List<String>,
         accountInfo: AccountInfo,
         callData: CallData
@@ -291,7 +294,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
 
             // Enviar ACK para re-INVITE
             val ack = SipMessageBuilder.buildAckMessage(accountInfo, callData)
-            accountInfo.webSocketClient.value?.send(ack)
+            sendViaSharedWebSocket(ack)
 
             // Determinar si es hold o resume basado en SDP
             val isRemoteOnHold = SipMessageParser.isSdpOnHold(remoteSdp)
@@ -376,7 +379,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
 
                     // CRÍTICO: Enviar ACK antes de activar audio
                     val ack = SipMessageBuilder.buildAckMessage(accountInfo, callData)
-                    accountInfo.webSocketClient.value?.send(ack)
+                    sendViaSharedWebSocket(ack)
                     log.d(tag = TAG) { "ACK enviado para call: ${callData.callId}" }
 
                     // Esperar un momento para que se establezca la conexión
@@ -450,7 +453,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 // CRÍTICO: Enviar ACK para 487 usando headers correctos
                 val ackMessage =
                     SipMessageBuilder.buildAckFor487Response(accountInfo, callData, lines)
-                accountInfo.webSocketClient.value?.send(ackMessage)
+                sendViaSharedWebSocket(ackMessage)
                 log.d(tag = TAG) { "ACK sent for 487 response" }
 
                 // Actualizar estado
@@ -501,7 +504,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                     append("CSeq: $cseqHeader\r\n")
                     append("Content-Length: 0\r\n\r\n")
                 }
-                accountInfo.webSocketClient.value?.send(errorResponse)
+                sendViaSharedWebSocket(errorResponse)
                 return
             }
 
@@ -564,12 +567,12 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
 
             // === ENVIAR RESPUESTAS SIP ===
             val tryingResponse = SipMessageBuilder.buildTryingResponse(accountInfo, callData)
-            accountInfo.webSocketClient.value?.send(tryingResponse)
+            sendViaSharedWebSocket(tryingResponse)
 
             CoroutineScope(Dispatchers.IO).launch {
                 delay(100)
                 val ringingResponse = SipMessageBuilder.buildRingingResponse(accountInfo, callData)
-                accountInfo.webSocketClient.value?.send(ringingResponse)
+                sendViaSharedWebSocket(ringingResponse)
 
                 delay(200)
                 sipCoreManager.audioManager.playIncomingRingtone(syncVibration = true)
@@ -586,7 +589,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
     /**
      * Maneja request BYE
      */
-    private fun handleByeRequest(lines: List<String>, accountInfo: AccountInfo) {
+    private suspend fun handleByeRequest(lines: List<String>, accountInfo: AccountInfo) {
         log.d(tag = TAG) { "🔴 Handling BYE request" }
 
         try {
@@ -595,7 +598,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
 
             // Enviar 200 OK para BYE
             val okResponse = SipMessageBuilder.buildByeOkResponse(accountInfo, lines)
-            accountInfo.webSocketClient.value?.send(okResponse)
+            sendViaSharedWebSocket(okResponse)
             log.d(tag = TAG) { "✅ 200 OK sent for BYE" }
 
             // Obtener callData
@@ -641,7 +644,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
     /**
      * Maneja request CANCEL
      */
-    private fun handleCancelRequest(lines: List<String>, accountInfo: AccountInfo) {
+    private suspend fun handleCancelRequest(lines: List<String>, accountInfo: AccountInfo) {
         log.d(tag = TAG) { "🟡 Handling CANCEL request" }
 
         try {
@@ -656,7 +659,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
 
             // Enviar 200 OK para CANCEL
             val cancelOkResponse = SipMessageBuilder.buildCancelOkResponse(accountInfo, lines)
-            accountInfo.webSocketClient.value?.send(cancelOkResponse)
+            sendViaSharedWebSocket(cancelOkResponse)
             log.d(tag = TAG) { "✅ 200 OK sent for CANCEL" }
 
             // Enviar 487 Request Terminated para el INVITE original
@@ -665,7 +668,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                     accountInfo,
                     callData
                 )
-                accountInfo.webSocketClient.value?.send(requestTerminatedResponse)
+                sendViaSharedWebSocket(requestTerminatedResponse)
                 log.d(tag = TAG) { "✅ 487 Request Terminated sent" }
 
                 // Actualizar estado
@@ -722,13 +725,13 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
     /**
      * Maneja request INFO (para DTMF)
      */
-    private fun handleInfoRequest(lines: List<String>, accountInfo: AccountInfo) {
+    private suspend fun handleInfoRequest(lines: List<String>, accountInfo: AccountInfo) {
         log.d(tag = TAG) { "Handling INFO request" }
 
         try {
             // Enviar 200 OK para INFO
             val okResponse = buildInfoOkResponse(lines)
-            accountInfo.webSocketClient.value?.send(okResponse)
+            sendViaSharedWebSocket(okResponse)
 
             // Procesar contenido DTMF si existe
             val contentType = SipMessageParser.extractHeader(lines, "Content-Type")
@@ -745,12 +748,12 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
     /**
      * Maneja request OPTIONS
      */
-    private fun handleOptionsRequest(lines: List<String>, accountInfo: AccountInfo) {
+    private suspend fun handleOptionsRequest(lines: List<String>, accountInfo: AccountInfo) {
         log.d(tag = TAG) { "Handling OPTIONS request" }
 
         try {
             val optionsResponse = buildOptionsResponse(lines)
-            accountInfo.webSocketClient.value?.send(optionsResponse)
+            sendViaSharedWebSocket(optionsResponse)
         } catch (e: Exception) {
             log.e(tag = TAG) { "Error handling OPTIONS request: ${e.message}" }
         }
@@ -838,7 +841,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
 
                     log.d(tag = TAG) { "Handling authentication  REGISTER ,  authenticatedRegister $authenticatedRegister" }
 
-                    accountInfo.webSocketClient.value?.send(authenticatedRegister)
+                    sendViaSharedWebSocket(authenticatedRegister)
                 }
 
                 "INVITE" -> {
@@ -850,7 +853,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                         )
                         callData.originalCallInviteMessage = authenticatedInvite
 
-                        accountInfo.webSocketClient.value?.send(authenticatedInvite)
+                        sendViaSharedWebSocket(authenticatedInvite)
                     }
                 }
             }
@@ -994,7 +997,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 accountInfo, callId, fromTag, isAppInBackground
             )
 
-            accountInfo.webSocketClient.value?.send(registerMessage)
+            sendViaSharedWebSocket(registerMessage)
             log.d(tag = TAG) { "REGISTER sent for ${accountInfo.username}@${accountInfo.domain}" }
 
         } catch (e: Exception) {
@@ -1014,7 +1017,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 accountInfo, callId, fromTag
             )
 
-            accountInfo.webSocketClient.value?.send(unregisterMessage)
+            sendViaSharedWebSocket(unregisterMessage)
             log.d(tag = TAG) { "UNREGISTER sent for ${accountInfo.username}@${accountInfo.domain}" }
 
         } catch (e: Exception) {
@@ -1032,7 +1035,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             )
 
             callData.originalCallInviteMessage = inviteMessage
-            accountInfo.webSocketClient.value?.send(inviteMessage)
+            sendViaSharedWebSocket(inviteMessage)
 
             log.d(tag = TAG) { "INVITE sent for call ${callData.callId}" }
 
@@ -1047,7 +1050,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
     suspend fun sendBye(accountInfo: AccountInfo, callData: CallData) {
         try {
             val byeMessage = SipMessageBuilder.buildByeMessage(accountInfo, callData)
-            accountInfo.webSocketClient.value?.send(byeMessage)
+            sendViaSharedWebSocket(byeMessage)
 
             log.d(tag = TAG) { "BYE sent for call ${callData.callId}" }
 
@@ -1062,7 +1065,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
     suspend fun sendCancel(accountInfo: AccountInfo, callData: CallData) {
         try {
             val cancelMessage = SipMessageBuilder.buildCancelMessage(accountInfo, callData)
-            accountInfo.webSocketClient.value?.send(cancelMessage)
+            sendViaSharedWebSocket(cancelMessage)
 
             log.d(tag = TAG) { "CANCEL sent for call ${callData.callId}" }
 
@@ -1074,10 +1077,10 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
     /**
      * Envía respuesta 200 OK para INVITE
      */
-    fun sendInviteOkResponse(accountInfo: AccountInfo, callData: CallData) {
+   suspend fun sendInviteOkResponse(accountInfo: AccountInfo, callData: CallData) {
         try {
             val okResponse = SipMessageBuilder.buildInviteOkResponse(accountInfo, callData)
-            accountInfo.webSocketClient.value?.send(okResponse)
+            sendViaSharedWebSocket(okResponse)
 
             log.d(tag = TAG) { "200 OK sent for INVITE ${callData.callId}" }
 
@@ -1089,10 +1092,10 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
     /**
      * Envía respuesta de rechazo
      */
-    fun sendDeclineResponse(accountInfo: AccountInfo, callData: CallData) {
+    suspend fun sendDeclineResponse(accountInfo: AccountInfo, callData: CallData) {
         try {
             val declineResponse = SipMessageBuilder.buildDeclineResponse(accountInfo, callData)
-            accountInfo.webSocketClient.value?.send(declineResponse)
+            sendViaSharedWebSocket(declineResponse)
 
             log.d(tag = TAG) { "603 Decline sent for call ${callData.callId}" }
 
@@ -1107,7 +1110,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
     suspend fun sendReInvite(accountInfo: AccountInfo, callData: CallData, sdp: String) {
         try {
             val reInviteMessage = SipMessageBuilder.buildReInviteMessage(accountInfo, callData, sdp)
-            accountInfo.webSocketClient.value?.send(reInviteMessage)
+            sendViaSharedWebSocket(reInviteMessage)
 
             log.d(tag = TAG) { "Re-INVITE sent for call ${callData.callId}" }
 
@@ -1124,7 +1127,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             val infoMessage = SipMessageBuilder.buildDtmfInfoMessage(
                 accountInfo, callData, digit, duration
             )
-            accountInfo.webSocketClient.value?.send(infoMessage)
+            sendViaSharedWebSocket(infoMessage)
 
             log.d(tag = TAG) { "DTMF INFO sent: $digit (duration: $duration)" }
 

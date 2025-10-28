@@ -367,8 +367,9 @@ class CallManager(
 
         // Enviar respuesta de rechazo
         log.d(tag = TAG) { "Sending 603 Decline response..." }
-        messageHandler.sendDeclineResponse(accountInfo, targetCallData)
-
+        CoroutineScope(Dispatchers.IO).launch {
+            messageHandler.sendDeclineResponse(accountInfo, targetCallData)
+        }
         // Registrar en historial
         val endTime = Clock.System.now().toEpochMilliseconds()
         sipCoreManager.callHistoryManager.addCallLog(targetCallData, CallTypes.DECLINED, endTime)

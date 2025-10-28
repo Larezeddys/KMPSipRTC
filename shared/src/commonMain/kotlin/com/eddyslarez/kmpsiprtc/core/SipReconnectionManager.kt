@@ -269,40 +269,34 @@ class SipReconnectionManager(
     suspend fun reconnectAccountWithRetry(accountInfo: AccountInfo): Boolean {
         val accountKey = "${accountInfo.username}@${accountInfo.domain}"
         if (!networkManager.isNetworkAvailable()) return false
+
         var attempts = reconnectionAttempts[accountKey] ?: 0
 
-        while (attempts < MAX_RECONNECTION_ATTEMPTS && !accountInfo.isRegistered.value && networkManager.isNetworkAvailable()) {
+        while (attempts < MAX_RECONNECTION_ATTEMPTS && !accountInfo.isRegistered.value) {
             attempts++
             reconnectionAttempts[accountKey] = attempts
+
             try {
-                sipCoreManager.updateRegistrationState(accountKey, RegistrationState.IN_PROGRESS)
-                cleanupExistingConnection(accountInfo)
-                val success = reconnectionListener?.onReconnectAccount(accountInfo) ?: false
-                if (success) {
-                    if (waitForReconnectionResult(accountInfo, 15_000L)) {
-                        cachedAccounts.put(accountKey, accountInfo)
-                        reconnectionAttempts.remove(accountKey)
-                        return true
-                    }
+                val success = sipCoreManager.sharedWebSocketManager.registerAccount(
+                    accountInfo,
+                    sipCoreManager.isAppInBackground
+                )
+
+                if (success && waitForReconnectionResult(accountInfo, 15_000L)) {
+                    reconnectionAttempts.remove(accountKey)
+                    return true
                 }
+
                 delay(calculateReconnectionDelay(attempts))
-            } catch (_: Exception) {
+
+            } catch (e: Exception) {
                 delay(calculateReconnectionDelay(attempts))
             }
         }
-        reconnectionAttempts.remove(accountKey)
-        sipCoreManager.updateRegistrationState(accountKey, RegistrationState.FAILED)
+
         return false
     }
 
-    private suspend fun cleanupExistingConnection(accountInfo: AccountInfo) {
-        accountInfo.webSocketClient.value?.let { ws ->
-            if (ws.isConnected()) {
-                ws.close()
-                delay(1500)
-            }
-        }
-    }
 
     private suspend fun waitForReconnectionResult(accountInfo: AccountInfo, timeoutMs: Long): Boolean {
         val start = Clock.System.now().toEpochMilliseconds()

@@ -24,12 +24,12 @@ class AccountInfo(
     private val cseqMutex = Mutex()
 
     // 🔁 Reemplazo de atomic por MutableStateFlow
-    val webSocketClient = MutableStateFlow<MultiplatformWebSocket?>(null)
     val reconnectCount = MutableStateFlow(0)
     val callId = MutableStateFlow<String?>(null)
     val fromTag = MutableStateFlow<String?>(null)
     val toTag = MutableStateFlow<String?>(null)
     private val _cseq = MutableStateFlow(1)
+    fun canRegister(): Boolean = username.isNotEmpty() && password.isNotEmpty() && domain.isNotEmpty()
 
     val fromHeader = MutableStateFlow<String?>(null)
     val toHeader = MutableStateFlow<String?>(null)
@@ -168,25 +168,26 @@ class AccountInfo(
 
     suspend fun cleanup() = accountMutex.withLock {
         reconnectionJob.value?.cancel()
-        webSocketClient.value?.let { ws ->
-            try {
-                ws.stopPingTimer()
-                ws.stopRegistrationRenewalTimer()
-                ws.close()
-            } catch (e: Exception) {
-                log.w(TAG) { "Error closing WS: ${e.message}" }
-            }
-        }
-        webSocketClient.value = null
+
+//        webSocketClient.value?.let { ws ->
+//            try {
+//                ws.stopPingTimer()
+//                ws.stopRegistrationRenewalTimer()
+//                ws.close()
+//            } catch (e: Exception) {
+//                log.w(TAG) { "Error closing WS: ${e.message}" }
+//            }
+//        }
+//        webSocketClient.value = null
         resetAllState()
         log.d(TAG) { "Cleanup complete for ${getAccountIdentity()}" }
     }
 
     override fun toString(): String {
-        return "AccountInfo(${getAccountIdentity()}, reg=${isRegistered.value}, cseq=${_cseq.value}, wsConnected=${webSocketClient.value?.isConnected()})"
+        return "AccountInfo(${getAccountIdentity()}, reg=${isRegistered.value}, cseq=${_cseq.value}})"
     }
 }
-fun AccountInfo.isWebSocketHealthy(): Boolean {
-    val ws = this.webSocketClient.value ?: return false
-    return ws.isConnected() && this.isRegistered.value
-}
+//fun AccountInfo.isWebSocketHealthy(): Boolean {
+//    val ws = this.webSocketClient.value ?: return false
+//    return ws.isConnected() && this.isRegistered.value
+//}

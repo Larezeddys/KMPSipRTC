@@ -238,17 +238,17 @@ class BootRegistrationManager(
         val accountKey = "${accountInfo.username}@${accountInfo.domain}"
 
         try {
-            // 1. Verificar conectividad WebSocket antes de registrar
-            if (!sipCoreManager.ensureWebSocketConnectivity(accountInfo)) {
-                log.e(tag = TAG) { "Cannot ensure WebSocket connectivity for $accountKey" }
-                return false
-            }
+//            // 1. Verificar conectividad WebSocket antes de registrar
+//            if (!sipCoreManager.ensureWebSocketConnectivity(accountInfo)) {
+//                log.e(tag = TAG) { "Cannot ensure WebSocket connectivity for $accountKey" }
+//                return false
+//            }
 
-            // 2. Verificar que WebSocket está saludable
-            if (!accountInfo.isWebSocketHealthy()) {
-                log.e(tag = TAG) { "WebSocket not healthy for $accountKey" }
-                return false
-            }
+//            // 2. Verificar que WebSocket está saludable
+//            if (!accountInfo.isWebSocketHealthy()) {
+//                log.e(tag = TAG) { "WebSocket not healthy for $accountKey" }
+//                return false
+//            }
 
             // 3. Enviar registro en modo push (siempre push al boot)
             sipCoreManager.messageHandler.sendRegister(accountInfo, true)
@@ -321,11 +321,11 @@ sealed class RegistrationRecoveryResult {
     data class CriticalError(val error: String) : RegistrationRecoveryResult()
 }
 
-// 3. EXTENSIÓN PARA VERIFICAR SALUD DE WEBSOCKET
-fun AccountInfo.isWebSocketHealthy(): Boolean {
-    val webSocket = this.webSocketClient.value ?: return false
-    return webSocket.isConnected()
-}
+//// 3. EXTENSIÓN PARA VERIFICAR SALUD DE WEBSOCKET
+//fun AccountInfo.isWebSocketHealthy(): Boolean {
+//    val webSocket = this.webSocketClient.value ?: return false
+//    return webSocket.isConnected()
+//}
 
 // 4. MÉTODO MEJORADO EN SIPCOREMAGER
 fun SipCoreManager.initializeBootRegistration() {
