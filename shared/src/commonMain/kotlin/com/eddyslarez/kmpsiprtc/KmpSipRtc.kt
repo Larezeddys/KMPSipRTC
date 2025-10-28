@@ -41,7 +41,6 @@ import kotlinx.coroutines.sync.withLock
  * @author Eddys Larez
  * @version 2.0.0 (Multiplatform)
  */
-
 class KmpSipRtc private constructor() {
 
     private var sipCoreManager: SipCoreManager? = null
@@ -57,11 +56,13 @@ class KmpSipRtc private constructor() {
     private val lastNotifiedCallState = mutableStateOf<CallStateInfo?>(null)
     private val initMutex = Mutex()
 
+    // ✅ Scope interno para operaciones asíncronas
+    private val internalScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
     companion object {
         @Volatile
         private var INSTANCE: KmpSipRtc? = null
         private val LOCK = SynchronizedObject()
-
         private const val TAG = "KmpSipRtc"
 
         fun getInstance(): KmpSipRtc {
@@ -92,7 +93,6 @@ class KmpSipRtc private constructor() {
             username: String,
             domain: String
         ) {}
-
         fun onCallStateChanged(stateInfo: CallStateInfo) {}
         fun onIncomingCall(callInfo: IncomingCallInfo) {}
         fun onCallConnected(callInfo: CallInfo) {}
@@ -171,67 +171,77 @@ class KmpSipRtc private constructor() {
     }
 
     // === INITIALIZATION ===
+    // ✅ Ahora es una función simple que se ejecuta en background
 
-    suspend fun initialize(config: SipConfiguration = SipConfiguration()) {
-        initMutex.withLock {
-            if (isInitialized) {
-                log.w(tag = TAG) { "Library already initialized" }
-                return
-            }
+    fun initialize(
+        config: SipConfiguration = SipConfiguration(),
+        onComplete: ((Result<Unit>) -> Unit)? = null
+    ) {
+        if (isInitialized) {
+            log.w(tag = TAG) { "Library already initialized" }
+            onComplete?.invoke(Result.success(Unit))
+            return
+        }
 
-            try {
-                log.d(tag = TAG) { "Initializing KmpSipRtc v1.0.0" }
+        internalScope.launch {
+            initMutex.withLock {
+                if (isInitialized) {
+                    onComplete?.invoke(Result.success(Unit))
+                    return@launch
+                }
 
-                this.config = config
-                sipCoreManager = SipCoreManager.createInstance(
-                    SipConfig(
-                        defaultDomain = config.defaultDomain,
-                        webSocketUrl = config.webSocketUrl,
-                        userAgent = config.userAgent,
-                        enableLogs = config.enableLogs,
-                        enableAutoReconnect = config.enableAutoReconnect,
-                        pingIntervalMs = config.pingIntervalMs,
-                        incomingRingtoneUri = config.incomingRingtoneUri,
-                        outgoingRingtoneUri = config.outgoingRingtoneUri
+                try {
+                    log.d(tag = TAG) { "Initializing KmpSipRtc v1.0.0" }
+
+                    this@KmpSipRtc.config = config
+                    sipCoreManager = SipCoreManager.createInstance(
+                        SipConfig(
+                            defaultDomain = config.defaultDomain,
+                            webSocketUrl = config.webSocketUrl,
+                            userAgent = config.userAgent,
+                            enableLogs = config.enableLogs,
+                            enableAutoReconnect = config.enableAutoReconnect,
+                            pingIntervalMs = config.pingIntervalMs,
+                            incomingRingtoneUri = config.incomingRingtoneUri,
+                            outgoingRingtoneUri = config.outgoingRingtoneUri
+                        )
                     )
-                )
 
-                // IMPORTANTE: Esperar a que la inicialización complete
-                sipCoreManager?.initialize()
+                    sipCoreManager?.initialize()
 
-                // NUEVO: Verificar que los managers críticos estén listos
-                val manager = sipCoreManager
-                if (manager == null) {
-                    throw SipLibraryException("Failed to create SipCoreManager")
-                }
+                    val manager = sipCoreManager
+                        ?: throw SipLibraryException("Failed to create SipCoreManager")
 
-                // Esperar un poco más para asegurar que los managers internos estén listos
-                var retries = 0
-                val maxRetries = 50 // 5 segundos máximo
-                while (retries < maxRetries) {
-                    if (manager.isSipCoreManagerHealthy()) {
-                        log.d(tag = TAG) { "✅ All managers initialized successfully" }
-                        break
+                    // Esperar inicialización con timeout
+                    var retries = 0
+                    val maxRetries = 50
+                    while (retries < maxRetries) {
+                        if (manager.isSipCoreManagerHealthy()) {
+                            log.d(tag = TAG) { "✅ All managers initialized successfully" }
+                            break
+                        }
+                        delay(100)
+                        retries++
                     }
-                    delay(100)
-                    retries++
+
+                    if (retries >= maxRetries) {
+                        log.w(tag = TAG) { "⚠️ Initialization timeout - some managers may not be ready" }
+                    }
+
+                    clearInitialStates()
+                    setupInternalListeners()
+
+                    databaseManager = DatabaseManager.getInstance()
+
+                    isInitialized = true
+                    log.d(tag = TAG) { "✅ KmpSipRtc initialized successfully" }
+
+                    onComplete?.invoke(Result.success(Unit))
+
+                } catch (e: Exception) {
+                    log.e(tag = TAG) { "❌ Error initializing library: ${e.message}" }
+                    onComplete?.invoke(Result.failure(SipLibraryException("Failed to initialize library", e)))
                 }
-
-                if (retries >= maxRetries) {
-                    log.w(tag = TAG) { "⚠️ Initialization timeout - some managers may not be ready" }
-                }
-
-                clearInitialStates()
-                setupInternalListeners()
-
-                databaseManager = DatabaseManager.getInstance()
-
-                isInitialized = true
-                log.d(tag = TAG) { "✅ KmpSipRtc initialized successfully" }
-
-            } catch (e: Exception) {
-                log.e(tag = TAG) { "❌ Error initializing library: ${e.message}" }
-                throw SipLibraryException("Failed to initialize library", e)
             }
         }
     }
@@ -288,7 +298,7 @@ class KmpSipRtc private constructor() {
                 }
             })
 
-            CoroutineScope(Dispatchers.Main).launch {
+            internalScope.launch {
                 var isFirstState = true
 
                 CallStateManager.callStateFlow.collect { stateInfo ->
@@ -331,7 +341,7 @@ class KmpSipRtc private constructor() {
         }
     }
 
-    // === NOTIFICATION METHODS ===
+    // === NOTIFICATION METHODS (sin cambios) ===
 
     private fun notifyRegistrationStateChanged(
         state: RegistrationState,
@@ -349,7 +359,7 @@ class KmpSipRtc private constructor() {
         lastNotifiedRegistrationStates[accountKey] = state
         log.d(tag = TAG) { "Notifying registration state change: $lastState -> $state for $accountKey" }
 
-        CoroutineScope(Dispatchers.Main).launch {
+        internalScope.launch {
             try {
                 listeners.forEach { listener ->
                     try {
@@ -541,7 +551,7 @@ class KmpSipRtc private constructor() {
         )
     }
 
-    // === HELPER METHODS ===
+    // === HELPER METHODS (sin cambios) ===
 
     private fun getCallInfoForState(stateInfo: CallStateInfo): CallInfo? {
         val manager = sipCoreManager ?: return null
@@ -657,41 +667,73 @@ class KmpSipRtc private constructor() {
         log.d(tag = TAG) { "IncomingCallListener configured" }
     }
 
-    // Registration
-    suspend fun registerAccount(
+    // ✅ Registration - Ahora sin suspend
+    fun registerAccount(
         username: String,
         password: String,
         domain: String,
         pushToken: String? = null,
         pushProvider: String = "fcm",
-        forcePushMode: Boolean = false
+        forcePushMode: Boolean = false,
+        onComplete: ((Result<Unit>) -> Unit)? = null
     ) {
         checkInitialized()
         log.d(tag = TAG) { "Registering account: $username@$domain" }
-        sipCoreManager?.register(
-            username = username,
-            password = password,
-            domain = domain,
-            provider = pushProvider,
-            token = pushToken ?: "",
-            forcePushMode = forcePushMode
-        )
+
+        internalScope.launch {
+            try {
+                sipCoreManager?.register(
+                    username = username,
+                    password = password,
+                    domain = domain,
+                    provider = pushProvider,
+                    token = pushToken ?: "",
+                    forcePushMode = forcePushMode
+                )
+                onComplete?.invoke(Result.success(Unit))
+            } catch (e: Exception) {
+                log.e(tag = TAG) { "Registration failed: ${e.message}" }
+                onComplete?.invoke(Result.failure(e))
+            }
+        }
     }
 
-    suspend fun unregisterAccount(username: String, domain: String) {
+    fun unregisterAccount(
+        username: String,
+        domain: String,
+        onComplete: ((Result<Unit>) -> Unit)? = null
+    ) {
         checkInitialized()
         val accountKey = "$username@$domain"
         log.d(tag = TAG) { "Unregistering account: $accountKey" }
         lastNotifiedRegistrationStates.remove(accountKey)
-        sipCoreManager?.unregister(username, domain)
+
+        internalScope.launch {
+            try {
+                sipCoreManager?.unregister(username, domain)
+                onComplete?.invoke(Result.success(Unit))
+            } catch (e: Exception) {
+                log.e(tag = TAG) { "Unregister failed: ${e.message}" }
+                onComplete?.invoke(Result.failure(e))
+            }
+        }
     }
 
-    suspend fun unregisterAllAccounts() {
+    fun unregisterAllAccounts(onComplete: ((Result<Unit>) -> Unit)? = null) {
         checkInitialized()
         log.d(tag = TAG) { "Unregistering all accounts" }
         lastNotifiedRegistrationStates.clear()
         lastNotifiedCallState.value = null
-        sipCoreManager?.unregisterAllAccounts()
+
+        internalScope.launch {
+            try {
+                sipCoreManager?.unregisterAllAccounts()
+                onComplete?.invoke(Result.success(Unit))
+            } catch (e: Exception) {
+                log.e(tag = TAG) { "Unregister all failed: ${e.message}" }
+                onComplete?.invoke(Result.failure(e))
+            }
+        }
     }
 
     fun getRegistrationState(username: String, domain: String): RegistrationState {
@@ -710,7 +752,7 @@ class KmpSipRtc private constructor() {
         return sipCoreManager?.registrationStatesFlow ?: flowOf(emptyMap())
     }
 
-    // Call Management
+    // Call Management (sin cambios - ya son funciones simples)
     fun makeCall(
         phoneNumber: String,
         username: String? = null,
@@ -977,13 +1019,21 @@ class KmpSipRtc private constructor() {
         }
     }
 
-    suspend fun saveRingtoneUris(incomingUri: String?, outgoingUri: String?) {
+    fun saveRingtoneUris(
+        incomingUri: String?,
+        outgoingUri: String?,
+        onComplete: ((Result<Unit>) -> Unit)? = null
+    ) {
         checkInitialized()
-        try {
-            sipCoreManager?.saveRingtoneUris(incomingUri, outgoingUri)
-            log.d(tag = TAG) { "Both ringtone URIs updated" }
-        } catch (e: Exception) {
-            log.e(tag = TAG) { "Error setting ringtone URIs: ${e.message}" }
+        internalScope.launch {
+            try {
+                sipCoreManager?.saveRingtoneUris(incomingUri, outgoingUri)
+                log.d(tag = TAG) { "Both ringtone URIs updated" }
+                onComplete?.invoke(Result.success(Unit))
+            } catch (e: Exception) {
+                log.e(tag = TAG) { "Error setting ringtone URIs: ${e.message}" }
+                onComplete?.invoke(Result.failure(e))
+            }
         }
     }
 
@@ -1019,9 +1069,20 @@ class KmpSipRtc private constructor() {
         sipCoreManager?.clearCallLogs()
     }
 
-    suspend fun searchCallLogs(query: String): List<CallLog> {
+    fun searchCallLogs(
+        query: String,
+        onResult: (List<CallLog>) -> Unit
+    ) {
         checkInitialized()
-        return sipCoreManager?.searchCallLogsInDatabase(query) ?: emptyList()
+        internalScope.launch {
+            try {
+                val results = sipCoreManager?.searchCallLogsInDatabase(query) ?: emptyList()
+                onResult(results)
+            } catch (e: Exception) {
+                log.e(tag = TAG) { "Error searching call logs: ${e.message}" }
+                onResult(emptyList())
+            }
+        }
     }
 
     fun getCallLogsFlow(limit: Int = 50): Flow<List<CallLog>>? {
@@ -1056,52 +1117,62 @@ class KmpSipRtc private constructor() {
         }
     }
 
-    suspend fun forceReregisterAll(): String {
+    fun forceReregisterAll(onComplete: ((String) -> Unit)? = null) {
         checkInitialized()
-        return try {
-            log.d(tag = TAG) { "Force re-registration initiated" }
-            sipCoreManager?.forceReregisterAllAccounts()
-                ?: "❌ SipCoreManager not available"
-        } catch (e: Exception) {
-            log.e(tag = TAG) { "Error in force re-registration: ${e.message}" }
-            "❌ Force re-registration error: ${e.message}"
-        }
-    }
-
-    suspend fun forceGuardianRecovery(): String {
-        checkInitialized()
-        return try {
-            sipCoreManager?.forceGuardianRecovery()
-                ?: "❌ SipCoreManager not available"
-        } catch (e: Exception) {
-            "❌ Guardian recovery error: ${e.message}"
-        }
-    }
-
-    suspend fun getGuardianDiagnostic(): String {
-        checkInitialized()
-        return try {
-            sipCoreManager?.getGuardianDiagnostic()
-                ?: "❌ SipCoreManager not available"
-        } catch (e: Exception) {
-            "❌ Error getting guardian diagnostic: ${e.message}"
-        }
-    }
-
-    suspend fun verifyAndFixConnectivity() {
-        checkInitialized()
-        val accounts = sipCoreManager?.activeAccounts?.values?.toList() ?: emptyList()
-        if (accounts.isEmpty()) {
-            val recoveredAccounts = sipCoreManager?.recoverAccountsFromDatabase() ?: emptyList()
-            CoroutineScope(Dispatchers.IO).launch {
-                sipCoreManager?.let { manager ->
-                    // Use the reconnection manager to verify connectivity
-                    manager.networkManager.isNetworkAvailable()
-                }
+        internalScope.launch {
+            try {
+                log.d(tag = TAG) { "Force re-registration initiated" }
+                val result = sipCoreManager?.forceReregisterAllAccounts()
+                    ?: "❌ SipCoreManager not available"
+                onComplete?.invoke(result)
+            } catch (e: Exception) {
+                log.e(tag = TAG) { "Error in force re-registration: ${e.message}" }
+                onComplete?.invoke("❌ Force re-registration error: ${e.message}")
             }
-        } else {
-            CoroutineScope(Dispatchers.IO).launch {
-                sipCoreManager?.verifyAndFixConnectivity()
+        }
+    }
+
+    fun forceGuardianRecovery(onComplete: ((String) -> Unit)? = null) {
+        checkInitialized()
+        internalScope.launch {
+            try {
+                val result = sipCoreManager?.forceGuardianRecovery()
+                    ?: "❌ SipCoreManager not available"
+                onComplete?.invoke(result)
+            } catch (e: Exception) {
+                onComplete?.invoke("❌ Guardian recovery error: ${e.message}")
+            }
+        }
+    }
+
+    fun getGuardianDiagnostic(onResult: (String) -> Unit) {
+        checkInitialized()
+        internalScope.launch {
+            try {
+                val result = sipCoreManager?.getGuardianDiagnostic()
+                    ?: "❌ SipCoreManager not available"
+                onResult(result)
+            } catch (e: Exception) {
+                onResult("❌ Error getting guardian diagnostic: ${e.message}")
+            }
+        }
+    }
+
+    fun verifyAndFixConnectivity() {
+        checkInitialized()
+        internalScope.launch {
+            val accounts = sipCoreManager?.activeAccounts?.values?.toList() ?: emptyList()
+            if (accounts.isEmpty()) {
+                val recoveredAccounts = sipCoreManager?.recoverAccountsFromDatabase() ?: emptyList()
+                withContext(Dispatchers.IO) {
+                    sipCoreManager?.let { manager ->
+                        manager.networkManager.isNetworkAvailable()
+                    }
+                }
+            } else {
+                withContext(Dispatchers.IO) {
+                    sipCoreManager?.verifyAndFixConnectivity()
+                }
             }
         }
     }
@@ -1123,27 +1194,33 @@ class KmpSipRtc private constructor() {
         }
     }
 
-    suspend fun dispose() {
-        initMutex.withLock {
-            if (isInitialized) {
-                log.d(tag = TAG) { "Disposing KmpSipRtc" }
+    fun dispose(onComplete: (() -> Unit)? = null) {
+        internalScope.launch {
+            initMutex.withLock {
+                if (isInitialized) {
+                    log.d(tag = TAG) { "Disposing KmpSipRtc" }
 
-                databaseManager?.closeDatabase()
-                databaseManager = null
+                    databaseManager?.closeDatabase()
+                    databaseManager = null
 
-                sipCoreManager?.dispose()
-                sipCoreManager = null
+                    sipCoreManager?.dispose()
+                    sipCoreManager = null
 
-                listeners.clear()
-                registrationListener = null
-                callListener = null
-                incomingCallListener = null
+                    listeners.clear()
+                    registrationListener = null
+                    callListener = null
+                    incomingCallListener = null
 
-                lastNotifiedRegistrationStates.clear()
-                lastNotifiedCallState.value = null
+                    lastNotifiedRegistrationStates.clear()
+                    lastNotifiedCallState.value = null
 
-                isInitialized = false
-                log.d(tag = TAG) { "KmpSipRtc disposed completely" }
+                    isInitialized = false
+
+                    internalScope.cancel()
+
+                    log.d(tag = TAG) { "KmpSipRtc disposed completely" }
+                    onComplete?.invoke()
+                }
             }
         }
     }
@@ -1151,7 +1228,6 @@ class KmpSipRtc private constructor() {
     class SipLibraryException(message: String, cause: Throwable? = null) :
         Exception(message, cause)
 }
-
 
 // MutableStateFlow wrapper for compatibility
 private class mutableStateOf<T>(initialValue: T) {
