@@ -54,8 +54,8 @@ class CallManager(
     fun makeCall(
         phoneNumber: String,
         accountInfo: AccountInfo,
-        enableTranslation: Boolean = true,
-        recordCall: Boolean = true,
+        enableTranslation: Boolean = false,
+        recordCall: Boolean = false,
     ) {
         if (!accountInfo.isRegistered.value) {
             log.d(tag = TAG) { "Error: Not registered with SIP server" }
@@ -227,7 +227,7 @@ class CallManager(
     /**
      * Aceptar llamada entrante
      */
-    fun acceptCall(callId: String? = null, recordCall: Boolean = true) {
+    fun acceptCall(callId: String? = null, recordCall: Boolean = false) {
 
         val accountInfo = sipCoreManager.currentAccountInfo ?: run {
             log.e(tag = TAG) { "❌ No current account" }
