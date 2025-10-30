@@ -1,6 +1,5 @@
 package com.eddyslarez.kmpsiprtc.core
 
-import com.eddyslarez.kmpsiprtc.data.database.DatabaseAutoIntegration
 import com.eddyslarez.kmpsiprtc.data.database.DatabaseManager
 import com.eddyslarez.kmpsiprtc.data.database.converters.toCallLogs
 import com.eddyslarez.kmpsiprtc.data.database.entities.AppConfigEntity
@@ -27,8 +26,6 @@ import com.eddyslarez.kmpsiprtc.services.calls.CallStateManager
 import com.eddyslarez.kmpsiprtc.services.calls.MultiCallManager
 import com.eddyslarez.kmpsiprtc.services.sip.SipMessageHandler
 import com.eddyslarez.kmpsiprtc.services.sip.initializeBootRegistration
-import com.eddyslarez.kmpsiprtc.services.webSocket.MultiplatformWebSocket
-import com.eddyslarez.kmpsiprtc.services.webSocket.createWebSocket
 import com.eddyslarez.kmpsiprtc.services.webrtc.WebRtcEventListener
 import com.eddyslarez.kmpsiprtc.services.webrtc.createWebRtcManager
 import kotlinx.coroutines.CoroutineScope
@@ -40,26 +37,16 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.firstOrNull
-import kotlinx.coroutines.invoke
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.plus
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.datetime.Clock
-import kotlin.collections.containsKey
-import kotlin.collections.remove
-import kotlin.compareTo
-import kotlin.text.clear
-import kotlin.text.get
-import kotlin.text.set
 import kotlin.to
-import com.eddyslarez.kmpsiprtc.services.audio.AudioManager
 import com.eddyslarez.kmpsiprtc.services.audio.createAudioManager
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
+import com.eddyslarez.kmpsiprtc.services.calls.CallLifecycleManager
+import com.eddyslarez.kmpsiprtc.services.pushMode.PushModeManager
 
 class SipCoreManager private constructor(
     private val config: SipConfig,
@@ -85,6 +72,8 @@ class SipCoreManager private constructor(
     private val platformRegistration = PlatformRegistration()
     internal val messageHandler = SipMessageHandler(this)
     private lateinit var registrationGuardian: RegistrationGuardianManager
+    private var pushModeManager: PushModeManager? = null
+    lateinit var callLifecycleManager: CallLifecycleManager
 
     // Estados de registro por cuenta
     private val _registrationStates = MutableStateFlow<Map<String, RegistrationState>>(emptyMap())
@@ -167,6 +156,7 @@ class SipCoreManager private constructor(
             databaseManager = databaseManager,
             sipCoreManager = this
         )
+        callLifecycleManager = CallLifecycleManager(this, pushModeManager)
 
         callHistoryManager.loadCallLogsFromDatabase()
         log.d(tag = TAG) { "SIP Core initialization completed" }
