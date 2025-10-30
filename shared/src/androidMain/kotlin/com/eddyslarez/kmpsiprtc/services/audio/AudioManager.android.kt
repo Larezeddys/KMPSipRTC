@@ -1,6 +1,7 @@
 package com.eddyslarez.kmpsiprtc.services.audio
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Application
 import android.content.Context
 import android.media.AudioAttributes
@@ -11,6 +12,7 @@ import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.telecom.TelecomManager
 import androidx.annotation.RequiresPermission
 import androidx.core.net.toUri
 import com.eddyslarez.kmpsiprtc.platform.AndroidContext
@@ -48,6 +50,18 @@ class AndroidAudioManagerImpl : AudioManager {
         println("$TAG: AudioManager initialized")
     }
     init {
+
+        val originalHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, e ->
+            println("💥 [AndroidAudioManagerImpl] App crashed on thread ${thread.name}: ${e.message}")
+            try {
+                cleanupOnCrash()
+            } catch (_: Exception) {}
+
+            // Llamar al handler original si existía
+            originalHandler?.uncaughtException(thread, e)
+        }
+
         val resourceUtils = createResourceUtils()
         incomingRingtonePath = resourceUtils.getDefaultIncomingRingtonePath()
         outgoingRingtonePath = resourceUtils.getDefaultOutgoingRingtonePath()
@@ -90,6 +104,10 @@ class AndroidAudioManagerImpl : AudioManager {
     override fun playRingtone(syncVibration: Boolean) {
         println("$TAG: playRingtone() called - sync vibration: $syncVibration")
 
+        if (isTelecomCallActive()) {
+            println("$TAG: System (TelecomManager) managing ringtone, skipping custom ringtone playback")
+            return
+        }
         if (isIncomingRingtonePlaying) {
             println("$TAG: Incoming ringtone already playing, ignoring request")
             return
@@ -181,6 +199,19 @@ class AndroidAudioManagerImpl : AudioManager {
                 println("$TAG: Incoming ringtone completely stopped and cleaned up")
             }
         }
+    }
+    private fun cleanupOnCrash() {
+        println("🧹 [AndroidAudioManagerImpl] Cleaning up audio due to crash")
+
+        // Detener ringtones y vibración
+        stopAllRingtones()
+
+        // Cancelar coroutines
+        audioScope.cancel()
+
+        // Liberar MediaPlayer si todavía existe
+        incomingRingtone?.let { if (it.isPlaying) it.stop(); it.release() }
+        outgoingRingtone?.let { if (it.isPlaying) it.stop(); it.release() }
     }
 
     /**
@@ -637,6 +668,23 @@ class AndroidAudioManagerImpl : AudioManager {
     override fun isVibrating(): Boolean {
         return isVibrating
     }
+
+    @SuppressLint("MissingPermission")
+    private fun isTelecomCallActive(): Boolean {
+        return try {
+            val telecomManager = application.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+            val isInCall = telecomManager.isInCall
+            println("$TAG: TelecomManager active call check -> $isInCall")
+            isInCall
+        } catch (e: SecurityException) {
+            println("$TAG: Missing permission to check TelecomManager state: ${e.message}")
+            false
+        } catch (e: Exception) {
+            println("$TAG: Error checking TelecomManager state: ${e.message}")
+            false
+        }
+    }
+
 
     /**
      * Obtiene información diagnóstica
