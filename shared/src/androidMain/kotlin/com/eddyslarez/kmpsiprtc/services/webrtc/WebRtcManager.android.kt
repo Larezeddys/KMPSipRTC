@@ -1,8 +1,14 @@
 package com.eddyslarez.kmpsiprtc.services.webrtc
 
+import android.app.Activity
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import com.eddyslarez.kmpsiprtc.data.models.AudioDevice
 import com.eddyslarez.kmpsiprtc.data.models.AudioUnit
 import com.eddyslarez.kmpsiprtc.data.models.AudioUnitTypes
@@ -42,8 +48,39 @@ class AndroidWebRtcManager : WebRtcManager {
     private var webRtcEventListener: WebRtcEventListener? = null
 
     // ==================== INITIALIZATION ====================
+    fun ensureBluetoothPermissions(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true // No requerido antes de Android 12
+
+        val permissions = arrayOf(
+            android.Manifest.permission.BLUETOOTH_CONNECT,
+            android.Manifest.permission.BLUETOOTH_SCAN
+        )
+
+        val missing = permissions.filter {
+            ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+        }
+
+        if (missing.isNotEmpty()) {
+            if (context is Activity) {
+                ActivityCompat.requestPermissions(context, missing.toTypedArray(), 1001)
+            } else {
+                Log.w("BluetoothPermission", "⚠️ No se puede solicitar permiso: contexto no es Activity")
+            }
+            return false
+        }
+
+        return true
+    }
 
     override fun initialize() {
+
+        if (ensureBluetoothPermissions(context.applicationContext)) {
+            bluetoothController.initialize()
+            audioController.initialize()
+        } else {
+            log.w("Main", { "Esperando permisos de Bluetooth para iniciar controladores" })
+        }
+
         log.d(TAG) { "🔧 Initializing WebRTC Manager..." }
 
         if (isFactoryInitialized) {
@@ -292,11 +329,15 @@ class AndroidWebRtcManager : WebRtcManager {
     }
 
     override fun getAvailableAudioUnits(): Set<AudioUnit> {
-        return audioController.getAvailableAudioUnits()
+        val units = audioController.getAvailableAudioUnits()
+        log.d(TAG) { "📋 Available audio units: ${units.map { "${it.type}(${it.isCurrent})" }}" }
+        return units
     }
 
     override fun getCurrentActiveAudioUnit(): AudioUnit? {
-        return audioController.getCurrentActiveAudioUnit()
+        val unit = audioController.getCurrentActiveAudioUnit()
+        log.d(TAG) { "🎯 Current active audio unit: ${unit?.type} (isCurrent: ${unit?.isCurrent})" }
+        return unit
     }
 
     override fun onBluetoothConnectionChanged(isConnected: Boolean) {

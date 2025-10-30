@@ -1,11 +1,13 @@
 package com.eddyslarez.kmpsiprtc.data.models
 
+import kotlinx.datetime.Clock
 
 data class AudioUnit(
     val type: AudioUnitTypes,
     val capability: AudioUnitCompatibilities,
     val isCurrent: Boolean,
     val isDefault: Boolean,
+    val capabilities: AudioDeviceCapabilities = AudioDeviceCapabilities() // ✅ agregado
 )
 
 enum class AudioUnitTypes {
@@ -15,18 +17,30 @@ enum class AudioUnitTypes {
     SPEAKER,
     BLUETOOTH,
     TELEPHONY,
-    AUXLINE,
+    AUXLINE,     // ya lo tienes (sirve como "AUX")
     HEADSET,
     HEADPHONES,
     GENERICUSB,
     HEARINGAID,
-    BLUETOOTHA2DP
+    BLUETOOTHA2DP,
+    HDMI,
+    DISPLAY_AUDIO,
+    VIRTUAL,
+    USB,         // ✅ nuevo alias para dispositivos USB genéricos
+    AUX          // ✅ nuevo alias más intuitivo para AUXLINE
 }
 
+
 enum class AudioUnitCompatibilities {
-    PLAY, RECORD, ALL, UNKNOWN
+    PLAY,
+    RECORD,
+    ALL,
+    UNKNOWN
 }
-// Agregar extensión para conversión más limpia
+
+/**
+ * Extensión para convertir un AudioDevice a un descriptor simple y legible.
+ */
 fun AudioDevice.toSimpleDescriptor(): String {
     return when {
         isBluetooth -> "bluetooth"
@@ -34,23 +48,29 @@ fun AudioDevice.toSimpleDescriptor(): String {
         audioUnit.type == AudioUnitTypes.HEADSET ||
                 audioUnit.type == AudioUnitTypes.HEADPHONES -> "headset"
         audioUnit.type == AudioUnitTypes.EARPIECE -> "earpiece"
+        audioUnit.type == AudioUnitTypes.MICROPHONE -> "microphone"
+        audioUnit.type == AudioUnitTypes.HDMI -> "hdmi"
         else -> "unknown"
     }
 }
 
 data class AudioDevice(
-    val name: String,                    // Display name
-    val descriptor: String,              // Native identifier
-    val nativeDevice: Any? = null,       // Platform-specific device object
-    val isOutput: Boolean,               // Input/Output flag
-    val audioUnit: AudioUnit,            // Enhanced audio unit information
+    val name: String,
+    val descriptor: String,
+    val nativeDevice: Any? = null,
+    val isOutput: Boolean,
+    val audioUnit: AudioUnit,
     var connectionState: DeviceConnectionState = DeviceConnectionState.AVAILABLE,
-    val signalStrength: Int? = null,     // For Bluetooth devices (0-100)
-    val batteryLevel: Int? = null,       // For Bluetooth devices (0-100)
-    val isWireless: Boolean = false,     // Bluetooth, WiFi, etc.
-    val supportsHDVoice: Boolean = false, // High-definition voice support
-    val latency: Int? = null,            // Audio latency in milliseconds
-    val vendorInfo: String? = null       // Manufacturer information
+    val signalStrength: Int? = null,
+    val batteryLevel: Int? = null,
+    val isWireless: Boolean = false,
+    val supportsHDVoice: Boolean = false,
+    val latency: Int? = null,
+    val vendorInfo: String? = null,
+    val capabilities: AudioDeviceCapabilities = AudioDeviceCapabilities(), // ✅ agregado
+    val lastUpdated: Long = Clock.System.now().toEpochMilliseconds(),
+    val deviceAddress: String? = null,                                      // ✅ para Bluetooth o USB
+    val preferredSampleRate: Int? = null                                   // ✅ para sincronizar con WebRTC
 ) {
     // Convenience properties
     val isInput: Boolean get() = !isOutput
@@ -63,36 +83,56 @@ data class AudioDevice(
     val isBuiltIn: Boolean get() = audioUnit.type == AudioUnitTypes.EARPIECE ||
             audioUnit.type == AudioUnitTypes.SPEAKER ||
             audioUnit.type == AudioUnitTypes.MICROPHONE
+
     val qualityScore: Int get() = calculateQualityScore()
 
     private fun calculateQualityScore(): Int {
         var score = 50 // Base score
 
-        // Audio unit type scoring
+        // Tipo de unidad
         score += when (audioUnit.type) {
             AudioUnitTypes.HEADSET, AudioUnitTypes.HEADPHONES -> 20
             AudioUnitTypes.BLUETOOTH, AudioUnitTypes.BLUETOOTHA2DP -> 15
             AudioUnitTypes.EARPIECE, AudioUnitTypes.SPEAKER -> 10
             AudioUnitTypes.HEARINGAID -> 25
-            AudioUnitTypes.GENERICUSB -> 18
+            AudioUnitTypes.GENERICUSB, AudioUnitTypes.HDMI -> 18
             else -> 0
         }
 
-        // HD Voice support
+        // Capacidades de voz
         if (supportsHDVoice) score += 15
+        if (capabilities.supportsNoiseSuppression) score += 10
+        if (capabilities.supportsEchoCancellation) score += 10
 
-        // Signal strength for wireless devices
-        signalStrength?.let { strength ->
-            score += (strength * 0.2).toInt()
-        }
+        // Fuerza de señal
+        signalStrength?.let { score += (it * 0.2).toInt() }
 
-        // Latency penalty
+        // Penalización por latencia
         latency?.let { lat ->
-            if (lat < 50) score += 10
-            else if (lat > 150) score -= 10
+            when {
+                lat < 50 -> score += 10
+                lat in 50..150 -> score += 5
+                lat > 200 -> score -= 10
+            }
         }
+
+        // Penalización si batería baja
+        if (batteryLevel != null && batteryLevel < 20) score -= 10
 
         return score.coerceIn(0, 100)
+    }
+
+    /**
+     * ✅ Diagnóstico rápido del dispositivo
+     */
+    fun describe(): String = buildString {
+        appendLine("🎧 AudioDevice: $name ($descriptor)")
+        appendLine("• Type: ${audioUnit.type}")
+        appendLine("• Capability: ${audioUnit.capability}")
+        appendLine("• Connection: ${connectionState}")
+        appendLine("• Wireless: $isWireless | Signal: ${signalStrength ?: "-"} | Battery: ${batteryLevel ?: "-"}")
+        appendLine("• Latency: ${latency ?: "-"} ms | HDVoice: $supportsHDVoice")
+        appendLine("• QualityScore: $qualityScore")
     }
 }
 
@@ -112,7 +152,10 @@ data class AudioDeviceCapabilities(
     val supportsAutoGainControl: Boolean = false,
     val supportsStereo: Boolean = false,
     val supportsMonaural: Boolean = true,
-    val maxSampleRate: Int = 44100,
+    val maxSampleRate: Int = 48000,
     val minSampleRate: Int = 8000,
-    val supportedCodecs: List<String> = emptyList()
+    val supportedCodecs: List<String> = listOf("PCM", "OPUS", "AAC"), // ✅ útil para SIP/RTC
+    val dynamicRange: IntRange = 0..100, // ✅ rango dinámico (volumen)
+    val supportsVoiceActivityDetection: Boolean = false, // ✅ para WebRTC optimizado
+    val supportsFullDuplex: Boolean = true // ✅ importante en llamadas
 )
