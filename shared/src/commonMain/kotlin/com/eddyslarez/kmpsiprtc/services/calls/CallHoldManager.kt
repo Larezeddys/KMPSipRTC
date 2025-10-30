@@ -84,3 +84,51 @@ class CallHoldManager(private val webRtcManager: WebRtcManager) {
         log.e(tag = "CallHoldManager") { message }
     }
 }
+//
+//class CallHoldManager(private val webRtcManager: WebRtcManager) {
+//
+//    private var isCallOnHold = false
+//
+//    fun holdCall(): String? {
+//        try {
+//            if (isCallOnHold) return null
+//
+//            // ✅ Usar transceivers en lugar de modificar SDP
+//            webRtcManager.setAudioEnabled(false)
+//
+//            // Obtener el SDP actualizado
+//            val holdSdp = webRtcManager.getLocalDescription()
+//
+//            if (holdSdp != null) {
+//                isCallOnHold = true
+//                log.d(tag = "CallHoldManager",{"Call placed on hold successfully"})
+//                return holdSdp
+//            }
+//            return null
+//        } catch (e: Exception) {
+//            log.d(tag = "CallHoldManager",{"Error putting call on hold: ${e.message}"})
+//            return null
+//        }
+//    }
+//
+//    fun resumeCall(): String? {
+//        try {
+//            if (!isCallOnHold) return null
+//
+//            // ✅ Habilitar audio nuevamente
+//            webRtcManager.setAudioEnabled(true)
+//
+//            val resumeSdp = webRtcManager.getLocalDescription()
+//
+//            if (resumeSdp != null) {
+//                isCallOnHold = false
+//                log.d(tag = "CallHoldManager",{"Call resumed successfully"})
+//                return resumeSdp
+//            }
+//            return null
+//        } catch (e: Exception) {
+//            log.d(tag = "CallHoldManager",{ "Error resuming call: ${e.message}" })
+//            return null
+//        }
+//    }
+//}

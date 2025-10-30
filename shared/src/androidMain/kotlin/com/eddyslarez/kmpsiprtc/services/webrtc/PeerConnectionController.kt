@@ -43,7 +43,23 @@ class PeerConnectionController(
         PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
         PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer()
     )
+    suspend fun setMediaDirection(direction: RtpTransceiver.RtpTransceiverDirection): Boolean {
+        return try {
+            peerConnection?.transceivers?.forEach { transceiver ->
+                if (transceiver.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO) {
+                    transceiver.direction = direction
+                }
+            }
 
+            // Crear nuevo offer con la dirección modificada
+            val offer = createOffer()
+            log.d(TAG) { "✅ Media direction changed to $direction" }
+            true
+        } catch (e: Exception) {
+            log.e(TAG) { "Error changing media direction: ${e.message}" }
+            false
+        }
+    }
     private val peerConnectionObserver = object : PeerConnection.Observer {
         override fun onIceCandidate(candidate: IceCandidate) {
             log.d(TAG) { "ICE candidate: ${candidate.sdpMid}:${candidate.sdpMLineIndex}" }
@@ -64,6 +80,7 @@ class PeerConnectionController(
                     }
                     WebRtcConnectionState.CONNECTED
                 }
+
                 PeerConnection.PeerConnectionState.CONNECTING -> WebRtcConnectionState.CONNECTING
                 PeerConnection.PeerConnectionState.DISCONNECTED -> WebRtcConnectionState.DISCONNECTED
                 PeerConnection.PeerConnectionState.FAILED -> WebRtcConnectionState.FAILED
@@ -253,10 +270,11 @@ class PeerConnectionController(
         try {
             remoteAudioRecorder?.stopCapture()
 
-            remoteAudioRecorder = AudioTrackRecorder(track) { audioData, bitsPerSample, sampleRate, channels, frames, timestampMs ->
-                callRecorder?.captureRemoteAudio(audioData)
-                log.d(TAG) { "🔊 Remote audio frame: ${audioData.size} bytes, $sampleRate Hz, $channels ch, $bitsPerSample bits, ts=$timestampMs" }
-            }
+            remoteAudioRecorder =
+                AudioTrackRecorder(track) { audioData, bitsPerSample, sampleRate, channels, frames, timestampMs ->
+                    callRecorder?.captureRemoteAudio(audioData)
+                    log.d(TAG) { "🔊 Remote audio frame: ${audioData.size} bytes, $sampleRate Hz, $channels ch, $bitsPerSample bits, ts=$timestampMs" }
+                }
 
             if (callRecorder?.isRecording() == true) {
                 remoteAudioRecorder?.startCapture()
@@ -328,18 +346,26 @@ class PeerConnectionController(
                     pc.setLocalDescription(object : SdpObserver {
                         override fun onSetSuccess() {
                             log.d(TAG) { "✅ Offer created" }
-                            cont.resume(desc.description)
+
+                            // 🟢 Aseguramos que el DTMF esté presente
+                            val sdpWithDtmf = ensureDtmfCodec(desc.description)
+
+                            cont.resume(sdpWithDtmf)
                         }
+
                         override fun onSetFailure(error: String?) {
                             cont.resumeWithException(Exception("SetLocal failed: $error"))
                         }
+
                         override fun onCreateSuccess(p0: SessionDescription?) {}
                         override fun onCreateFailure(p0: String?) {}
                     }, desc)
                 }
+
                 override fun onCreateFailure(error: String?) {
                     cont.resumeWithException(Exception("CreateOffer failed: $error"))
                 }
+
                 override fun onSetSuccess() {}
                 override fun onSetFailure(p0: String?) {}
             }, constraints)
@@ -368,22 +394,49 @@ class PeerConnectionController(
                     pc.setLocalDescription(object : SdpObserver {
                         override fun onSetSuccess() {
                             log.d(TAG) { "✅ Answer created" }
-                            cont.resume(desc.description)
+
+                            // 🟢 Aseguramos que el DTMF esté presente
+                            val sdpWithDtmf = ensureDtmfCodec(desc.description)
+
+                            cont.resume(sdpWithDtmf)
                         }
+
                         override fun onSetFailure(error: String?) {
                             cont.resumeWithException(Exception("SetLocal failed: $error"))
                         }
+
                         override fun onCreateSuccess(p0: SessionDescription?) {}
                         override fun onCreateFailure(p0: String?) {}
                     }, desc)
                 }
+
                 override fun onCreateFailure(error: String?) {
                     cont.resumeWithException(Exception("CreateAnswer failed: $error"))
                 }
+
                 override fun onSetSuccess() {}
                 override fun onSetFailure(p0: String?) {}
             }, constraints)
         }
+    }
+    suspend fun setLocalDescriptionDirect(sdp: String) = suspendCancellableCoroutine<Unit> { cont ->
+        log.d(TAG) { "Setting local description directly" }
+
+        val sessionDescription = SessionDescription(SessionDescription.Type.OFFER, sdp)
+
+        peerConnection?.setLocalDescription(object : SdpObserver {
+            override fun onSetSuccess() {
+                log.d(TAG) { "✅ Local description set directly" }
+                cont.resume(Unit)
+            }
+
+            override fun onSetFailure(error: String?) {
+                cont.resumeWithException(Exception("SetLocalDirect failed: $error"))
+            }
+
+            override fun onCreateSuccess(p0: SessionDescription?) {}
+            override fun onCreateFailure(p0: String?) {}
+        }, sessionDescription)
     }
 
     suspend fun setRemoteDescription(sdp: String, type: SdpType) =
@@ -402,9 +455,11 @@ class PeerConnectionController(
                     log.d(TAG) { "✅ Remote description set" }
                     cont.resume(Unit)
                 }
+
                 override fun onSetFailure(error: String?) {
                     cont.resumeWithException(Exception("SetRemote failed: $error"))
                 }
+
                 override fun onCreateSuccess(p0: SessionDescription?) {}
                 override fun onCreateFailure(p0: String?) {}
             }, sessionDescription)
@@ -451,14 +506,63 @@ class PeerConnectionController(
             val audioSender = peerConnection?.senders?.find { sender ->
                 sender.track()?.kind() == "audio"
             }
+
+            if (audioSender == null) {
+                log.e(TAG) { "No audio sender found for DTMF" }
+                return false
+            }
+
+            val dtmfSender = audioSender.dtmf()
+
+            if (dtmfSender == null) {
+                log.e(TAG) { "DTMF sender not available" }
+                return false
+            }
+            if (!dtmfSender.canInsertDtmf()) {
+                log.e(TAG) { "Cannot insert DTMF at this time" }
+                return false
+            }
+            val success = dtmfSender.insertDtmf(tones, duration, gap)
+            if (success) {
+                log.d(TAG) { "✅ DTMF sent: $tones (duration: ${duration}ms, gap: ${gap}ms)" }
+            } else {
+                log.e(TAG) { "Failed to insert DTMF" }
+            }
             log.d(TAG) { "Sending DTMF: $tones" }
-            true
+            return success
         } catch (e: Exception) {
             log.e(TAG) { "Error sending DTMF: ${e.message}" }
             false
         }
     }
 
+    private fun ensureDtmfCodec(sdp: String): String {
+        // Verificar que el codec telephone-event/8000 esté presente
+        if (!sdp.contains("telephone-event")) {
+            log.w(TAG) { "DTMF codec not found in SDP, adding it" }
+
+            // Agregar líneas para DTMF si no existen
+            val lines = sdp.lines().toMutableList()
+            val audioIndex = lines.indexOfFirst { it.startsWith("m=audio") }
+
+            if (audioIndex >= 0) {
+                // Buscar el último payload type usado
+                val audioLine = lines[audioIndex]
+                val payloadTypes = audioLine.split(" ").drop(3).map { it.toIntOrNull() }
+                val nextPayloadType = (payloadTypes.filterNotNull().maxOrNull() ?: 96) + 1
+
+                // Agregar el payload type a la línea m=audio
+                lines[audioIndex] = "$audioLine $nextPayloadType"
+
+                // Agregar las líneas rtpmap y fmtp
+                lines.add(audioIndex + 1, "a=rtpmap:$nextPayloadType telephone-event/8000")
+                lines.add(audioIndex + 2, "a=fmtp:$nextPayloadType 0-15")
+
+                return lines.joinToString("\r\n")
+            }
+        }
+        return sdp
+    }
     // ==================== STATE & CLEANUP ====================
 
     fun getConnectionState(): WebRtcConnectionState = currentConnectionState

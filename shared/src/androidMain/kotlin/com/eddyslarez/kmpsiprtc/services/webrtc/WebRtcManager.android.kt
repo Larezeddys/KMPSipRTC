@@ -360,9 +360,20 @@ class AndroidWebRtcManager : WebRtcManager {
         }
     }
 
+    // ✅ CORRECTO - En AndroidWebRtcManager
     override suspend fun applyModifiedSdp(modifiedSdp: String): Boolean {
         return try {
-            setRemoteDescription(modifiedSdp, SdpType.ANSWER)
+            ensureInitialized()
+
+            // Crear un nuevo offer con las modificaciones
+            val offer = peerConnectionController.createOffer()
+
+            // Aplicar las modificaciones al SDP
+            val modifiedOffer = modifiedSdp
+
+            // Establecer como descripción local
+            peerConnectionController.setLocalDescriptionDirect(modifiedOffer)
+
             true
         } catch (e: Exception) {
             log.e(TAG) { "Failed to apply modified SDP: ${e.message}" }
