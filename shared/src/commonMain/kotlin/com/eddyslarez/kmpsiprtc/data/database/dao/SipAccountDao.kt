@@ -94,11 +94,6 @@ interface SipAccountDao {
     @Query("UPDATE sip_accounts SET isDefault = 1, updatedAt = :timestamp WHERE id = :accountId")
     suspend fun setDefaultAccount(accountId: String, timestamp: Long = Clock.System.now().toEpochMilliseconds())
 
-    @Transaction
-    suspend fun setAsDefaultAccount(accountId: String) {
-        clearDefaultAccount()
-        setDefaultAccount(accountId)
-    }
 
     @Query("SELECT COUNT(*) FROM sip_accounts")
     suspend fun getAccountCount(): Int

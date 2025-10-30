@@ -644,17 +644,30 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
     /**
      * Maneja request CANCEL
      */
+    /**
+     * Maneja request CANCEL
+     */
     private suspend fun handleCancelRequest(lines: List<String>, accountInfo: AccountInfo) {
         log.d(tag = TAG) { "🟡 Handling CANCEL request" }
 
         try {
-            // ✅ DETENER RINGTONES INMEDIATAMENTE Y DEFINITIVAMENTE
+            // ✅ Detener ringtones inmediatamente
             sipCoreManager.audioManager.stopAllRingtones()
 
-            // ✅ DOBLE VERIFICACIÓN CON DELAY
-            CoroutineScope(Dispatchers.IO).launch {
-                delay(100)
-                sipCoreManager.audioManager.stopAllRingtones()
+            // Extraer callId
+            val callId = accountInfo.currentCallData.value?.callId
+
+            // Obtener callData (desde accountInfo o MultiCallManager)
+            val callData = accountInfo.currentCallData.value ?: callId?.let { MultiCallManager.getCall(it) }
+
+            if (callData == null) {
+                log.w(tag = TAG) { "❌ No call data for CANCEL" }
+            } else {
+                // ✅ REGISTRAR LLAMADA PERDIDA ANTES DE RESPUESTAS
+                if (callData.direction == CallDirections.INCOMING) {
+                    log.d(tag = TAG) { "📝 Registering MISSED call from CANCEL: ${callData.callId}" }
+                    sipCoreManager.callManager?.registerMissedCall(callData)
+                }
             }
 
             // Enviar 200 OK para CANCEL
@@ -662,34 +675,28 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             sendViaSharedWebSocket(cancelOkResponse)
             log.d(tag = TAG) { "✅ 200 OK sent for CANCEL" }
 
-            // Enviar 487 Request Terminated para el INVITE original
-            accountInfo.currentCallData.value?.let { callData ->
-                val requestTerminatedResponse = SipMessageBuilder.buildRequestTerminatedResponse(
-                    accountInfo,
-                    callData
-                )
+            // Enviar 487 Request Terminated para INVITE original
+            callData?.let {
+                val requestTerminatedResponse =
+                    SipMessageBuilder.buildRequestTerminatedResponse(accountInfo, it)
                 sendViaSharedWebSocket(requestTerminatedResponse)
                 log.d(tag = TAG) { "✅ 487 Request Terminated sent" }
 
                 // Actualizar estado
-                CallStateManager.callEnded(callData.callId, 487, "Request Terminated")
+                CallStateManager.callEnded(it.callId, 487, "Request Terminated")
                 sipCoreManager.notifyCallStateChanged(CallState.ENDED)
 
                 // Notificar cuenta específica
                 val accountKey = "${accountInfo.username}@${accountInfo.domain}"
                 sipCoreManager.notifyCallEndedForSpecificAccount(accountKey)
 
-                // ✅ LIMPIEZA ASÍNCRONA
+                // ✅ Limpieza asíncrona
                 CoroutineScope(Dispatchers.IO).launch {
                     try {
-                        // Asegurar que ringtones estén detenidos
                         sipCoreManager.audioManager.stopAllRingtones()
                         delay(200)
-
-                        // Limpiar recursos
                         accountInfo.resetCallState()
-                        MultiCallManager.removeCall(callData.callId)
-
+                        callData?.let { MultiCallManager.removeCall(it.callId) }
                         log.d(tag = TAG) { "✅ CANCEL cleanup completed" }
                     } catch (e: Exception) {
                         log.e(tag = TAG) { "Error in CANCEL cleanup: ${e.message}" }
@@ -701,10 +708,10 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
 
         } catch (e: Exception) {
             log.e(tag = TAG) { "❌ Error handling CANCEL request: ${e.message}" }
-            // ✅ FORZAR DETENCIÓN DE RINGTONES EN CASO DE ERROR
             sipCoreManager.audioManager.stopAllRingtones()
         }
     }
+
 
     /**
      * Maneja request ACK

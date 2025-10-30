@@ -12,6 +12,7 @@ import com.eddyslarez.kmpsiprtc.data.models.*
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.data.models.*
 import com.eddyslarez.kmpsiprtc.platform.log
+import java.util.concurrent.CopyOnWriteArrayList
 
 class AudioController(
     private val context: Context,
@@ -24,7 +25,7 @@ class AudioController(
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
 
-    private val audioDevices = mutableListOf<AudioDevice>()
+    private val audioDevices = CopyOnWriteArrayList<AudioDevice>()
     private var savedAudioMode = AudioManager.MODE_NORMAL
     private var savedIsSpeakerPhoneOn = false
     private var isStarted = false

@@ -261,40 +261,49 @@ class SharedWebSocketManager(
             }
         })
     }
-
     /**
      * Determinar a qué cuenta pertenece un mensaje SIP
      */
     private fun determineAccountFromMessage(message: String): AccountInfo? {
         return try {
-            // Buscar línea To: o From: para identificar la cuenta
+            log.d(TAG) { "Determining account from SIP message:\n$message" }
+
             val lines = message.lines()
 
             // Buscar en To: header
             val toLine = lines.firstOrNull { it.startsWith("To:", ignoreCase = true) }
+            log.d(TAG) { "To line found: $toLine" }
             if (toLine != null) {
                 val username = extractUsername(toLine)
                 val domain = extractDomain(toLine)
+                log.d(TAG) { "Extracted from To -> username: $username, domain: $domain" }
 
                 if (username != null && domain != null) {
                     val accountKey = "$username@$domain"
-                    return sipCoreManager.activeAccounts[accountKey]
+                    val account = sipCoreManager.activeAccounts[accountKey]
+                    log.d(TAG) { "Looking for account key '$accountKey' in activeAccounts -> found: $account" }
+                    if (account != null) return account
                 }
             }
 
             // Buscar en From: header como fallback
             val fromLine = lines.firstOrNull { it.startsWith("From:", ignoreCase = true) }
+            log.d(TAG) { "From line found: $fromLine" }
             if (fromLine != null) {
                 val username = extractUsername(fromLine)
                 val domain = extractDomain(fromLine)
+                log.d(TAG) { "Extracted from From -> username: $username, domain: $domain" }
 
                 if (username != null && domain != null) {
                     val accountKey = "$username@$domain"
-                    return sipCoreManager.activeAccounts[accountKey]
+                    val account = sipCoreManager.activeAccounts[accountKey]
+                    log.d(TAG) { "Looking for account key '$accountKey' in activeAccounts -> found: $account" }
+                    if (account != null) return account
                 }
             }
 
             // Si no se puede determinar, usar la cuenta actual
+            log.d(TAG) { "No account found in To/From headers, using currentAccountInfo: ${sipCoreManager.currentAccountInfo}" }
             sipCoreManager.currentAccountInfo
 
         } catch (e: Exception) {
@@ -302,6 +311,7 @@ class SharedWebSocketManager(
             null
         }
     }
+
 
     private fun extractUsername(line: String): String? {
         val regex = "sip:([^@]+)@".toRegex()

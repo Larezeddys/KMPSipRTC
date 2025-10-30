@@ -165,13 +165,39 @@ object CallStateManager {
      */
     private fun addToHistory(stateInfo: CallStateInfo) {
         val currentHistory = _callHistoryFlow.value.toMutableList()
-        currentHistory.add(stateInfo)
 
-        // Mantener solo los últimos 30 estados para evitar memory leaks
-        if (currentHistory.size > 30) {
-            currentHistory.removeAt(0)
+        // Solo agregar si es un estado diferente al último
+        if (currentHistory.isEmpty() ||
+            currentHistory.last().state != stateInfo.state ||
+            currentHistory.last().callId != stateInfo.callId) {
+
+            currentHistory.add(stateInfo)
+
+            // Aumentar límite y usar criterio más inteligente
+            if (currentHistory.size > 100) { // Aumentar de 30 a 100
+                // Mantener primeros estados importantes y últimos estados
+                val importantStates = currentHistory.filter {
+                    it.state == CallState.IDLE ||
+                            it.state == CallState.INCOMING_RECEIVED ||
+                            it.state == CallState.OUTGOING_INIT ||
+                            it.state == CallState.CONNECTED ||
+                            it.state == CallState.ENDED ||
+                            it.state == CallState.ERROR
+                }
+
+                if (importantStates.size > 20) {
+                    // Mantener primeros 10 y últimos 10 estados importantes
+                    val firstImportant = importantStates.take(10)
+                    val lastImportant = importantStates.takeLast(10)
+                    val combined = (firstImportant + lastImportant).distinctBy { it.timestamp }
+                    currentHistory.clear()
+                    currentHistory.addAll(combined.sortedBy { it.timestamp })
+                } else {
+                    currentHistory.removeAt(0) // Eliminar solo el más antiguo
+                }
+            }
+            _callHistoryFlow.value = currentHistory
         }
-        _callHistoryFlow.value = currentHistory
     }
 
     /**
@@ -366,7 +392,7 @@ object CallStateManager {
 
     fun getStateHistory(): List<CallStateInfo> = _callHistoryFlow.value
     fun clearHistory() {
-        _callHistoryFlow.value = emptyList()
+//        _callHistoryFlow.value = emptyList()
     }
 
     fun getStateForCall(callId: String): CallStateInfo? {

@@ -29,7 +29,6 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.datetime.Clock
 
-
 class CallManager(
     private val sipCoreManager: SipCoreManager,
     private val audioManager: SipAudioManager,
@@ -46,11 +45,69 @@ class CallManager(
     }
 
     /**
-     * Realizar llamada saliente
+     * ✅ NUEVO: Registrar llamada en historial basándose en el estado actual
      */
+    private fun registerCallInHistory(callData: CallData, finalState: CallState? = null) {
+        val endTime = Clock.System.now().toEpochMilliseconds()
+        val state = finalState ?: CallStateManager.getCurrentState().state
+
+        val callType = determineCallType(callData, state)
+
+        log.d(TAG) {
+            "📝 Registering call in history: ${callData.callId}, type: $callType, state: $state"
+        }
+
+        sipCoreManager.callHistoryManager.addCallLog(callData, callType, endTime)
+    }
     /**
-     * Realizar llamada saliente
+     * ✅ NUEVO: Método público para registrar llamadas desde otros lugares (como SipMessageHandler)
      */
+    fun registerMissedCall(callData: CallData) {
+        if (callData.direction == CallDirections.INCOMING) {
+            log.d(TAG) { "📝 Registering missed call: ${callData.callId}" }
+            registerCallInHistory(callData, CallState.INCOMING_RECEIVED)
+        } else {
+            log.w(TAG) { "❌ Cannot register missed call for non-incoming direction: ${callData.direction}" }
+        }
+    }
+    /**
+     * ✅ MEJORADO: Determinar tipo de llamada con lógica más precisa
+     */
+    private fun determineCallType(callData: CallData, finalState: CallState): CallTypes {
+        return when {
+            // Llamadas exitosas: conectadas con streams funcionando
+            finalState == CallState.STREAMS_RUNNING ||
+                    finalState == CallState.CONNECTED -> CallTypes.SUCCESS
+
+            // Llamadas ENTRANTES no contestadas = MISSED
+            callData.direction == CallDirections.INCOMING && (
+                    finalState == CallState.INCOMING_RECEIVED ||
+                            finalState == CallState.ERROR ||
+                            finalState == CallState.ENDING ||
+                            finalState == CallState.ENDED
+                    ) -> CallTypes.MISSED
+
+            // Llamadas SALIENTES no completadas = ABORTED
+            callData.direction == CallDirections.OUTGOING && (
+                    finalState == CallState.OUTGOING_INIT ||
+                            finalState == CallState.OUTGOING_PROGRESS ||
+                            finalState == CallState.OUTGOING_RINGING ||
+                            finalState == CallState.ERROR ||
+                            finalState == CallState.ENDING ||
+                            finalState == CallState.ENDED
+                    ) -> CallTypes.ABORTED
+
+            else -> {
+                // Fallback por dirección
+                if (callData.direction == CallDirections.INCOMING) {
+                    CallTypes.MISSED
+                } else {
+                    CallTypes.ABORTED
+                }
+            }
+        }
+    }
+
     fun makeCall(
         phoneNumber: String,
         accountInfo: AccountInfo,
@@ -63,13 +120,11 @@ class CallManager(
             return
         }
 
-        log.d(tag = TAG) { "Making call to $phoneNumber (Translation: $enableTranslation)" }
+        log.d(tag = TAG) { "Making call to $phoneNumber" }
         audioManager.stopAllRingtones()
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
-
-                // Flujo normal sin traducción
                 audioManager.prepareAudioForOutgoingCall()
                 val sdp = audioManager.createOffer()
 
@@ -97,7 +152,6 @@ class CallManager(
                 audioManager.playOutgoingRingtone()
                 messageHandler.sendInvite(accountInfo, callData)
 
-
             } catch (e: Exception) {
                 log.e(tag = TAG) { "Error creating call: ${e.stackTraceToString()}" }
                 sipCoreManager.sipCallbacks?.onCallFailed("Error creating call: ${e.message}")
@@ -107,15 +161,16 @@ class CallManager(
                         callData.callId,
                         errorReason = CallErrorReason.NETWORK_ERROR
                     )
+                    // ✅ Registrar llamada fallida
+                    registerCallInHistory(callData, CallState.ERROR)
                 }
                 audioManager.stopOutgoingRingtone()
             }
         }
     }
 
-
     /**
-     * Finalizar llamada
+     * ✅ MEJORADO: endCall con registro automático en historial
      */
     fun endCall(callId: String? = null) {
         val accountInfo = sipCoreManager.currentAccountInfo ?: run {
@@ -123,7 +178,6 @@ class CallManager(
             return
         }
 
-        // Obtener CallData de AccountInfo (fuente primaria)
         val targetCallData = accountInfo.currentCallData.value ?: run {
             log.e(tag = TAG) { "No call data" }
             return
@@ -136,14 +190,10 @@ class CallManager(
             return
         }
 
-        val endTime = Clock.System.now().toEpochMilliseconds()
         val currentState = callState.state
+        log.d(tag = TAG) { "Ending call: ${targetCallData.callId}, state: $currentState" }
 
-        log.d(tag = TAG) { "Ending call: ${targetCallData.callId}" }
-
-        // Detener ringtones
         audioManager.stopAllRingtones()
-
         CallStateManager.startEnding(targetCallData.callId)
         clearDtmfQueue()
 
@@ -153,47 +203,41 @@ class CallManager(
                     CallState.CONNECTED, CallState.STREAMS_RUNNING, CallState.PAUSED -> {
                         log.d(tag = TAG) { "Sending BYE" }
                         messageHandler.sendBye(accountInfo, targetCallData)
-                        sipCoreManager.callHistoryManager.addCallLog(
-                            targetCallData,
-                            CallTypes.SUCCESS,
-                            endTime
-                        )
+                        // ✅ Registrar como exitosa
+                        registerCallInHistory(targetCallData, CallState.STREAMS_RUNNING)
                     }
 
                     CallState.OUTGOING_INIT, CallState.OUTGOING_PROGRESS, CallState.OUTGOING_RINGING -> {
                         log.d(tag = TAG) { "Sending CANCEL" }
                         messageHandler.sendCancel(accountInfo, targetCallData)
-                        sipCoreManager.callHistoryManager.addCallLog(
-                            targetCallData,
-                            CallTypes.ABORTED,
-                            endTime
-                        )
+                        // ✅ Registrar como abortada
+                        registerCallInHistory(targetCallData, currentState)
                     }
 
                     CallState.INCOMING_RECEIVED -> {
                         log.d(tag = TAG) { "Sending DECLINE" }
                         messageHandler.sendDeclineResponse(accountInfo, targetCallData)
-                        sipCoreManager.callHistoryManager.addCallLog(
-                            targetCallData,
-                            CallTypes.DECLINED,
-                            endTime
-                        )
+                        // ✅ Registrar como perdida (no contestada)
+                        registerCallInHistory(targetCallData, CallState.INCOMING_RECEIVED)
                     }
 
                     else -> {
                         messageHandler.sendBye(accountInfo, targetCallData)
+                        // ✅ Registrar con estado actual
+                        registerCallInHistory(targetCallData, currentState)
                     }
                 }
-                // ✅ Detener grabación si estaba activa
+
+                // Detener grabación si estaba activa
                 if (webRtcManager.isRecordingCall()) {
                     log.d(TAG) { "🛑 Stopping recording for call ${targetCallData.callId}" }
                     val result = webRtcManager.stopCallRecording()
-
                     result?.mixedFile?.let { file ->
                         log.d(TAG) { "📁 Saved mixed recording: ${file}" }
                         saveRecordingMetadata(targetCallData.callId, file)
                     }
                 }
+
                 delay(500)
                 audioManager.dispose()
 
@@ -216,19 +260,13 @@ class CallManager(
 
     private fun saveRecordingMetadata(callId: String, file: String) {
         try {
-            // Aquí podrías guardar en base de datos local o Firebase, por ejemplo:
             log.d(TAG) { "✅ Recording saved: $callId → ${file}" }
-            // callDatabase.insert(CallRecordingEntity(callId, file.absolutePath, System.currentTimeMillis()))
         } catch (e: Exception) {
             log.e(TAG) { "Error saving metadata: ${e.message}" }
         }
     }
 
-    /**
-     * Aceptar llamada entrante
-     */
     fun acceptCall(callId: String? = null, recordCall: Boolean = false) {
-
         val accountInfo = sipCoreManager.currentAccountInfo ?: run {
             log.e(tag = TAG) { "❌ No current account" }
             return
@@ -258,6 +296,8 @@ class CallManager(
                 targetCallData.callId,
                 errorReason = CallErrorReason.MEDIA_ERROR
             )
+            // ✅ Registrar error
+            registerCallInHistory(targetCallData, CallState.ERROR)
             sipCoreManager.sipCallbacks?.onCallFailed("Remote SDP not available")
             return
         }
@@ -267,8 +307,6 @@ class CallManager(
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
-
-                // Flujo normal sin traducción
                 log.d(tag = TAG) { "🎤 Preparing audio..." }
                 audioManager.prepareAudioForIncomingCall()
                 log.d(tag = TAG) { "📞 Creating answer with remote SDP" }
@@ -304,6 +342,9 @@ class CallManager(
                     errorReason = CallErrorReason.MEDIA_ERROR
                 )
 
+                // ✅ Registrar error en aceptación
+                registerCallInHistory(targetCallData, CallState.ERROR)
+
                 sipCoreManager.sipCallbacks?.onCallFailed("Failed to accept: ${e.message}")
 
                 try {
@@ -315,9 +356,8 @@ class CallManager(
         }
     }
 
-
     /**
-     * Rechazar llamada entrante
+     * ✅ MEJORADO: declineCall con registro en historial
      */
     fun declineCall(callId: String? = null) {
         val accountInfo = sipCoreManager.currentAccountInfo ?: run {
@@ -325,20 +365,17 @@ class CallManager(
             return
         }
 
-        // ✅ CORRECCIÓN: Usar misma lógica que acceptCall para obtener CallData
         val targetCallData = when {
             callId != null -> {
-                // Primero buscar en AccountInfo
                 val accountCallData = accountInfo.currentCallData.value
                 if (accountCallData?.callId == callId) {
-                    log.d(tag = TAG) { "✅ Found call in AccountInfo (preferred)" }
+                    log.d(tag = TAG) { "✅ Found call in AccountInfo" }
                     accountCallData
                 } else {
                     log.d(tag = TAG) { "Looking in MultiCallManager" }
                     MultiCallManager.getCall(callId)
                 }
             }
-
             else -> {
                 log.d(tag = TAG) { "Using current call from AccountInfo" }
                 accountInfo.currentCallData.value
@@ -349,31 +386,25 @@ class CallManager(
         }
 
         if (targetCallData.direction != CallDirections.INCOMING) {
-            log.w(tag = TAG) { "Cannot decline call - not incoming. Direction: ${targetCallData.direction}" }
+            log.w(tag = TAG) { "Cannot decline call - not incoming" }
             return
         }
 
         log.d(tag = TAG) { "Declining call: ${targetCallData.callId}" }
 
-        // ✅ CORRECCIÓN: Asegurar toTag
         if (targetCallData.toTag.isNullOrEmpty()) {
             targetCallData.toTag = generateId()
-            log.d(tag = TAG) { "Generated toTag: ${targetCallData.toTag}" }
         }
 
-        // ✅ CORRECCIÓN: Detener todos los ringtones, no solo uno
-        log.d(tag = TAG) { "Stopping all ringtones..." }
         audioManager.stopAllRingtones()
 
         // Enviar respuesta de rechazo
-        log.d(tag = TAG) { "Sending 603 Decline response..." }
         CoroutineScope(Dispatchers.IO).launch {
             messageHandler.sendDeclineResponse(accountInfo, targetCallData)
         }
-        // Registrar en historial
-        val endTime = Clock.System.now().toEpochMilliseconds()
-        sipCoreManager.callHistoryManager.addCallLog(targetCallData, CallTypes.DECLINED, endTime)
-        log.d(tag = TAG) { "Call log recorded as DECLINED" }
+
+        // ✅ Registrar como DECLINED (no como MISSED)
+        registerCallInHistory(targetCallData, CallState.INCOMING_RECEIVED)
 
         // Actualizar estado
         CallStateManager.callEnded(targetCallData.callId, sipReason = "Declined")
@@ -383,29 +414,15 @@ class CallManager(
         if (accountInfo.currentCallData.value?.callId == targetCallData.callId) {
             CoroutineScope(Dispatchers.IO).launch {
                 accountInfo.resetCallState()
-                log.d(tag = TAG) { "AccountInfo call state reset" }
-
             }
         }
 
         log.d(tag = TAG) { "✅ Call declined successfully: ${targetCallData.callId}" }
     }
 
-    /**
-     * Silenciar/Desactivar silencio
-     */
-    fun toggleMute(): Boolean {
-        return audioManager.toggleMute()
-    }
-
-    /**
-     * Verificar si está silenciado
-     */
+    fun toggleMute(): Boolean = audioManager.toggleMute()
     fun isMuted(): Boolean = audioManager.isMuted()
 
-    /**
-     * Poner llamada en espera
-     */
     fun holdCall(callId: String? = null) {
         val accountInfo = sipCoreManager.currentAccountInfo ?: return
         val targetCallData = if (callId != null) {
@@ -442,9 +459,6 @@ class CallManager(
         }
     }
 
-    /**
-     * Reanudar llamada en espera
-     */
     fun resumeCall(callId: String? = null) {
         val accountInfo = sipCoreManager.currentAccountInfo ?: return
         val targetCallData = if (callId != null) {
@@ -479,18 +493,13 @@ class CallManager(
         }
     }
 
-    /**
-     * Enviar DTMF
-     */
     fun sendDtmf(digit: Char, duration: Int = 160): Boolean {
         val validDigits = setOf(
             '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
             '*', '#', 'A', 'B', 'C', 'D', 'a', 'b', 'c', 'd'
         )
 
-        if (!validDigits.contains(digit)) {
-            return false
-        }
+        if (!validDigits.contains(digit)) return false
 
         val request = DtmfRequest(digit, duration)
         CoroutineScope(Dispatchers.IO).launch {
@@ -503,43 +512,28 @@ class CallManager(
         return true
     }
 
-    /**
-     * Enviar secuencia DTMF
-     */
     fun sendDtmfSequence(digits: String, duration: Int = 160): Boolean {
         if (digits.isEmpty()) return false
-
-        digits.forEach { digit ->
-            sendDtmf(digit, duration)
-        }
-
+        digits.forEach { digit -> sendDtmf(digit, duration) }
         return true
     }
 
     private suspend fun processDtmfQueue() = withContext(Dispatchers.IO) {
         dtmfMutex.withLock {
-            if (isDtmfProcessing || dtmfQueue.isEmpty()) {
-                return@withLock
-            }
+            if (isDtmfProcessing || dtmfQueue.isEmpty()) return@withLock
             isDtmfProcessing = true
         }
 
         try {
             while (true) {
                 val request: DtmfRequest? = dtmfMutex.withLock {
-                    if (dtmfQueue.isNotEmpty()) {
-                        dtmfQueue.removeAt(0)
-                    } else {
-                        null
-                    }
+                    if (dtmfQueue.isNotEmpty()) dtmfQueue.removeAt(0) else null
                 }
 
                 if (request == null) break
 
                 val success = sendSingleDtmf(request.digit, request.duration)
-                if (success) {
-                    delay(150)
-                }
+                if (success) delay(150)
             }
         } finally {
             dtmfMutex.withLock {
@@ -578,28 +572,13 @@ class CallManager(
         }
     }
 
-    /**
-     * Obtener dispositivos de audio
-     */
     fun getAudioDevices() = audioManager.getAudioDevices()
-
-    /**
-     * Cambiar dispositivo de audio
-     */
     fun changeAudioDevice(device: AudioDevice) = audioManager.changeAudioDevice(device)
-
-    /**
-     * Verificar si hay llamada activa
-     */
     fun hasActiveCall(): Boolean = CallStateManager.getCurrentState().isActive()
-
-    /**
-     * Verificar si hay llamada conectada
-     */
     fun hasConnectedCall(): Boolean = CallStateManager.getCurrentState().isConnected()
 
     /**
-     * Manejar conexión WebRTC establecida
+     * ✅ MEJORADO: handleWebRtcConnected
      */
     fun handleWebRtcConnected() {
         sipCoreManager.callStartTimeMillis = Clock.System.now().toEpochMilliseconds()
@@ -612,7 +591,8 @@ class CallManager(
     }
 
     /**
-     * Manejar cierre de WebRTC
+     * ✅ MEJORADO: handleWebRtcClosed - solo para llamadas YA conectadas
+     * Para llamadas perdidas, el registro ya se hizo en endCall/declineCall
      */
     fun handleWebRtcClosed() {
         val callData = sipCoreManager.currentAccountInfo?.currentCallData?.value
@@ -624,38 +604,28 @@ class CallManager(
             return
         }
 
-        // Marca la llamada como terminada
+        val currentState = CallStateManager.getCurrentState()
+        log.d(TAG) {
+            "Handling WebRTC closed for call: ${callData.callId}, state: ${currentState.state}"
+        }
+
+        // Solo registrar si la llamada estuvo conectada
+        val wasConnected = currentState.state == CallState.CONNECTED ||
+                currentState.state == CallState.STREAMS_RUNNING ||
+                currentState.state == CallState.PAUSED
+
+        if (wasConnected) {
+            // ✅ Solo registrar llamadas que estuvieron conectadas
+            registerCallInHistory(callData, currentState.state)
+            log.d(TAG) { "Registered connected call in history: ${callData.callId}" }
+        } else {
+            log.d(TAG) {
+                "Skipping history registration (call was not connected or already registered)"
+            }
+        }
+
         CallStateManager.callEnded(callData.callId)
         sipCoreManager.notifyCallStateChanged(CallState.ENDED)
-
-        // Guarda registro de la llamada si aún existe el CallData
-        val endTime = Clock.System.now().toEpochMilliseconds()
-        val finalState = CallStateManager.getCurrentState().state
-        val callType = determineCallType(callData, finalState)
-
-        try {
-            sipCoreManager.callHistoryManager.addCallLog(callData, callType, endTime)
-        } catch (e: Exception) {
-            log.e(tag = TAG) { "Error adding call log after WebRTC closed: ${e.message}" }
-        }
-    }
-
-
-    private fun determineCallType(callData: CallData, finalState: CallState): CallTypes {
-        return when (finalState) {
-            CallState.CONNECTED, CallState.STREAMS_RUNNING, CallState.ENDED -> CallTypes.SUCCESS
-            CallState.ERROR -> if (callData.direction == CallDirections.INCOMING) {
-                CallTypes.MISSED
-            } else {
-                CallTypes.ABORTED
-            }
-
-            else -> if (callData.direction == CallDirections.INCOMING) {
-                CallTypes.MISSED
-            } else {
-                CallTypes.ABORTED
-            }
-        }
     }
 }
 

@@ -6,12 +6,10 @@ import androidx.room.PrimaryKey
 import com.eddyslarez.kmpsiprtc.data.models.RegistrationState
 import kotlinx.datetime.Clock
 
-
 @Entity(
     tableName = "sip_accounts",
     indices = [
-        Index(value = ["username", "domain"], unique = true),
-        Index(value = ["isActive"])
+        Index(value = ["username", "domain"], unique = true)
     ]
 )
 data class SipAccountEntity(
@@ -48,12 +46,4 @@ data class SipAccountEntity(
     val lastErrorMessage: String? = null,
     val connectionQuality: Float = 0.0f,
     val averageLatency: Int = 0
-) {
-    fun getAccountKey(): String = "$username@$domain"
-
-    fun isRegistered(): Boolean = registrationState == RegistrationState.OK
-
-    fun isExpired(): Boolean {
-        return registrationExpiry > 0 && Clock.System.now().toEpochMilliseconds() > registrationExpiry
-    }
-}
+)

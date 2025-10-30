@@ -52,31 +52,34 @@ class DatabaseManager private constructor() {
     companion object {
         @Volatile
         private var INSTANCE: DatabaseManager? = null
-        private val LOCK = SynchronizedObject()
+        private val LOCK = Any()
 
         fun getInstance(): DatabaseManager {
-            return INSTANCE ?: synchronized(LOCK) {
+            return INSTANCE ?: synchronized(LOCK as SynchronizedObject) {
                 INSTANCE ?: DatabaseManager().also {
                     INSTANCE = it
                     it.ensureInitialized()
                 }
             }
         }
+    }
 
-        /**
-         * Método para verificar si existe una instancia
-         */
-        fun hasInstance(): Boolean {
-            return INSTANCE != null
-        }
-
-        /**
-         * Obtiene instancia existente sin crear una nueva
-         */
-        fun getExistingInstance(): DatabaseManager? {
-            return INSTANCE
+    private fun ensureInitialized() {
+        if (!isInitialized) {
+            scope.launch {
+                try {
+                    // Forzar apertura de la base de datos
+                    val stats = getGeneralStatistics()
+                    log.d(tag = TAG) { "Database initialized with ${stats.totalAccounts} accounts" }
+                    isInitialized = true
+                } catch (e: Exception) {
+                    log.e(tag = TAG) { "Error initializing database: ${e.message}" }
+                    e.printStackTrace()
+                }
+            }
         }
     }
+
 
     // === OPERACIONES DE CUENTAS SIP ===
 
@@ -414,24 +417,6 @@ class DatabaseManager private constructor() {
         log.d(tag = TAG) { "DatabaseManager instance created" }
     }
 
-    // === MÉTODOS DE UTILIDAD ===
-
-    private fun ensureInitialized() {
-        if (!isInitialized) {
-            scope.launch {
-                try {
-                    // Verificar integridad de la base de datos
-                    val stats = getGeneralStatistics()
-                    log.d(tag = TAG) { "Database initialized with ${stats.totalAccounts} accounts and ${stats.totalCalls} calls" }
-                    isInitialized = true
-                } catch (e: Exception) {
-                    log.e(tag = TAG) { "Error initializing database: ${e.message}" }
-                    // Intentar recrear la base de datos si hay problemas
-                    recoverDatabase()
-                }
-            }
-        }
-    }
 
     private suspend fun recoverDatabase() {
         try {
@@ -512,7 +497,7 @@ class DatabaseManager private constructor() {
                 // Cerrar la base de datos
                 database.close()
 
-                synchronized(LOCK) {
+                synchronized(LOCK as SynchronizedObject) {
                     INSTANCE = null
                     isInitialized = false
                 }

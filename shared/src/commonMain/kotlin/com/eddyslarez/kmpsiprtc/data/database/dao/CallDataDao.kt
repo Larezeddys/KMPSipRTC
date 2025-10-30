@@ -128,8 +128,9 @@ interface CallDataDao {
     @Query("SELECT * FROM call_data WHERE fromNumber = :phoneNumber OR toNumber = :phoneNumber ORDER BY startTime DESC")
     fun getCallDataForNumber(phoneNumber: String): Flow<List<CallDataEntity>>
 
-    @Query("SELECT COUNT(*) FROM call_logs")
-    suspend fun getCallLogCount(): Int
+    @Query("SELECT COUNT(*) FROM call_data")
+    suspend fun getCallDataCount(): Int
+
     // === ESTADÍSTICAS ===
 
     @Query("SELECT COUNT(*) FROM call_data WHERE isActive = 1")
@@ -158,13 +159,7 @@ interface CallDataDao {
     @Query("DELETE FROM call_data WHERE accountId = :accountId")
     suspend fun deleteCallDataByAccount(accountId: String)
 
-    // === OPERACIONES COMPLEJAS ===
-
-    @Transaction
-    suspend fun endCallWithCleanup(callId: String, endTime: Long) {
-        endCall(callId, endTime)
-        // Aquí podrías agregar lógica adicional de limpieza
-    }
+    // === CONSULTAS COMPLEJAS (sin @Transaction) ===
 
     @Query("SELECT * FROM call_data WHERE currentState IN ('CONNECTED', 'STREAMS_RUNNING') AND isActive = 1")
     fun getConnectedCalls(): Flow<List<CallDataEntity>>

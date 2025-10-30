@@ -8,24 +8,12 @@ import com.eddyslarez.kmpsiprtc.data.models.CallDirections
 import com.eddyslarez.kmpsiprtc.data.models.CallTypes
 import com.eddyslarez.kmpsiprtc.utils.formatDuration
 import kotlinx.datetime.Clock
-
 @Entity(
     tableName = "call_logs",
-    foreignKeys = [
-        ForeignKey(
-            entity = SipAccountEntity::class,
-            parentColumns = ["id"],
-            childColumns = ["accountId"],
-            onDelete = ForeignKey.CASCADE
-        )
-    ],
     indices = [
         Index(value = ["accountId"]),
-        Index(value = ["startTime"]),
         Index(value = ["phoneNumber"]),
-        Index(value = ["callType"]),
-        Index(value = ["direction"]),
-        Index(value = ["isRead"])
+        Index(value = ["startTime"])
     ]
 )
 data class CallLogEntity(
@@ -59,14 +47,4 @@ data class CallLogEntity(
     // Metadatos
     val createdAt: Long = Clock.System.now().toEpochMilliseconds(),
     val updatedAt: Long = Clock.System.now().toEpochMilliseconds()
-) {
-    fun getFormattedDuration(): String {
-        return formatDuration(duration)
-    }
-
-
-    fun isMissedCall(): Boolean = callType == CallTypes.MISSED
-    fun isSuccessfulCall(): Boolean = callType == CallTypes.SUCCESS
-    fun isIncomingCall(): Boolean = direction == CallDirections.INCOMING
-    fun isOutgoingCall(): Boolean = direction == CallDirections.OUTGOING
-}
+)

@@ -1,6 +1,7 @@
 package com.eddyslarez.kmpsiprtc.data.database
 
 
+
 import androidx.room.RoomDatabase
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import kotlinx.coroutines.Dispatchers
@@ -15,13 +16,7 @@ fun buildSipDatabase(
     return builder
         .setDriver(BundledSQLiteDriver())
         .setQueryCoroutineContext(Dispatchers.IO)
-        // Agregar callback si es necesario
-        .addCallback(object : RoomDatabase.Callback() {
-            override fun onCreate(connection: androidx.sqlite.SQLiteConnection) {
-                super.onCreate(connection)
-                // La configuración por defecto se creará desde el Repository
-            }
-        })
+        .fallbackToDestructiveMigration(dropAllTables = true) // Solo para desarrollo
         .build()
 }
 

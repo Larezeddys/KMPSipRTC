@@ -7,7 +7,7 @@ import kotlinx.datetime.Clock
 enum class PushMode {
     FOREGROUND,
     PUSH,
-    TRANSITIONING
+//    TRANSITIONING
 }
 
 @Serializable
