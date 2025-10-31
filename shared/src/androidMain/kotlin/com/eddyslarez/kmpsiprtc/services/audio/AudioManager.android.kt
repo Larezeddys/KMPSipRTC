@@ -104,7 +104,7 @@ class AndroidAudioManagerImpl : AudioManager {
     override fun playRingtone(syncVibration: Boolean) {
         println("$TAG: playRingtone() called - sync vibration: $syncVibration")
 
-        if (isTelecomCallActive()) {
+        if (isTelecomActiveAndEnabled()) {
             println("$TAG: System (TelecomManager) managing ringtone, skipping custom ringtone playback")
             return
         }
@@ -669,23 +669,6 @@ class AndroidAudioManagerImpl : AudioManager {
         return isVibrating
     }
 
-    @SuppressLint("MissingPermission")
-    private fun isTelecomCallActive(): Boolean {
-        return try {
-            val telecomManager = application.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
-            val isInCall = telecomManager.isInCall
-            println("$TAG: TelecomManager active call check -> $isInCall")
-            isInCall
-        } catch (e: SecurityException) {
-            println("$TAG: Missing permission to check TelecomManager state: ${e.message}")
-            false
-        } catch (e: Exception) {
-            println("$TAG: Error checking TelecomManager state: ${e.message}")
-            false
-        }
-    }
-
-
     /**
      * Obtiene información diagnóstica
      */
@@ -719,5 +702,411 @@ class AndroidAudioManagerImpl : AudioManager {
         println("$TAG: cleanup() called")
         stopAllRingtones()
         audioScope.cancel()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun isTelecomActiveAndEnabled(): Boolean {
+        return try {
+            println("$TAG: ========== TELECOM DETECTION START ==========")
+
+            // 1. Verificar versión de Android
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+                println("$TAG: ❌ TelecomManager not fully supported on Android < M (Current: ${Build.VERSION.SDK_INT})")
+                return false
+            }
+            println("$TAG: ✓ Android version ${Build.VERSION.SDK_INT} supports TelecomManager")
+
+            // 2. Verificar disponibilidad del servicio
+            val telecomManager = application.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+            if (telecomManager == null) {
+                println("$TAG: ❌ TelecomManager service not available")
+                return false
+            }
+            println("$TAG: ✓ TelecomManager service available")
+
+            // 3. Verificar permisos detalladamente
+            val hasPermissions = hasTelecomPermissions()
+            println("$TAG: Permissions check: $hasPermissions")
+
+            // 4. Verificar si hay cuentas registradas
+            val hasPhoneAccount = hasTelecomPhoneAccountRegistered()
+            println("$TAG: Phone account registered: $hasPhoneAccount")
+
+            // 5. Verificar si está manejando una llamada actualmente
+            val isManagingCall = isTelecomManagingCall()
+            println("$TAG: Currently managing call: $isManagingCall")
+
+            // 6. Verificar el estado del audio
+            val isTelecomHandlingAudio = isTelecomHandlingAudio()
+            println("$TAG: Handling audio: $isTelecomHandlingAudio")
+
+            // 7. Verificar si hay una llamada activa en el sistema
+            val hasActiveSystemCall = hasActiveSystemCall()
+            println("$TAG: Active system call: $hasActiveSystemCall")
+
+            // 8. Verificar el modo de audio del sistema
+            val audioMode = getAudioMode()
+            val isInCallAudioMode = audioMode == android.media.AudioManager.MODE_IN_CALL ||
+                    audioMode == android.media.AudioManager.MODE_IN_COMMUNICATION
+            println("$TAG: Audio mode: $audioMode (In call mode: $isInCallAudioMode)")
+
+            // 9. Verificar si la app tiene capacidad de llamada
+            val hasCallCapability = hasCallCapability()
+            println("$TAG: App has call capability: $hasCallCapability")
+
+            // 10. Verificar ConnectionService activo
+            val hasActiveConnectionService = hasActiveConnectionService()
+            println("$TAG: Active ConnectionService: $hasActiveConnectionService")
+
+            // 11. Verificar si el sistema está tocando el ringtone
+            val isSystemPlayingRingtone = isSystemPlayingRingtone()
+            println("$TAG: System playing ringtone: $isSystemPlayingRingtone")
+
+            // DECISIÓN FINAL CON LÓGICA MÚLTIPLE
+            // Escenario 1: Llamada activa completa manejada por Telecom
+            val scenario1 = hasPermissions && hasPhoneAccount && isManagingCall && isTelecomHandlingAudio
+
+            // Escenario 2: Sistema está manejando la llamada (modo audio + llamada activa)
+            val scenario2 = hasActiveSystemCall && isInCallAudioMode && hasCallCapability
+
+            // Escenario 3: ConnectionService activo con llamada
+            val scenario3 = hasActiveConnectionService && isManagingCall
+
+            // Escenario 4: Sistema está tocando su propio ringtone
+            val scenario4 = isSystemPlayingRingtone && hasPhoneAccount
+
+            val isActive = scenario1 || scenario2 || scenario3 || scenario4
+
+            println("$TAG: ========== DECISION MATRIX ==========")
+            println("$TAG: Scenario 1 (Full Telecom): $scenario1")
+            println("$TAG: Scenario 2 (System Call): $scenario2")
+            println("$TAG: Scenario 3 (ConnectionService): $scenario3")
+            println("$TAG: Scenario 4 (System Ringtone): $scenario4")
+            println("$TAG: ========================================")
+            println("$TAG: 🎯 FINAL DECISION: Telecom is ${if (isActive) "ACTIVE" else "INACTIVE"}")
+            println("$TAG: ========== TELECOM DETECTION END ==========")
+
+            isActive
+        } catch (e: Exception) {
+            println("$TAG: ❌ Error checking TelecomManager status: ${e.message}")
+            e.printStackTrace()
+            false
+        }
+    }
+
+// ==================== FUNCIONES DE SOPORTE ====================
+
+    private fun hasTelecomPermissions(): Boolean {
+        return try {
+            val permissions = mutableMapOf<String, Boolean>()
+
+            // MANAGE_OWN_CALLS (Android O+)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                permissions["MANAGE_OWN_CALLS"] = application.checkSelfPermission(
+                    Manifest.permission.MANAGE_OWN_CALLS
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            }
+
+            // ANSWER_PHONE_CALLS (Android O+)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                permissions["ANSWER_PHONE_CALLS"] = application.checkSelfPermission(
+                    Manifest.permission.ANSWER_PHONE_CALLS
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            }
+
+            // READ_PHONE_STATE
+            permissions["READ_PHONE_STATE"] = application.checkSelfPermission(
+                Manifest.permission.READ_PHONE_STATE
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+            // CALL_PHONE
+            permissions["CALL_PHONE"] = application.checkSelfPermission(
+                Manifest.permission.CALL_PHONE
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+            // READ_CALL_LOG
+            permissions["READ_CALL_LOG"] = application.checkSelfPermission(
+                Manifest.permission.READ_CALL_LOG
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+            permissions.forEach { (perm, granted) ->
+                println("$TAG:   - $perm: ${if (granted) "✓ GRANTED" else "✗ DENIED"}")
+            }
+
+            // Necesitamos al menos uno de los permisos críticos
+            val hasCriticalPermission = permissions.values.any { it }
+
+            hasCriticalPermission
+        } catch (e: Exception) {
+            println("$TAG: Error checking permissions: ${e.message}")
+            false
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun hasTelecomPhoneAccountRegistered(): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+                return false
+            }
+
+            val telecomManager = application.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+                ?: return false
+
+            // Obtener todas las cuentas disponibles
+            val callCapableAccounts = try {
+                telecomManager.callCapablePhoneAccounts
+            } catch (e: SecurityException) {
+                println("$TAG:   - No permission to access call capable accounts")
+                emptyList()
+            }
+
+            val selfManagedAccounts = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                try {
+                    telecomManager.selfManagedPhoneAccounts
+                } catch (e: SecurityException) {
+                    println("$TAG:   - No permission to access self-managed accounts")
+                    emptyList()
+                }
+            } else {
+                emptyList()
+            }
+
+            println("$TAG:   - Call capable accounts: ${callCapableAccounts.size}")
+            println("$TAG:   - Self-managed accounts: ${selfManagedAccounts.size}")
+
+            callCapableAccounts.forEach { account ->
+                println("$TAG:     → ${account.componentName.flattenToShortString()}")
+            }
+
+            val hasAccounts = callCapableAccounts.isNotEmpty() || selfManagedAccounts.isNotEmpty()
+            hasAccounts
+        } catch (e: Exception) {
+            println("$TAG: Error checking phone accounts: ${e.message}")
+            false
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun isTelecomManagingCall(): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+                return false
+            }
+
+            val telecomManager = application.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+                ?: return false
+
+            val isInCall = try {
+                telecomManager.isInCall
+            } catch (e: SecurityException) {
+                println("$TAG:   - SecurityException checking isInCall")
+                false
+            }
+
+            val isInManagedCall = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                try {
+                    telecomManager.isInManagedCall
+                } catch (e: SecurityException) {
+                    println("$TAG:   - SecurityException checking isInManagedCall")
+                    false
+                }
+            } else {
+                false
+            }
+
+            println("$TAG:   - isInCall: $isInCall")
+            println("$TAG:   - isInManagedCall: $isInManagedCall")
+
+            isInCall || isInManagedCall
+        } catch (e: Exception) {
+            println("$TAG: Error checking if managing call: ${e.message}")
+            false
+        }
+    }
+
+    private fun isTelecomHandlingAudio(): Boolean {
+        return try {
+            val audioManager = application.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager
+                ?: return false
+
+            val mode = audioManager.mode
+            val isSpeakerphoneOn = audioManager.isSpeakerphoneOn
+            val isMicrophoneMute = audioManager.isMicrophoneMute
+            val isBluetoothScoOn = audioManager.isBluetoothScoOn
+
+            println("$TAG:   - Audio mode: $mode")
+            println("$TAG:   - Speakerphone: $isSpeakerphoneOn")
+            println("$TAG:   - Mic muted: $isMicrophoneMute")
+            println("$TAG:   - Bluetooth SCO: $isBluetoothScoOn")
+
+            // Si está en modo de llamada, el audio está siendo manejado
+            mode == android.media.AudioManager.MODE_IN_CALL ||
+                    mode == android.media.AudioManager.MODE_IN_COMMUNICATION
+        } catch (e: Exception) {
+            println("$TAG: Error checking audio handling: ${e.message}")
+            false
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun hasActiveSystemCall(): Boolean {
+        return try {
+            val telephonyManager = application.getSystemService(Context.TELEPHONY_SERVICE) as? android.telephony.TelephonyManager
+                ?: return false
+
+            val callState = try {
+                telephonyManager.callState
+            } catch (e: SecurityException) {
+                println("$TAG:   - SecurityException checking call state")
+                android.telephony.TelephonyManager.CALL_STATE_IDLE
+            }
+
+            val stateString = when (callState) {
+                android.telephony.TelephonyManager.CALL_STATE_IDLE -> "IDLE"
+                android.telephony.TelephonyManager.CALL_STATE_RINGING -> "RINGING"
+                android.telephony.TelephonyManager.CALL_STATE_OFFHOOK -> "OFFHOOK"
+                else -> "UNKNOWN"
+            }
+
+            println("$TAG:   - Telephony call state: $stateString")
+
+            callState != android.telephony.TelephonyManager.CALL_STATE_IDLE
+        } catch (e: Exception) {
+            println("$TAG: Error checking system call: ${e.message}")
+            false
+        }
+    }
+
+    private fun getAudioMode(): Int {
+        return try {
+            val audioManager = application.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager
+            val mode = audioManager?.mode ?: android.media.AudioManager.MODE_NORMAL
+
+            val modeString = when (mode) {
+                android.media.AudioManager.MODE_NORMAL -> "NORMAL"
+                android.media.AudioManager.MODE_RINGTONE -> "RINGTONE"
+                android.media.AudioManager.MODE_IN_CALL -> "IN_CALL"
+                android.media.AudioManager.MODE_IN_COMMUNICATION -> "IN_COMMUNICATION"
+                else -> "UNKNOWN($mode)"
+            }
+
+            println("$TAG:   - Current mode: $modeString")
+            mode
+        } catch (e: Exception) {
+            println("$TAG: Error getting audio mode: ${e.message}")
+            android.media.AudioManager.MODE_NORMAL
+        }
+    }
+
+    private fun hasCallCapability(): Boolean {
+        return try {
+            val packageManager = application.packageManager
+            val hasSystemFeature = packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_TELEPHONY)
+
+            println("$TAG:   - Device has telephony feature: $hasSystemFeature")
+
+            // Verificar si la app declara usar telefonía
+            val appInfo = try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    packageManager.getApplicationInfo(
+                        application.packageName,
+                        android.content.pm.PackageManager.ApplicationInfoFlags.of(0)
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    packageManager.getApplicationInfo(application.packageName, 0)
+                }
+            } catch (e: Exception) {
+                null
+            }
+
+            val hasCallPermissions = application.checkSelfPermission(Manifest.permission.CALL_PHONE) ==
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+
+            println("$TAG:   - App has CALL_PHONE permission: $hasCallPermissions")
+
+            hasSystemFeature || hasCallPermissions
+        } catch (e: Exception) {
+            println("$TAG: Error checking call capability: ${e.message}")
+            false
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun hasActiveConnectionService(): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+                return false
+            }
+
+            // Verificar si hay algún ConnectionService registrado en el manifiesto
+            val packageManager = application.packageManager
+            val serviceIntent = android.content.Intent(android.telecom.ConnectionService.SERVICE_INTERFACE)
+
+            val services = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                packageManager.queryIntentServices(
+                    serviceIntent,
+                    android.content.pm.PackageManager.ResolveInfoFlags.of(0)
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                packageManager.queryIntentServices(serviceIntent, 0)
+            }
+
+            println("$TAG:   - ConnectionServices found: ${services.size}")
+
+            services.forEach { resolveInfo ->
+                println("$TAG:     → ${resolveInfo.serviceInfo.name}")
+            }
+
+            val hasConnectionService = services.isNotEmpty()
+
+            // Además, verificar si TelecomManager está gestionando actualmente
+            val telecomManager = application.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+            val isManaging = telecomManager?.let {
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        it.isInManagedCall
+                    } else {
+                        it.isInCall
+                    }
+                } catch (e: SecurityException) {
+                    false
+                }
+            } ?: false
+
+            hasConnectionService && isManaging
+        } catch (e: Exception) {
+            println("$TAG: Error checking ConnectionService: ${e.message}")
+            false
+        }
+    }
+
+    private fun isSystemPlayingRingtone(): Boolean {
+        return try {
+            val audioManager = application.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager
+                ?: return false
+
+            val mode = audioManager.mode
+            val isRingtoneMode = mode == android.media.AudioManager.MODE_RINGTONE
+
+            // Verificar si hay un stream de ringtone activo
+            val ringtoneVolume = audioManager.getStreamVolume(android.media.AudioManager.STREAM_RING)
+            val isRingtoneStreamActive = ringtoneVolume > 0
+
+            println("$TAG:   - Ringtone mode: $isRingtoneMode")
+            println("$TAG:   - Ringtone volume: $ringtoneVolume")
+
+            // También verificar si el sistema está usando el stream de ring
+            val isMusicActive = audioManager.isMusicActive
+
+            println("$TAG:   - Music active (could be ringtone): $isMusicActive")
+
+            isRingtoneMode && isRingtoneStreamActive
+        } catch (e: Exception) {
+            println("$TAG: Error checking system ringtone: ${e.message}")
+            false
+        }
     }
 }
