@@ -9,6 +9,10 @@ import android.media.MediaRecorder
 import androidx.core.app.ActivityCompat
 import com.eddyslarez.kmpsiprtc.data.models.RecordingResult
 import com.eddyslarez.kmpsiprtc.platform.log
+import com.eddyslarez.kmpsiprtc.services.calls.AnalysisKtorClient
+import com.eddyslarez.kmpsiprtc.services.calls.ComprehensiveAnalysis
+import com.google.gson.Gson
+import com.google.gson.GsonBuilder
 import kotlinx.coroutines.*
 import java.io.File
 import java.io.FileOutputStream
@@ -27,6 +31,8 @@ class CallRecorder(private val context: Context) {
     private val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
     private val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
     private val BUFFER_SIZE = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
+    private val analysisClient = AnalysisKtorClient("http://206.245.129.101:3000") // Cambia por tu IP
+    private val analysisResults = mutableMapOf<String, ComprehensiveAnalysis>()
 
     // Buffers de audio
     private val localAudioBuffer = mutableListOf<ByteArray>()
@@ -154,17 +160,262 @@ class CallRecorder(private val context: Context) {
         val remoteFile = saveAudioToFile(remoteAudioBuffer, "${callId}_remote_${timestamp}.wav")
         val mixedFile = mixAndSaveAudio(localAudioBuffer, remoteAudioBuffer, "${callId}_mixed_${timestamp}.wav")
 
+        // ✅ NUEVO: Enviar para análisis (usar el archivo mezclado)
+        val analysis = mixedFile?.let { file ->
+            analyzeAudioWithKtor(file, callId)
+        }
+
+        // Guardar resultado del análisis localmente
+        analysis?.let {
+            saveAnalysisLocally(callId, it)
+            analysisResults[callId] = it
+        }
+
         // Limpiar buffers
         localAudioBuffer.clear()
         remoteAudioBuffer.clear()
         currentCallId = null
+        log.d(TAG) { "✅ Recording stopped, analysis completed" }
+
+        RecordingWithAnalysis(
+            localPath = localFile?.path,
+            remotePath = remoteFile?.path,
+            mixedPath = mixedFile?.path,
+            analysis = analysis
+        )
 
         log.d(TAG) { "✅ Recording stopped and saved" }
         log.d(TAG) { "   Local: ${localFile?.absolutePath}" }
         log.d(TAG) { "   Remote: ${remoteFile?.absolutePath}" }
         log.d(TAG) { "   Mixed: ${mixedFile?.absolutePath}" }
-
+        stopRecordingAndAnalyze()
         RecordingResult(localFile?.path, remoteFile?.path, mixedFile?.path)
+    }
+
+
+    suspend fun stopRecordingAndAnalyze(): RecordingWithAnalysis = withContext(Dispatchers.IO) {
+        if (!isRecording) {
+            log.w(TAG) { "⚠️ No recording in progress" }
+            return@withContext RecordingWithAnalysis(null, null, null, null)
+        }
+
+        log.d(TAG) { "🛑 Stopping recording and starting analysis..." }
+        isRecording = false
+
+        // Esperar a que termine la captura
+        recordingJob?.join()
+
+        val callId = currentCallId ?: "unknown_${System.currentTimeMillis()}"
+        val timestamp = System.currentTimeMillis()
+
+        // Guardar archivos de audio
+        val localFile = saveAudioToFile(localAudioBuffer, "${callId}_local_${timestamp}.wav")
+        val remoteFile = saveAudioToFile(remoteAudioBuffer, "${callId}_remote_${timestamp}.wav")
+        val mixedFile = mixAndSaveAudio(localAudioBuffer, remoteAudioBuffer, "${callId}_mixed_${timestamp}.wav")
+
+        // ✅ NUEVO: Enviar para análisis (usar el archivo mezclado)
+        val analysis = mixedFile?.let { file ->
+            analyzeAudioWithKtor(file, callId)
+        }
+
+        // Guardar resultado del análisis localmente
+        analysis?.let {
+            saveAnalysisLocally(callId, it)
+            analysisResults[callId] = it
+        }
+
+        // Limpiar buffers
+        localAudioBuffer.clear()
+        remoteAudioBuffer.clear()
+        currentCallId = null
+
+        log.d(TAG) { "✅ Recording stopped, analysis completed" }
+
+        RecordingWithAnalysis(
+            localPath = localFile?.path,
+            remotePath = remoteFile?.path,
+            mixedPath = mixedFile?.path,
+            analysis = analysis
+        )
+    }
+    /**
+     * ✅ NUEVO: Analizar archivo de audio usando Ktor
+     */
+    private suspend fun analyzeAudioWithKtor(audioFile: File, callId: String): ComprehensiveAnalysis? {
+        return try {
+            log.d(TAG) { "🧠 Starting audio analysis with Ktor for: ${audioFile.name}" }
+
+            // 1. Verificar que el servidor esté disponible
+            if (!analysisClient.checkServerHealth()) {
+                log.e(TAG) { "❌ Server is not available" }
+                return null
+            }
+
+            // 2. Crear sesión de análisis
+            val session = analysisClient.createAnalysisSession("es")
+            if (session == null) {
+                log.e(TAG) { "❌ Failed to create analysis session" }
+                return null
+            }
+
+            log.d(TAG) { "✅ Analysis session created: ${session.sessionId}" }
+
+            // 3. Subir archivo de audio
+            val uploadSuccess = analysisClient.uploadAudioFile(session.sessionId, audioFile)
+            if (!uploadSuccess) {
+                log.e(TAG) { "❌ Failed to upload audio file" }
+                return null
+            }
+
+            log.d(TAG) { "✅ Audio file uploaded successfully" }
+
+            // 4. Esperar un momento para el procesamiento
+            delay(2000)
+
+            // 5. Obtener análisis completo
+            val analysis = analysisClient.getComprehensiveAnalysis(session.sessionId)
+
+            if (analysis != null) {
+                log.d(TAG) { "✅ Analysis completed successfully" }
+                analysis
+            } else {
+                // Intentar finalizar sesión como fallback
+                log.d(TAG) { "⚠️ Trying fallback: ending session" }
+                val result = analysisClient.endAnalysisSession(session.sessionId)
+                result?.analysis
+            }
+
+        } catch (e: Exception) {
+            log.e(TAG) { "❌ Error during audio analysis: ${e.message}" }
+            e.printStackTrace()
+            null
+        }
+    }
+
+    /**
+     * ✅ NUEVO: Analizar audio en tiempo real (WebSocket)
+     */
+    suspend fun analyzeAudioRealtime(audioChunks: List<ByteArray>, callId: String): ComprehensiveAnalysis? {
+        return try {
+            log.d(TAG) { "🔴 Starting realtime audio analysis for $callId" }
+
+            // 1. Crear sesión
+            val session = analysisClient.createAnalysisSession("es") ?: return null
+
+            // 2. Enviar chunks de audio
+            audioChunks.forEachIndexed { index, chunk ->
+                if (index % 10 == 0) { // Enviar cada 10 chunks para no saturar
+                    analysisClient.sendAudioViaWebSocket(session.sessionId, chunk)
+                    delay(100)
+                }
+            }
+
+            // 3. Obtener análisis
+            delay(3000) // Esperar procesamiento
+            analysisClient.getComprehensiveAnalysis(session.sessionId)
+
+        } catch (e: Exception) {
+            log.e(TAG) { "❌ Error in realtime analysis: ${e.message}" }
+            null
+        }
+    }
+    /**
+     * ✅ NUEVO: Guardar análisis localmente (con log detallado)
+     */
+    /**
+     * ✅ NUEVO: Guardar análisis localmente con log detallado
+     */
+    private fun saveAnalysisLocally(callId: String, analysis: ComprehensiveAnalysis) {
+        try {
+            val analysisDir = File(context.filesDir, "call_analysis").apply {
+                if (!exists()) mkdirs()
+            }
+
+            val analysisFile = File(analysisDir, "${callId}_analysis.json")
+            val gson = GsonBuilder().setPrettyPrinting().create() // JSON legible
+            val json = gson.toJson(analysis)
+
+            // Guardar en archivo
+            analysisFile.writeText(json)
+
+            // Logs detallados
+            log.d(TAG) { "💾 Analysis saved locally at: ${analysisFile.absolutePath}" }
+            log.d(TAG) { "🧠 Full analysis JSON:\n$json" }
+
+            // Ejemplo de log de campos clave
+            log.d(TAG) {
+                """
+            🧩 Analysis summary:
+            - Session ID: ${analysis.sessionId}
+            - Language: ${analysis.language}
+            - Summary: ${analysis.summary?.summary ?: "N/A"}
+            - Total turns: ${analysis.patterns?.totalTurns ?: 0}
+            - Emotions: ${analysis.emotions?.emotions?.joinToString() ?: "N/A"}
+            - Risk level: ${analysis.compliance?.riskLevel ?: "N/A"}
+            - Keywords: ${analysis.keywords?.topKeywords?.take(5)?.joinToString { it.word }} 
+            """.trimIndent()
+            }
+
+        } catch (e: Exception) {
+            log.e(TAG) { "❌ Error saving analysis locally: ${e.message}" }
+            e.printStackTrace()
+        }
+    }
+
+
+    /**
+     * ✅ NUEVO: Cargar análisis guardado
+     */
+    fun getSavedAnalysis(callId: String): ComprehensiveAnalysis? {
+        return try {
+            val analysisFile = File(context.filesDir, "call_analysis/${callId}_analysis.json")
+            if (analysisFile.exists()) {
+                val json = analysisFile.readText()
+                val gson = Gson()
+                gson.fromJson(json, ComprehensiveAnalysis::class.java)
+            } else {
+                analysisResults[callId]
+            }
+        } catch (e: Exception) {
+            log.e(TAG) { "❌ Error loading analysis: ${e.message}" }
+            null
+        }
+    }
+
+    /**
+     * ✅ NUEVO: Obtener todos los análisis guardados
+     */
+    fun getAllSavedAnalysis(): List<Pair<String, ComprehensiveAnalysis>> {
+        return try {
+            val analysisDir = File(context.filesDir, "call_analysis")
+            if (!analysisDir.exists()) return emptyList()
+
+            analysisDir.listFiles { file -> file.extension == "json" }
+                ?.mapNotNull { file ->
+                    try {
+                        val callId = file.name.removeSuffix("_analysis.json")
+                        val json = file.readText()
+                        val gson = Gson()
+                        val analysis = gson.fromJson(json, ComprehensiveAnalysis::class.java)
+                        callId to analysis
+                    } catch (e: Exception) {
+                        null
+                    }
+                } ?: emptyList()
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    /**
+     * ✅ NUEVO: Verificar conexión con el servidor
+     */
+    suspend fun checkServerConnection(): Boolean {
+        return try {
+            analysisClient.checkServerHealth()
+        } catch (e: Exception) {
+            false
+        }
     }
     // ==================== CAPTURA DE AUDIO ====================
 
@@ -412,12 +663,47 @@ class CallRecorder(private val context: Context) {
     // ==================== LIMPIEZA ====================
 
     fun dispose() {
-        log.d(TAG) { "Disposing CallRecorder" }
+        log.d(TAG) { "Disposing CallRecorder and Ktor client" }
         isRecording = false
         recordingJob?.cancel()
         recordingScope.cancel()
+        analysisClient.close()
         localAudioBuffer.clear()
         remoteAudioBuffer.clear()
+    }
+}
+/**
+ * ✅ NUEVO: Resultado que incluye análisis
+ */
+data class RecordingWithAnalysis(
+    val localPath: String?,
+    val remotePath: String?,
+    val mixedPath: String?,
+    val analysis: ComprehensiveAnalysis?
+)
+
+/**
+ * ✅ NUEVO: Resultado simplificado para la UI
+ */
+data class AnalysisSummary(
+    val callId: String,
+    val summary: String,
+    val keyPoints: List<String>,
+    val sentiment: String,
+    val duration: String,
+    val timestamp: Long
+) {
+    companion object {
+        fun fromComprehensiveAnalysis(callId: String, analysis: ComprehensiveAnalysis): AnalysisSummary {
+            return AnalysisSummary(
+                callId = callId,
+                summary = analysis.summary?.summary ?: "No summary available",
+                keyPoints = analysis.summary?.keyPoints ?: emptyList(),
+                sentiment = analysis.emotions?.overallMood ?: "neutral",
+                duration = "${analysis.metrics?.wordCount ?: 0} words",
+                timestamp = System.currentTimeMillis()
+            )
+        }
     }
 }
 

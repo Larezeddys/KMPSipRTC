@@ -104,6 +104,14 @@ kotlin {
                 implementation("io.ktor:ktor-client-okhttp:3.3.1")
 //                implementation("com.shepeliev:webrtc-kmp:0.125.11")
                 implementation(libs.androidx.room.sqlite.wrapper)
+
+
+                implementation("io.ktor:ktor-client-core:3.3.1")
+                implementation("io.ktor:ktor-client-content-negotiation:3.3.1")
+                implementation("io.ktor:ktor-serialization-gson:3.3.1")
+                implementation("io.ktor:ktor-client-logging:3.3.1")
+                implementation("io.ktor:ktor-client-websockets:3.3.1")
+                implementation("com.google.code.gson:gson:2.13.2")
             }
         }
 

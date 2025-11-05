@@ -659,8 +659,8 @@ class PeerConnectionController(
 
         // 🔟 Disponer CallRecorder
         try {
-            callRecorder?.dispose()
-            callRecorder = null
+//            callRecorder?.dispose()
+//            callRecorder = null
         } catch (e: Exception) {
             log.w(TAG) { "Error disposing recorder: ${e.message}" }
         }
