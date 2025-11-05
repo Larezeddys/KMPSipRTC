@@ -6,9 +6,12 @@ import com.eddyslarez.kmpsiprtc.data.models.AudioUnit
 import com.eddyslarez.kmpsiprtc.data.models.AudioUnitCompatibilities
 import com.eddyslarez.kmpsiprtc.data.models.AudioUnitTypes
 import com.eddyslarez.kmpsiprtc.data.models.DeviceConnectionState
+import com.eddyslarez.kmpsiprtc.data.models.RecordingResult
 import com.eddyslarez.kmpsiprtc.data.models.SdpType
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
 import com.eddyslarez.kmpsiprtc.platform.log
+import com.eddyslarez.kmpsiprtc.services.audio.IosCallRecorderWithAVAudioEngine
+import com.eddyslarez.kmpsiprtc.services.audio.IosCarPlayDetector
 import com.shepeliev.webrtckmp.*
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.coroutines.*
@@ -21,7 +24,9 @@ actual fun createWebRtcManager(): WebRtcManager = IosWebRtcManager()
 class IosWebRtcManager : WebRtcManager {
     private val TAG = "IosWebRtcManager"
     private val coroutineScope: CoroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-
+    private var iosRecorder: IosCallRecorderWithAVAudioEngine? = null
+    private var carPlayDetector: IosCarPlayDetector? = null
+    private var isCarPlayMode = false
     // State flows
     private val _isInitialized = MutableStateFlow(false)
     private val _availableAudioDevices = MutableStateFlow<Set<AudioDevice>>(emptySet())
@@ -52,6 +57,11 @@ class IosWebRtcManager : WebRtcManager {
     private var audioTrackCreationRetries = 0
     private val maxAudioTrackRetries = 3
 
+    init {
+        iosRecorder = IosCallRecorderWithAVAudioEngine()
+        carPlayDetector = IosCarPlayDetector()
+    }
+
     @OptIn(ExperimentalForeignApi::class)
     override fun initialize() {
         log.d(TAG) { "Initializing WebRTC Manager..." }
@@ -62,6 +72,14 @@ class IosWebRtcManager : WebRtcManager {
         }
 
         try {
+            // ✅ NUEVO: Detectar CarPlay
+            isCarPlayMode = carPlayDetector?.isCarPlayConnected() ?: false
+
+            if (isCarPlayMode) {
+                log.d(TAG) { "🚗 CarPlay detected, configuring audio..." }
+                carPlayDetector?.configureAudioForCarPlay()
+            }
+
             requestMicrophonePermission { granted ->
                 microphonePermissionGranted = granted
                 if (granted) {
@@ -86,6 +104,12 @@ class IosWebRtcManager : WebRtcManager {
 
     override fun dispose() {
         log.d(TAG) { "Disposing WebRTC resources..." }
+
+        // ✅ NUEVO: Limpiar recorder
+        iosRecorder?.dispose()
+        iosRecorder = null
+        carPlayDetector = null
+
         cleanupCall()
         _isInitialized.value = false
         _availableAudioDevices.value = emptySet()
@@ -108,6 +132,28 @@ class IosWebRtcManager : WebRtcManager {
             .map { it.audioUnit.type }
             .toSet()
     }
+
+    override fun startCallRecording(callId: String) {
+        log.d(TAG) { "🎙️ Starting recording: $callId" }
+
+        val success = iosRecorder?.startRecording(callId) ?: false
+
+        if (success) {
+            log.d(TAG) { "✅ iOS recording started successfully" }
+        } else {
+            log.e(TAG) { "❌ Failed to start iOS recording" }
+        }
+    }
+
+    override suspend fun stopCallRecording(): RecordingResult? {
+        log.d(TAG) { "🛑 Stopping recording" }
+        return iosRecorder?.stopRecording() as RecordingResult?
+    }
+
+    override fun isRecordingCall(): Boolean {
+        return iosRecorder?.isRecording ?: false
+    }
+
 
 
     override fun getAllAudioDevices(): Pair<List<AudioDevice>, List<AudioDevice>> {
@@ -283,52 +329,104 @@ class IosWebRtcManager : WebRtcManager {
         }
     }
 
-    @OptIn(ExperimentalForeignApi::class)
-    override fun applyAudioRouteChange(audioUnitType: AudioUnitTypes): Boolean {
-        if (!_isInitialized.value) return false
+//    @OptIn(ExperimentalForeignApi::class)
+//    override fun applyAudioRouteChange(audioUnitType: AudioUnitTypes): Boolean {
+//        if (!_isInitialized.value) return false
+//
+//        try {
+//            val audioSession = AVAudioSession.sharedInstance()
+//
+//            when (audioUnitType) {
+//                AudioUnitTypes.SPEAKER -> {
+//                    audioSession.overrideOutputAudioPort(
+//                        AVAudioSessionPortOverrideSpeaker,
+//                        null
+//                    )
+//                    updateCurrentDevice(AudioUnitTypes.SPEAKER, isOutput = true)
+//                }
+//                AudioUnitTypes.EARPIECE -> {
+//                    audioSession.overrideOutputAudioPort(
+//                        AVAudioSessionPortOverrideNone,
+//                        null
+//                    )
+//                    updateCurrentDevice(AudioUnitTypes.EARPIECE, isOutput = true)
+//                }
+//                AudioUnitTypes.BLUETOOTH -> {
+//                    audioSession.overrideOutputAudioPort(
+//                        AVAudioSessionPortOverrideNone,
+//                        null
+//                    )
+//                    updateCurrentDevice(AudioUnitTypes.BLUETOOTH, isOutput = true)
+//                }
+//                AudioUnitTypes.HEADSET, AudioUnitTypes.HEADPHONES -> {
+//                    audioSession.overrideOutputAudioPort(
+//                        AVAudioSessionPortOverrideNone,
+//                        null
+//                    )
+//                    updateCurrentDevice(audioUnitType, isOutput = true)
+//                }
+//                else -> return false
+//            }
+//
+//            webRtcEventListener?.onAudioDeviceChanged(_currentAudioDevice.value)
+//            return true
+//        } catch (e: Exception) {
+//            log.e(TAG) { "Error applying audio route: ${e.message}" }
+//            return false
+//        }
+//    }
+@OptIn(ExperimentalForeignApi::class)
+override fun applyAudioRouteChange(audioUnitType: AudioUnitTypes): Boolean {
+    if (!_isInitialized.value) return false
 
-        try {
-            val audioSession = AVAudioSession.sharedInstance()
+    try {
+        val audioSession = AVAudioSession.sharedInstance()
 
-            when (audioUnitType) {
-                AudioUnitTypes.SPEAKER -> {
-                    audioSession.overrideOutputAudioPort(
-                        AVAudioSessionPortOverrideSpeaker,
-                        null
-                    )
-                    updateCurrentDevice(AudioUnitTypes.SPEAKER, isOutput = true)
-                }
-                AudioUnitTypes.EARPIECE -> {
-                    audioSession.overrideOutputAudioPort(
-                        AVAudioSessionPortOverrideNone,
-                        null
-                    )
-                    updateCurrentDevice(AudioUnitTypes.EARPIECE, isOutput = true)
-                }
-                AudioUnitTypes.BLUETOOTH -> {
-                    audioSession.overrideOutputAudioPort(
-                        AVAudioSessionPortOverrideNone,
-                        null
-                    )
-                    updateCurrentDevice(AudioUnitTypes.BLUETOOTH, isOutput = true)
-                }
-                AudioUnitTypes.HEADSET, AudioUnitTypes.HEADPHONES -> {
-                    audioSession.overrideOutputAudioPort(
-                        AVAudioSessionPortOverrideNone,
-                        null
-                    )
-                    updateCurrentDevice(audioUnitType, isOutput = true)
-                }
-                else -> return false
-            }
-
-            webRtcEventListener?.onAudioDeviceChanged(_currentAudioDevice.value)
-            return true
-        } catch (e: Exception) {
-            log.e(TAG) { "Error applying audio route: ${e.message}" }
-            return false
+        // ✅ NUEVO: Manejar CarPlay
+        if (isCarPlayMode && audioUnitType == AudioUnitTypes.BLUETOOTH) {
+            log.d(TAG) { "🚗 Routing to CarPlay" }
+            return carPlayDetector?.configureAudioForCarPlay() ?: false
         }
+
+        when (audioUnitType) {
+            AudioUnitTypes.SPEAKER -> {
+                audioSession.overrideOutputAudioPort(
+                    AVAudioSessionPortOverrideSpeaker,
+                    null
+                )
+                updateCurrentDevice(AudioUnitTypes.SPEAKER, isOutput = true)
+            }
+            AudioUnitTypes.EARPIECE -> {
+                audioSession.overrideOutputAudioPort(
+                    AVAudioSessionPortOverrideNone,
+                    null
+                )
+                updateCurrentDevice(AudioUnitTypes.EARPIECE, isOutput = true)
+            }
+            AudioUnitTypes.BLUETOOTH -> {
+                audioSession.overrideOutputAudioPort(
+                    AVAudioSessionPortOverrideNone,
+                    null
+                )
+                updateCurrentDevice(AudioUnitTypes.BLUETOOTH, isOutput = true)
+            }
+            AudioUnitTypes.HEADSET, AudioUnitTypes.HEADPHONES -> {
+                audioSession.overrideOutputAudioPort(
+                    AVAudioSessionPortOverrideNone,
+                    null
+                )
+                updateCurrentDevice(audioUnitType, isOutput = true)
+            }
+            else -> return false
+        }
+
+        webRtcEventListener?.onAudioDeviceChanged(_currentAudioDevice.value)
+        return true
+    } catch (e: Exception) {
+        log.e(TAG) { "Error applying audio route: ${e.message}" }
+        return false
     }
+}
 
     override fun getAvailableAudioUnits(): Set<AudioUnit> {
         return _availableAudioDevices.value.map { it.audioUnit }.toSet()
@@ -777,6 +875,42 @@ class IosWebRtcManager : WebRtcManager {
 
         return sdpLines.joinToString("\r\n")
     }
+//    @OptIn(ExperimentalForeignApi::class)
+//    private fun refreshAudioDevices() {
+//        try {
+//            val devices = getAllAudioDevicesInternal()
+//
+//            // ✅ NUEVO: Agregar dispositivo CarPlay si está conectado
+//            if (isCarPlayMode) {
+//                carPlayDetector?.getCarAudioDeviceType()?.let { carInfo ->
+//                    val carDevice = AudioDevice(
+//                        name = carInfo.name,
+//                        descriptor = carInfo.portType,
+//                        nativeDevice = null,
+//                        isOutput = true,
+//                        audioUnit = AudioUnit(
+//                            type = AudioUnitTypes.BLUETOOTH,
+//                            capability = AudioUnitCompatibilities.PLAY,
+//                            isCurrent = true,
+//                            isDefault = true
+//                        ),
+//                        connectionState = DeviceConnectionState.CONNECTED
+//                    )
+//
+//                    devices.add(carDevice)
+//                    log.d(TAG) { "🚗 CarPlay device added to available devices" }
+//                }
+//            }
+//
+//            _availableAudioDevices.value = devices.toSet()
+//
+//            val currentOutput = getCurrentOutputDeviceInternal()
+//            val currentInput = getCurrentInputDeviceInternal()
+//            _currentAudioDevice.value = currentOutput ?: currentInput
+//        } catch (e: Exception) {
+//            log.e(TAG) { "Error refreshing audio devices: ${e.message}" }
+//        }
+//    }
 
     @OptIn(ExperimentalForeignApi::class)
     private fun refreshAudioDevices() {

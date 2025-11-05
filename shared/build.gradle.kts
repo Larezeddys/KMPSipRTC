@@ -58,9 +58,15 @@ kotlin {
         homepage = "Link to the Shared Module homepage"
         version = "1.0"
         ios.deploymentTarget = "16.0"
+
         framework {
             baseName = "shared"
             isStatic = true
+        }
+
+        // Agregar WebRTC pod
+        pod("GoogleWebRTC") {
+            version = "1.1.31999"
         }
     }
 

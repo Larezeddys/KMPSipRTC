@@ -4,8 +4,12 @@ import com.eddyslarez.kmpsiprtc.data.models.AudioUnit
 import com.eddyslarez.kmpsiprtc.data.models.AudioUnitCompatibilities
 import com.eddyslarez.kmpsiprtc.data.models.AudioUnitTypes
 import com.eddyslarez.kmpsiprtc.data.models.DeviceConnectionState
+import com.eddyslarez.kmpsiprtc.data.models.RecordingResult
 import com.eddyslarez.kmpsiprtc.data.models.SdpType
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
+import com.eddyslarez.kmpsiprtc.platform.log
+import com.eddyslarez.kmpsiprtc.services.audio.DesktopAudioTrackRecorder
+import com.eddyslarez.kmpsiprtc.services.audio.DesktopCallRecorder
 import dev.onvoid.webrtc.*
 import dev.onvoid.webrtc.media.audio.AudioDeviceModule
 import dev.onvoid.webrtc.media.audio.AudioLayer
@@ -28,7 +32,8 @@ class DesktopWebRtcManager : WebRtcManager {
     private var localAudioTrack: dev.onvoid.webrtc.media.audio.AudioTrack? = null
     private var dtmfSender: RTCDtmfSender? = null
     private var isMutedState = false
-
+    private var desktopRecorder: DesktopCallRecorder? = null
+    private var localAudioRecorder: DesktopAudioTrackRecorder? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private val _availableAudioDevices = MutableStateFlow<Set<AudioDevice>>(emptySet())
@@ -47,7 +52,7 @@ class DesktopWebRtcManager : WebRtcManager {
         try {
             audioDeviceModule = AudioDeviceModule(AudioLayer.kPlatformDefaultAudio)
             peerConnectionFactory = PeerConnectionFactory(audioDeviceModule, null)
-
+            desktopRecorder = DesktopCallRecorder()
             _isInitialized = true
             refreshAudioDevices()
         } catch (e: Exception) {
@@ -64,6 +69,10 @@ class DesktopWebRtcManager : WebRtcManager {
         peerConnectionFactory?.dispose()
         peerConnectionFactory = null
         _isInitialized = false
+        localAudioRecorder?.stopCapture()
+        desktopRecorder?.dispose()
+        localAudioRecorder = null
+        desktopRecorder = null
         scope.cancel()
     }
 
@@ -120,6 +129,39 @@ class DesktopWebRtcManager : WebRtcManager {
             .map { it.audioUnit.type }
             .toSet()
     }
+
+    override fun startCallRecording(callId: String) {
+        log.d("DesktopWebRtcManager") { "🎙️ Starting recording: $callId" }
+
+        desktopRecorder?.startRecording(callId)
+
+        // Intentar capturar desde el audio track si está disponible
+        localAudioTrack?.let { track ->
+            localAudioRecorder = DesktopAudioTrackRecorder(track) {
+                    data, bits, rate, channels, frames, timestamp ->
+                // Procesar datos de audio
+                log.d("DesktopWebRtcManager") {
+                    "Audio captured: ${data.size} bytes, $rate Hz"
+                }
+            }
+            localAudioRecorder?.startCapture()
+        }
+    }
+
+    override suspend fun stopCallRecording(): RecordingResult? {
+        log.d("DesktopWebRtcManager") { "🛑 Stopping recording" }
+
+        localAudioRecorder?.stopCapture()
+        localAudioRecorder = null
+
+        val result = desktopRecorder?.stopRecording()
+        return result as RecordingResult?
+    }
+
+    override fun isRecordingCall(): Boolean {
+        return desktopRecorder?.isRecording() ?: false
+    }
+
 
     override suspend fun createAnswer(offerSdp: String): String = suspendCoroutine { continuation ->
         scope.launch {

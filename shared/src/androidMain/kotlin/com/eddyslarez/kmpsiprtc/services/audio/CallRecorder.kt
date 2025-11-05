@@ -319,9 +319,7 @@ class CallRecorder(private val context: Context) {
             null
         }
     }
-    /**
-     * ✅ NUEVO: Guardar análisis localmente (con log detallado)
-     */
+
     /**
      * ✅ NUEVO: Guardar análisis localmente con log detallado
      */
@@ -417,19 +415,6 @@ class CallRecorder(private val context: Context) {
             false
         }
     }
-    // ==================== CAPTURA DE AUDIO ====================
-
-//    /**
-//     * Capturar audio local (del micrófono)
-//     * Llamar desde el AudioTrack local
-//     */
-//    fun captureLocalAudio(audioData: ByteArray) {
-//        if (!isRecording) return
-//        log.d(TAG) { "🎤 Captured local frame: ${audioData.size} bytes" }
-//        synchronized(localAudioBuffer) {
-//            localAudioBuffer.add(audioData.copyOf())
-//        }
-//    }
 
     /**
      * Capturar audio remoto (del peer)
