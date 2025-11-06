@@ -1,12 +1,32 @@
 [
   {
-    "moduleId": "org.jetbrains.kotlinx:atomicfu:0.24.0",
-    "file": "/Users/eddyslarez/AndroidStudioProjects/KMPSipRTC/.kotlin/metadata/kotlinTransformedCInteropMetadataLibraries/org.jetbrains.kotlinx-atomicfu-0.24.0-nativeMain-cinterop/org.jetbrains.kotlinx_atomicfu-cinterop-interop-TbVmHQ.klib",
+    "moduleId": "org.jetbrains.kotlinx:atomicfu:0.29.0",
+    "file": "/Users/eddyslarez/Downloads/KMPSipRTCNew/.kotlin/metadata/kotlinTransformedCInteropMetadataLibraries/org.jetbrains.kotlinx-atomicfu-0.29.0-iosMain-cinterop/org.jetbrains.kotlinx_atomicfu-cinterop-interop-kCq7Ng.klib",
+    "sourceSetName": "iosMain"
+  },
+  {
+    "moduleId": "androidx.sqlite:sqlite-bundled:2.6.1",
+    "file": "/Users/eddyslarez/Downloads/KMPSipRTCNew/.kotlin/metadata/kotlinTransformedCInteropMetadataLibraries/androidx.sqlite-sqlite-bundled-2.6.1-nativeMain-cinterop/androidx.sqlite_sqlite-bundled-cinterop-androidXBundledSqlite-dCYVRw.klib",
     "sourceSetName": "nativeMain"
   },
   {
-    "moduleId": "io.ktor:ktor-utils:2.3.7",
-    "file": "/Users/eddyslarez/AndroidStudioProjects/KMPSipRTC/.kotlin/metadata/kotlinTransformedCInteropMetadataLibraries/io.ktor-ktor-utils-2.3.7-iosMain-cinterop/io.ktor_ktor-utils-cinterop-threadUtils-kaBnRw.klib",
+    "moduleId": "org.jetbrains.compose.ui:ui-uikit:1.9.0",
+    "file": "/Users/eddyslarez/Downloads/KMPSipRTCNew/.kotlin/metadata/kotlinTransformedCInteropMetadataLibraries/org.jetbrains.compose.ui-ui-uikit-1.9.0-uikitMain-cinterop/org.jetbrains.compose.ui_ui-uikit-cinterop-utils-c6AlBg.klib",
+    "sourceSetName": "uikitMain"
+  },
+  {
+    "moduleId": "androidx.sqlite:sqlite-framework:2.6.1",
+    "file": "/Users/eddyslarez/Downloads/KMPSipRTCNew/.kotlin/metadata/kotlinTransformedCInteropMetadataLibraries/androidx.sqlite-sqlite-framework-2.6.1-nativeMain-cinterop/androidx.sqlite_sqlite-framework-cinterop-sqlite3-5Ubkcg.klib",
+    "sourceSetName": "nativeMain"
+  },
+  {
+    "moduleId": "io.ktor:ktor-utils:3.3.1",
+    "file": "/Users/eddyslarez/Downloads/KMPSipRTCNew/.kotlin/metadata/kotlinTransformedCInteropMetadataLibraries/io.ktor-ktor-utils-3.3.1-iosMain-cinterop/io.ktor_ktor-utils-cinterop-threadUtils-J6P8ZA.klib",
+    "sourceSetName": "iosMain"
+  },
+  {
+    "moduleId": "io.ktor:ktor-io:3.3.1",
+    "file": "/Users/eddyslarez/Downloads/KMPSipRTCNew/.kotlin/metadata/kotlinTransformedCInteropMetadataLibraries/io.ktor-ktor-io-3.3.1-iosMain-cinterop/io.ktor_ktor-io-cinterop-mutex-oGd__A.klib",
     "sourceSetName": "iosMain"
   }
 ]

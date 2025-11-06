@@ -11,33 +11,20 @@ import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.repository.*
 import com.eddyslarez.kmpsiprtc.services.calls.*
 import com.eddyslarez.kmpsiprtc.services.pushMode.PushModeManager
-import com.eddyslarez.kmpsiprtc.services.sip.BootRegistrationManager
-import com.eddyslarez.kmpsiprtc.services.sip.RegistrationRecoveryResult
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlin.compareTo
 import kotlin.concurrent.Volatile
 import com.eddyslarez.kmpsiprtc.core.SipCoreManager
 import com.eddyslarez.kmpsiprtc.data.database.DatabaseManager
-import com.eddyslarez.kmpsiprtc.data.database.entities.AppConfigEntity
-import com.eddyslarez.kmpsiprtc.data.database.entities.ContactEntity
-import com.eddyslarez.kmpsiprtc.data.models.*
-import com.eddyslarez.kmpsiprtc.platform.log
-import com.eddyslarez.kmpsiprtc.repository.CallLogWithContact
-import com.eddyslarez.kmpsiprtc.repository.GeneralStatistics
 import com.eddyslarez.kmpsiprtc.services.calls.CallStateManager
 import com.eddyslarez.kmpsiprtc.services.calls.MultiCallManager
-import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.*
-import kotlinx.coroutines.sync.withLock
 import kotlinx.datetime.Instant
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
-import kotlin.text.compareTo
 
 /**
  * KmpSipRtc - Biblioteca principal para gestión de llamadas SIP/WebRTC

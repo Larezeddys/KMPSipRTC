@@ -8,18 +8,22 @@ import java.io.FileOutputStream
 import java.time.LocalDate
 import java.util.Properties
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
-    alias(libs.plugins.kotlinCocoapods)
     alias(libs.plugins.androidLibrary)
     alias(libs.plugins.jetbrainsCompose)
     alias(libs.plugins.compose.compiler)
     alias(libs.plugins.kotlinxSerialization)
     alias(libs.plugins.gradleBuildConfig)
-    alias(libs.plugins.ksp)
-    alias(libs.plugins.androidx.room)
+
+    id("org.jetbrains.kotlin.native.cocoapods") version "2.2.20"
+    id("com.google.devtools.ksp") version "2.2.20-2.0.4"
+    id("androidx.room") version "2.8.2"
 
     id("maven-publish")
+
+
 }
 
 group = "com.github.larezeddys"
@@ -83,8 +87,9 @@ kotlin {
                 implementation("com.squareup.okio:okio:3.9.0")
 
                 // Room
-                implementation(libs.androidx.room.runtime)
-                implementation(libs.androidx.sqlite.bundled)
+                implementation("androidx.room:room-runtime:2.8.2")
+                implementation("androidx.sqlite:sqlite-bundled:2.6.1")
+
             }
         }
         val commonTest by getting {
@@ -103,7 +108,7 @@ kotlin {
                 implementation("io.insert-koin:koin-android:4.1.1")
                 implementation("io.ktor:ktor-client-okhttp:3.3.1")
 //                implementation("com.shepeliev:webrtc-kmp:0.125.11")
-                implementation(libs.androidx.room.sqlite.wrapper)
+                implementation("androidx.room:room-sqlite-wrapper:2.8.2")
             }
         }
 
@@ -113,10 +118,10 @@ kotlin {
         val iosSimulatorArm64Main by getting
 
         val iosMain by creating {
-            dependsOn(commonMain)
-            iosX64Main.dependsOn(this)
-            iosArm64Main.dependsOn(this)
-            iosSimulatorArm64Main.dependsOn(this)
+//            dependsOn(commonMain)
+//            iosX64Main.dependsOn(this)
+//            iosArm64Main.dependsOn(this)
+//            iosSimulatorArm64Main.dependsOn(this)
 
             dependencies {
                 implementation("io.ktor:ktor-client-darwin:3.3.1")
@@ -143,9 +148,11 @@ kotlin {
                             runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.10.0:macos-aarch64")
                         }
                     }
+
                     osName.contains("win") -> {
                         runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.10.0:windows-x86_64")
                     }
+
                     osName.contains("linux") -> {
                         runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.10.0:linux-x86_64")
                     }
@@ -174,13 +181,12 @@ room {
     schemaDirectory("$projectDir/schemas")
 }
 
-// Dependencias de KSP para cada plataforma
 dependencies {
-    add("kspAndroid", libs.androidx.room.compiler)
-    add("kspIosSimulatorArm64", libs.androidx.room.compiler)
-    add("kspIosX64", libs.androidx.room.compiler)
-    add("kspIosArm64", libs.androidx.room.compiler)
-    add("kspDesktop", libs.androidx.room.compiler)
+    add("kspAndroid", "androidx.room:room-compiler:2.8.2")
+    add("kspIosSimulatorArm64", "androidx.room:room-compiler:2.8.2")
+    add("kspIosX64", "androidx.room:room-compiler:2.8.2")
+    add("kspIosArm64", "androidx.room:room-compiler:2.8.2")
+    add("kspDesktop", "androidx.room:room-compiler:2.8.2")
 }
 
 // CONFIGURACIÓN PARA JITPACK

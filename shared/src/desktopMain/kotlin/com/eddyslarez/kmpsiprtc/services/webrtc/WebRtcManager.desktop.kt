@@ -4,6 +4,7 @@ import com.eddyslarez.kmpsiprtc.data.models.AudioUnit
 import com.eddyslarez.kmpsiprtc.data.models.AudioUnitCompatibilities
 import com.eddyslarez.kmpsiprtc.data.models.AudioUnitTypes
 import com.eddyslarez.kmpsiprtc.data.models.DeviceConnectionState
+import com.eddyslarez.kmpsiprtc.data.models.RecordingResult
 import com.eddyslarez.kmpsiprtc.data.models.SdpType
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
 import dev.onvoid.webrtc.*
@@ -119,6 +120,17 @@ class DesktopWebRtcManager : WebRtcManager {
             .filter { it.isOutput }
             .map { it.audioUnit.type }
             .toSet()
+    }
+
+    override fun startCallRecording(callId: String) {
+    }
+
+    override suspend fun stopCallRecording(): RecordingResult? {
+        return null
+    }
+
+    override fun isRecordingCall(): Boolean {
+        return false
     }
 
     override suspend fun createAnswer(offerSdp: String): String = suspendCoroutine { continuation ->
