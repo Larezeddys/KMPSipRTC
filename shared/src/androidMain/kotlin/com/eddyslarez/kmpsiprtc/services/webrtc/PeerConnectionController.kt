@@ -6,7 +6,8 @@ import android.os.Looper
 import com.eddyslarez.kmpsiprtc.data.models.*
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.services.audio.AudioTrackRecorder
-import com.eddyslarez.kmpsiprtc.services.audio.CallRecorder
+import com.eddyslarez.kmpsiprtc.services.recording.CallRecorder
+import com.eddyslarez.kmpsiprtc.services.recording.createCallRecorder
 import kotlinx.coroutines.*
 import org.webrtc.*
 import org.webrtc.audio.AudioDeviceModule
@@ -22,7 +23,9 @@ class PeerConnectionController(
 ) {
     private val TAG = "PeerConnectionController"
     private val mainHandler = Handler(Looper.getMainLooper())
-
+    private val callRecorder: CallRecorder by lazy {
+        createCallRecorder()
+    }
     private lateinit var peerConnectionFactory: PeerConnectionFactory
     private var peerConnection: PeerConnection? = null
     private var localAudioTrack: AudioTrack? = null
@@ -33,9 +36,6 @@ class PeerConnectionController(
     private var currentConnectionState = WebRtcConnectionState.DISCONNECTED
 
     private val eglBase = EglBase.create()
-
-    // ✅ NUEVO: Sistema de grabación
-    private var callRecorder: CallRecorder? = null
     private var localAudioRecorder: AudioTrackRecorder? = null
     private var remoteAudioRecorder: AudioTrackRecorder? = null
 
@@ -127,10 +127,7 @@ class PeerConnectionController(
         log.d(TAG) { "Initializing PeerConnectionController" }
 
         try {
-            // Inicializar sistema de grabación
-            callRecorder = CallRecorder(context)
 
-            // ... resto del código de inicialización igual ...
             PeerConnectionFactory.initialize(
                 PeerConnectionFactory.InitializationOptions
                     .builder(context)
@@ -660,7 +657,6 @@ class PeerConnectionController(
         // 🔟 Disponer CallRecorder
         try {
             callRecorder?.dispose()
-            callRecorder = null
         } catch (e: Exception) {
             log.w(TAG) { "Error disposing recorder: ${e.message}" }
         }

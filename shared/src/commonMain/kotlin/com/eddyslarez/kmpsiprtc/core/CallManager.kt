@@ -266,7 +266,7 @@ class CallManager(
         }
     }
 
-    fun acceptCall(callId: String? = null, recordCall: Boolean = false) {
+    fun acceptCall(callId: String? = null, recordCall: Boolean = true) {
         val accountInfo = sipCoreManager.currentAccountInfo ?: run {
             log.e(tag = TAG) { "❌ No current account" }
             return

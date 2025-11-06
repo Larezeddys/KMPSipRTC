@@ -19,8 +19,8 @@ import com.eddyslarez.kmpsiprtc.platform.AndroidContext.getApplication
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.services.audio.AudioController
 import com.eddyslarez.kmpsiprtc.services.audio.BluetoothController
-import com.eddyslarez.kmpsiprtc.services.audio.RecordingInfo
-import com.eddyslarez.kmpsiprtc.services.audio.RecordingType
+import com.eddyslarez.kmpsiprtc.services.recording.RecordingFileInfo
+import com.eddyslarez.kmpsiprtc.services.recording.RecordingType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -537,21 +537,21 @@ class AndroidWebRtcManager : WebRtcManager {
     /**
      * Obtener el directorio donde se guardan las grabaciones
      */
-    fun getRecordingsDirectory(): File? {
+    fun getRecordingsDirectory(): String? {
         return peerConnectionController.getRecorder()?.getRecordingsDirectory()
     }
 
     /**
      * Obtener todas las grabaciones guardadas
      */
-    fun getAllRecordings(): List<File> {
+    fun getAllRecordings(): List<RecordingFileInfo> {
         return peerConnectionController.getRecorder()?.getAllRecordings() ?: emptyList()
     }
 
     /**
      * Eliminar una grabación específica
      */
-    fun deleteRecording(file: File): Boolean {
+    fun deleteRecording(file: String): Boolean {
         return peerConnectionController.getRecorder()?.deleteRecording(file) ?: false
     }
 
@@ -560,35 +560,6 @@ class AndroidWebRtcManager : WebRtcManager {
      */
     fun deleteAllRecordings(): Boolean {
         return peerConnectionController.getRecorder()?.deleteAllRecordings() ?: false
-    }
-
-    /**
-     * Obtener información de una grabación
-     */
-    fun getRecordingInfo(file: File): RecordingInfo? {
-        if (!file.exists() || file.extension != "wav") return null
-
-        return try {
-            val fileName = file.nameWithoutExtension
-            val parts = fileName.split("_")
-
-            RecordingInfo(
-                file = file,
-                callId = parts.getOrNull(0) ?: "unknown",
-                type = when {
-                    fileName.contains("_local_") -> RecordingType.LOCAL
-                    fileName.contains("_remote_") -> RecordingType.REMOTE
-                    fileName.contains("_mixed_") -> RecordingType.MIXED
-                    else -> RecordingType.UNKNOWN
-                },
-                timestamp = parts.lastOrNull()?.toLongOrNull() ?: 0L,
-                sizeBytes = file.length(),
-                durationSeconds = estimateAudioDuration(file)
-            )
-        } catch (e: Exception) {
-            log.e(TAG) { "Error getting recording info: ${e.message}" }
-            null
-        }
     }
 
     /**
