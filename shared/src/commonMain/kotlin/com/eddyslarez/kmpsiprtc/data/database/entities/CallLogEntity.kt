@@ -7,7 +7,8 @@ import androidx.room.PrimaryKey
 import com.eddyslarez.kmpsiprtc.data.models.CallDirections
 import com.eddyslarez.kmpsiprtc.data.models.CallTypes
 import com.eddyslarez.kmpsiprtc.utils.formatDuration
-import kotlinx.datetime.Clock
+import kotlin.time.ExperimentalTime
+
 @Entity(
     tableName = "call_logs",
     indices = [
@@ -16,7 +17,7 @@ import kotlinx.datetime.Clock
         Index(value = ["startTime"])
     ]
 )
-data class CallLogEntity(
+data class CallLogEntity @OptIn(ExperimentalTime::class) constructor(
     @PrimaryKey
     val id: String,
     val accountId: String,
@@ -45,6 +46,6 @@ data class CallLogEntity(
     val jitter: Int = 0,
 
     // Metadatos
-    val createdAt: Long = Clock.System.now().toEpochMilliseconds(),
-    val updatedAt: Long = Clock.System.now().toEpochMilliseconds()
+    val createdAt: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
+    val updatedAt: Long = kotlin.time.Clock.System.now().toEpochMilliseconds()
 )

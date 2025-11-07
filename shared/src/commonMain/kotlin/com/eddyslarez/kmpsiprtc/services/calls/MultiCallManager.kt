@@ -14,7 +14,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.datetime.Clock
+import kotlin.time.ExperimentalTime
 
 object MultiCallManager {
 
@@ -111,6 +111,7 @@ object MultiCallManager {
     /**
      * Actualiza el estado de una llamada específica
      */
+    @OptIn(ExperimentalTime::class)
     fun updateCallState(callId: String, newState: CallState, errorReason: CallErrorReason = CallErrorReason.NONE) {
         val currentStates = _callStates.value.toMutableMap()
         val previousState = currentStates[callId]
@@ -119,7 +120,7 @@ object MultiCallManager {
             state = newState,
             previousState = previousState?.state,
             errorReason = errorReason,
-            timestamp = Clock.System.now().toEpochMilliseconds(),
+            timestamp = kotlin.time.Clock.System.now().toEpochMilliseconds(),
             callId = callId,
             direction = getCall(callId)?.direction ?: CallDirections.OUTGOING
         )

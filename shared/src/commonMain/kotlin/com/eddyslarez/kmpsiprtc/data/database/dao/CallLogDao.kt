@@ -13,7 +13,7 @@ import com.eddyslarez.kmpsiprtc.data.database.entities.CallLogEntity
 import com.eddyslarez.kmpsiprtc.data.models.CallDirections
 import com.eddyslarez.kmpsiprtc.data.models.CallState
 import com.eddyslarez.kmpsiprtc.data.models.CallTypes
-import kotlinx.datetime.Clock
+import kotlin.time.ExperimentalTime
 
 @Dao
 interface CallLogDao {
@@ -120,19 +120,23 @@ interface CallLogDao {
 
     // === OPERACIONES DE LECTURA ===
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE call_logs SET isRead = 1, updatedAt = :timestamp WHERE id = :callLogId")
-    suspend fun markAsRead(callLogId: String, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun markAsRead(callLogId: String, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE call_logs SET isRead = 1, updatedAt = :timestamp WHERE phoneNumber = :phoneNumber")
-    suspend fun markAllAsReadForNumber(phoneNumber: String, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun markAllAsReadForNumber(phoneNumber: String, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE call_logs SET isRead = 1, updatedAt = :timestamp")
-    suspend fun markAllAsRead(timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun markAllAsRead(timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
     // === OPERACIONES DE NOTAS ===
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE call_logs SET notes = :notes, updatedAt = :timestamp WHERE id = :callLogId")
-    suspend fun updateNotes(callLogId: String, notes: String?, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun updateNotes(callLogId: String, notes: String?, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
     // === LIMPIEZA ===
 

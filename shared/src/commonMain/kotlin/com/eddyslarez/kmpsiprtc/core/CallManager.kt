@@ -27,7 +27,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.datetime.Clock
+import kotlin.time.ExperimentalTime
 
 class CallManager(
     private val sipCoreManager: SipCoreManager,
@@ -47,8 +47,9 @@ class CallManager(
     /**
      * ✅ NUEVO: Registrar llamada en historial basándose en el estado actual
      */
+    @OptIn(ExperimentalTime::class)
     private fun registerCallInHistory(callData: CallData, finalState: CallState? = null) {
-        val endTime = Clock.System.now().toEpochMilliseconds()
+        val endTime = kotlin.time.Clock.System.now().toEpochMilliseconds()
         val state = finalState ?: CallStateManager.getCurrentState().state
 
         val callType = determineCallType(callData, state)
@@ -580,8 +581,9 @@ class CallManager(
     /**
      * ✅ MEJORADO: handleWebRtcConnected
      */
+    @OptIn(ExperimentalTime::class)
     fun handleWebRtcConnected() {
-        sipCoreManager.callStartTimeMillis = Clock.System.now().toEpochMilliseconds()
+        sipCoreManager.callStartTimeMillis = kotlin.time.Clock.System.now().toEpochMilliseconds()
 
         sipCoreManager.currentAccountInfo?.currentCallData?.let { callData ->
             CallStateManager.streamsRunning(callData.value?.callId ?: generateId())

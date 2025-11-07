@@ -3,14 +3,15 @@ package com.eddyslarez.kmpsiprtc.data.database.entities
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
-import kotlinx.datetime.Clock
+import kotlin.time.ExperimentalTime
+
 @Entity(
     tableName = "contacts",
     indices = [
         Index(value = ["phoneNumber"], unique = true)
     ]
 )
-data class ContactEntity(
+data class ContactEntity @OptIn(ExperimentalTime::class) constructor(
     @PrimaryKey
     val id: String,
     val phoneNumber: String,
@@ -32,8 +33,8 @@ data class ContactEntity(
     val missedCalls: Int = 0,
 
     // Metadatos
-    val createdAt: Long = Clock.System.now().toEpochMilliseconds(),
-    val updatedAt: Long = Clock.System.now().toEpochMilliseconds(),
+    val createdAt: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
+    val updatedAt: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
     val syncedAt: Long = 0L,
     val source: String = "manual"
 )

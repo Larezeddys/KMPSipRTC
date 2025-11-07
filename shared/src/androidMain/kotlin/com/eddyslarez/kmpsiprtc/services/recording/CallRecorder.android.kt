@@ -17,25 +17,34 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * Implementación de CallRecorder para Android
+ * Implementación de CallRecorder para Android con streaming a OpenAI Realtime API
  */
 class AndroidCallRecorder() : CallRecorder {
     private val TAG = "AndroidCallRecorder"
     private val context: Context = getApplication()
+
     // Configuración de audio
-    private val SAMPLE_RATE = 8000 // 8kHz para coincidir con WebRTC
+    private val SAMPLE_RATE = 24000 // 24kHz requerido por OpenAI Realtime API
     private val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
     private val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
     private val BUFFER_SIZE = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
+
+    // Chunk size para streaming (100ms de audio)
+    private val CHUNK_SIZE_MS = 100
+    private val CHUNK_SIZE_BYTES = (SAMPLE_RATE * 2 * CHUNK_SIZE_MS / 1000) // 2 bytes per sample
 
     // Buffers de audio
     private val localAudioBuffer = mutableListOf<ByteArray>()
     private val remoteAudioBuffer = mutableListOf<ByteArray>()
 
-    // Control de grabación
+    // Control de grabación y streaming (independientes)
     @Volatile
     private var isRecording = false
+    @Volatile
+    private var isStreaming = false
+
     private var recordingJob: Job? = null
+    private var streamingJob: Job? = null
     private val recordingScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     // AudioRecord para capturar el micrófono
@@ -45,32 +54,104 @@ class AndroidCallRecorder() : CallRecorder {
     private var outputDir: File? = null
     private var currentCallId: String? = null
 
+    // Callback para streaming
+    private var audioStreamCallback: AudioStreamCallback? = null
+
+    // Configuración de funcionalidades
+    data class AudioConfig(
+        val enableRecording: Boolean = true,  // Guardar archivos
+        val enableStreaming: Boolean = false  // Enviar a OpenAI en tiempo real
+    )
+
+    private var currentConfig = AudioConfig()
+
     init {
-        // Crear directorio para grabaciones
         outputDir = File(context.filesDir, "call_recordings").apply {
             if (!exists()) mkdirs()
         }
     }
 
-    override fun startRecording(callId: String) {
-        if (isRecording) {
-            log.w(TAG) { "⚠️ Recording already in progress" }
+    /**
+     * Interface para recibir audio en tiempo real
+     */
+    interface AudioStreamCallback {
+        /**
+         * Llamado cuando hay nuevo audio local (micrófono) disponible
+         * @param audioData PCM16 mono a 24kHz en base64
+         */
+        fun onLocalAudioChunk(audioData: String)
+
+        /**
+         * Llamado cuando hay nuevo audio remoto disponible
+         * @param audioData PCM16 mono a 24kHz en base64
+         */
+        fun onRemoteAudioChunk(audioData: String)
+
+        /**
+         * Llamado cuando hay un error en el streaming
+         */
+        fun onStreamError(error: Exception)
+    }
+
+    /**
+     * Configura el callback para recibir audio en tiempo real
+     */
+    fun setAudioStreamCallback(callback: AudioStreamCallback?) {
+        audioStreamCallback = callback
+    }
+
+    /**
+     * Inicia la captura de audio con configuración personalizada
+     * @param callId Identificador de la llamada
+     * @param config Configuración de grabación y/o streaming
+     */
+    fun startAudioCapture(callId: String, config: AudioConfig = AudioConfig()) {
+        if (isRecording || isStreaming) {
+            log.w(TAG) { "⚠️ Audio capture already in progress" }
             return
         }
 
-        log.d(TAG) { "🎙️ Starting call recording for: $callId" }
+        log.d(TAG) { "🎙️ Starting audio capture for: $callId" }
+        log.d(TAG) { "   Recording: ${config.enableRecording}" }
+        log.d(TAG) { "   Streaming: ${config.enableStreaming}" }
+
+        if (config.enableStreaming && audioStreamCallback == null) {
+            log.w(TAG) { "⚠️ Streaming enabled but no callback set!" }
+        }
 
         currentCallId = callId
-        isRecording = true
+        currentConfig = config
+        isRecording = config.enableRecording
+        isStreaming = config.enableStreaming
 
-        // Limpiar buffers anteriores
-        localAudioBuffer.clear()
-        remoteAudioBuffer.clear()
+        if (config.enableRecording) {
+            localAudioBuffer.clear()
+            remoteAudioBuffer.clear()
+        }
 
         // Iniciar captura del micrófono
         startMicrophoneCapture()
 
-        log.d(TAG) { "✅ Recording started" }
+        log.d(TAG) { "✅ Audio capture started" }
+    }
+
+    override fun startRecording(callId: String) {
+        // Método legacy - solo grabación
+        startAudioCapture(callId, AudioConfig(enableRecording = true, enableStreaming = false))
+    }
+
+    /**
+     * Inicia solo streaming sin grabar
+     */
+    fun startStreaming(callId: String) {
+        startAudioCapture(callId, AudioConfig(enableRecording = false, enableStreaming = true))
+    }
+
+    /**
+     * Inicia grabación Y streaming simultáneamente
+     */
+    fun startRecordingAndStreaming(callId: String) {
+        startAudioCapture(callId, AudioConfig(enableRecording = true, enableStreaming = true))
     }
 
     private fun startMicrophoneCapture() {
@@ -90,7 +171,7 @@ class AndroidCallRecorder() : CallRecorder {
                     SAMPLE_RATE,
                     CHANNEL_CONFIG,
                     AUDIO_FORMAT,
-                    BUFFER_SIZE
+                    BUFFER_SIZE * 4
                 )
 
                 if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
@@ -101,14 +182,42 @@ class AndroidCallRecorder() : CallRecorder {
                 audioRecord?.startRecording()
                 log.d(TAG) { "🎤 Microphone capture started" }
 
-                val buffer = ByteArray(BUFFER_SIZE)
+                val buffer = ByteArray(CHUNK_SIZE_BYTES)
+                val accumulatedBuffer = mutableListOf<Byte>()
 
-                while (isRecording) {
+                while (isRecording || isStreaming) {
                     val bytesRead = audioRecord?.read(buffer, 0, buffer.size) ?: 0
 
                     if (bytesRead > 0) {
-                        synchronized(localAudioBuffer) {
-                            localAudioBuffer.add(buffer.copyOf(bytesRead))
+                        val chunk = buffer.copyOf(bytesRead)
+
+                        // Guardar para archivo final (solo si está habilitado)
+                        if (currentConfig.enableRecording) {
+                            synchronized(localAudioBuffer) {
+                                localAudioBuffer.add(chunk)
+                            }
+                        }
+
+                        // Enviar al callback (solo si está habilitado)
+                        if (currentConfig.enableStreaming && audioStreamCallback != null) {
+                            accumulatedBuffer.addAll(chunk.toList())
+
+                            // Enviar chunks completos
+                            while (accumulatedBuffer.size >= CHUNK_SIZE_BYTES) {
+                                val chunkToSend = accumulatedBuffer.take(CHUNK_SIZE_BYTES).toByteArray()
+                                accumulatedBuffer.subList(0, CHUNK_SIZE_BYTES).clear()
+
+                                try {
+                                    val base64Audio = android.util.Base64.encodeToString(
+                                        chunkToSend,
+                                        android.util.Base64.NO_WRAP
+                                    )
+                                    audioStreamCallback?.onLocalAudioChunk(base64Audio)
+                                } catch (e: Exception) {
+                                    log.e(TAG) { "Error sending local audio chunk: ${e.message}" }
+                                    audioStreamCallback?.onStreamError(e)
+                                }
+                            }
                         }
                     }
                 }
@@ -121,53 +230,86 @@ class AndroidCallRecorder() : CallRecorder {
 
             } catch (e: Exception) {
                 log.e(TAG) { "❌ Error capturing microphone: ${e.message}" }
+                audioStreamCallback?.onStreamError(e)
                 e.printStackTrace()
             }
         }
     }
 
+    override fun captureRemoteAudio(audioData: ByteArray) {
+        if (!isRecording && !isStreaming) return
+
+        // Guardar para archivo final (solo si está habilitado)
+        if (currentConfig.enableRecording) {
+            synchronized(remoteAudioBuffer) {
+                remoteAudioBuffer.add(audioData.copyOf())
+            }
+        }
+
+        // Enviar a OpenAI en tiempo real (solo si está habilitado)
+        if (currentConfig.enableStreaming && audioStreamCallback != null) {
+            try {
+                val base64Audio = android.util.Base64.encodeToString(
+                    audioData,
+                    android.util.Base64.NO_WRAP
+                )
+                audioStreamCallback?.onRemoteAudioChunk(base64Audio)
+            } catch (e: Exception) {
+                log.e(TAG) { "Error sending remote audio chunk: ${e.message}" }
+                audioStreamCallback?.onStreamError(e)
+            }
+        }
+    }
+
     override suspend fun stopRecording(): RecordingResult = withContext(Dispatchers.IO) {
-        if (!isRecording) {
-            log.w(TAG) { "⚠️ No recording in progress" }
+        if (!isRecording && !isStreaming) {
+            log.w(TAG) { "⚠️ No audio capture in progress" }
             return@withContext RecordingResult(null, null, null)
         }
 
-        log.d(TAG) { "🛑 Stopping recording..." }
-        isRecording = false
+        log.d(TAG) { "🛑 Stopping audio capture..." }
 
-        // Esperar a que termine la captura
+        val wasRecording = isRecording
+        isRecording = false
+        isStreaming = false
+
         recordingJob?.join()
 
-        val callId = currentCallId ?: "unknown"
-        val timestamp = System.currentTimeMillis()
+        // Solo guardar archivos si la grabación estaba habilitada
+        if (wasRecording && currentConfig.enableRecording) {
+            val callId = currentCallId ?: "unknown"
+            val timestamp = System.currentTimeMillis()
 
-        // Guardar cada stream por separado
-        val localFile = saveAudioToFile(localAudioBuffer, "${callId}_local_${timestamp}.wav")
-        val remoteFile = saveAudioToFile(remoteAudioBuffer, "${callId}_remote_${timestamp}.wav")
-        val mixedFile = mixAndSaveAudio(localAudioBuffer, remoteAudioBuffer, "${callId}_mixed_${timestamp}.wav")
+            val localFile = saveAudioToFile(localAudioBuffer, "${callId}_local_${timestamp}.wav")
+            val remoteFile = saveAudioToFile(remoteAudioBuffer, "${callId}_remote_${timestamp}.wav")
+            val mixedFile = mixAndSaveAudio(localAudioBuffer, remoteAudioBuffer, "${callId}_mixed_${timestamp}.wav")
 
-        // Limpiar buffers
-        localAudioBuffer.clear()
-        remoteAudioBuffer.clear()
-        currentCallId = null
+            localAudioBuffer.clear()
+            remoteAudioBuffer.clear()
+            currentCallId = null
 
-        log.d(TAG) { "✅ Recording stopped and saved" }
-        log.d(TAG) { "   Local: ${localFile?.absolutePath}" }
-        log.d(TAG) { "   Remote: ${remoteFile?.absolutePath}" }
-        log.d(TAG) { "   Mixed: ${mixedFile?.absolutePath}" }
+            log.d(TAG) { "✅ Recording stopped and saved" }
+            log.d(TAG) { "   Local: ${localFile?.absolutePath}" }
+            log.d(TAG) { "   Remote: ${remoteFile?.absolutePath}" }
+            log.d(TAG) { "   Mixed: ${mixedFile?.absolutePath}" }
 
-        RecordingResult(localFile?.path, remoteFile?.path, mixedFile?.path)
-    }
+            return@withContext RecordingResult(localFile?.path, remoteFile?.path, mixedFile?.path)
+        } else {
+            // Solo streaming, no hay archivos que guardar
+            localAudioBuffer.clear()
+            remoteAudioBuffer.clear()
+            currentCallId = null
 
-    override fun captureRemoteAudio(audioData: ByteArray) {
-        if (!isRecording) return
-
-        synchronized(remoteAudioBuffer) {
-            remoteAudioBuffer.add(audioData.copyOf())
+            log.d(TAG) { "✅ Streaming stopped (no files saved)" }
+            return@withContext RecordingResult(null, null, null)
         }
     }
 
     override fun isRecording(): Boolean = isRecording
+
+    fun isStreaming(): Boolean = isStreaming
+
+    fun isActive(): Boolean = isRecording || isStreaming
 
     override fun getCurrentCallId(): String? = currentCallId
 
@@ -214,10 +356,12 @@ class AndroidCallRecorder() : CallRecorder {
     override fun dispose() {
         log.d(TAG) { "Disposing CallRecorder" }
         isRecording = false
+        isStreaming = false
         recordingJob?.cancel()
         recordingScope.cancel()
         localAudioBuffer.clear()
         remoteAudioBuffer.clear()
+        audioStreamCallback = null
     }
 
     // ==================== GUARDADO DE ARCHIVOS ====================
@@ -370,6 +514,143 @@ class AndroidCallRecorder() : CallRecorder {
     }
 }
 
+///**
+// * Ejemplo de uso con OpenAI Realtime API
+// */
+//class OpenAIRealtimeManager(private val apiKey: String) {
+//    private var webSocket: WebSocket? = null
+//    private val client = OkHttpClient.Builder()
+//        .readTimeout(0, TimeUnit.MILLISECONDS)
+//        .build()
+//
+//    fun connect(onConnected: () -> Unit, onError: (Exception) -> Unit) {
+//        val request = Request.Builder()
+//            .url("wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01")
+//            .addHeader("Authorization", "Bearer $apiKey")
+//            .addHeader("OpenAI-Beta", "realtime=v1")
+//            .build()
+//
+//        webSocket = client.newWebSocket(request, object : WebSocketListener() {
+//            override fun onOpen(webSocket: WebSocket, response: Response) {
+//                onConnected()
+//
+//                // Configurar sesión
+//                val config = """
+//                {
+//                    "type": "session.update",
+//                    "session": {
+//                        "modalities": ["text", "audio"],
+//                        "input_audio_format": "pcm16",
+//                        "output_audio_format": "pcm16",
+//                        "turn_detection": {
+//                            "type": "server_vad"
+//                        }
+//                    }
+//                }
+//                """.trimIndent()
+//                webSocket.send(config)
+//            }
+//
+//            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+//                onError(Exception(t))
+//            }
+//        })
+//    }
+//
+//    fun sendAudio(base64Audio: String) {
+//        val message = """
+//        {
+//            "type": "input_audio_buffer.append",
+//            "audio": "$base64Audio"
+//        }
+//        """.trimIndent()
+//        webSocket?.send(message)
+//    }
+//
+//    fun disconnect() {
+//        webSocket?.close(1000, "Normal closure")
+//    }
+//}
+//
+//// ==================== EJEMPLOS DE USO ====================
+//
+//// 1️⃣ SOLO GRABAR (sin streaming a OpenAI)
+//fun example1_OnlyRecording() {
+//    val recorder = AndroidCallRecorder()
+//    recorder.startRecording("call-123")
+//    // ... durante la llamada ...
+//    lifecycleScope.launch {
+//        val result = recorder.stopRecording()
+//        println("Archivos guardados: ${result.mixedPath}")
+//    }
+//}
+//
+//// 2️⃣ SOLO STREAMING (sin guardar archivos)
+//fun example2_OnlyStreaming() {
+//    val openAI = OpenAIRealtimeManager("tu-api-key")
+//    val recorder = AndroidCallRecorder()
+//
+//    recorder.setAudioStreamCallback(object : AndroidCallRecorder.AudioStreamCallback {
+//        override fun onLocalAudioChunk(audioData: String) {
+//            openAI.sendAudio(audioData)
+//        }
+//        override fun onRemoteAudioChunk(audioData: String) {
+//            // Opcional: enviar audio remoto
+//        }
+//        override fun onStreamError(error: Exception) {
+//            Log.e("Stream", "Error: ${error.message}")
+//        }
+//    })
+//
+//    openAI.connect(
+//        onConnected = {
+//            recorder.startStreaming("call-123") // Solo streaming
+//        },
+//        onError = { error ->
+//            Log.e("OpenAI", "Error: ${error.message}")
+//        }
+//    )
+//}
+//
+//// 3️⃣ GRABAR Y HACER STREAMING SIMULTÁNEAMENTE
+//fun example3_BothRecordingAndStreaming() {
+//    val openAI = OpenAIRealtimeManager("tu-api-key")
+//    val recorder = AndroidCallRecorder()
+//
+//    recorder.setAudioStreamCallback(object : AndroidCallRecorder.AudioStreamCallback {
+//        override fun onLocalAudioChunk(audioData: String) {
+//            openAI.sendAudio(audioData)
+//        }
+//        override fun onRemoteAudioChunk(audioData: String) {}
+//        override fun onStreamError(error: Exception) {}
+//    })
+//
+//    openAI.connect(
+//        onConnected = {
+//            recorder.startRecordingAndStreaming("call-123") // Ambos
+//        },
+//        onError = { }
+//    )
+//
+//    // Al terminar, obtienes los archivos Y habrás hecho streaming
+//    lifecycleScope.launch {
+//        val result = recorder.stopRecording()
+//        println("Archivos: ${result.mixedPath}")
+//    }
+//}
+//
+//// 4️⃣ CONFIGURACIÓN PERSONALIZADA
+//fun example4_CustomConfig() {
+//    val recorder = AndroidCallRecorder()
+//
+//    recorder.startAudioCapture(
+//        callId = "call-123",
+//        config = AndroidCallRecorder.AudioConfig(
+//            enableRecording = true,   // Cambiar según necesites
+//            enableStreaming = false   // Cambiar según necesites
+//        )
+//    )
+//}
 /**
  * Factory function para Android
  */

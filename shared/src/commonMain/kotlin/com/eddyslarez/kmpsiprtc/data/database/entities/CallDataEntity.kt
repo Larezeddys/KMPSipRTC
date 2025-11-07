@@ -6,7 +6,8 @@ import androidx.room.Index
 import androidx.room.PrimaryKey
 import com.eddyslarez.kmpsiprtc.data.models.CallDirections
 import com.eddyslarez.kmpsiprtc.data.models.CallState
-import kotlinx.datetime.Clock
+import kotlin.time.ExperimentalTime
+
 @Entity(
     tableName = "call_data",
     indices = [
@@ -15,7 +16,7 @@ import kotlinx.datetime.Clock
         Index(value = ["isActive"])
     ]
 )
-data class CallDataEntity(
+data class CallDataEntity @OptIn(ExperimentalTime::class) constructor(
     @PrimaryKey
     val callId: String,
     val accountId: String,
@@ -71,6 +72,6 @@ data class CallDataEntity(
     // Metadatos
     val md5Hash: String = "",
     val sipName: String = "",
-    val createdAt: Long = Clock.System.now().toEpochMilliseconds(),
-    val updatedAt: Long = Clock.System.now().toEpochMilliseconds()
+    val createdAt: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
+    val updatedAt: Long = kotlin.time.Clock.System.now().toEpochMilliseconds()
 )

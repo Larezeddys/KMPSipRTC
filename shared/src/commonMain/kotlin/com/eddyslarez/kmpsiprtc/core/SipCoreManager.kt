@@ -42,11 +42,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.datetime.Clock
 import kotlin.to
 import com.eddyslarez.kmpsiprtc.services.audio.createAudioManager
 import com.eddyslarez.kmpsiprtc.services.calls.CallLifecycleManager
 import com.eddyslarez.kmpsiprtc.services.pushMode.PushModeManager
+import kotlin.time.ExperimentalTime
 
 class SipCoreManager private constructor(
     private val config: SipConfig,
@@ -418,6 +418,7 @@ class SipCoreManager private constructor(
     /**
      * NUEVO: Sincronizar cuentas entre memoria y BD
      */
+    @OptIn(ExperimentalTime::class)
     private suspend fun syncAccountsWithDatabase() {
         accountSyncMutex.withLock {
             try {
@@ -462,7 +463,7 @@ class SipCoreManager private constructor(
                             dbManager.updateSipAccountRegistrationState(
                                 it.id,
                                 RegistrationState.OK,
-                                Clock.System.now().toEpochMilliseconds() + 3600000L // 1 hora
+                                kotlin.time.Clock.System.now().toEpochMilliseconds() + 3600000L // 1 hora
                             )
                         }
                     }
@@ -664,13 +665,14 @@ class SipCoreManager private constructor(
     /**
      * Helper method para actualizar estado en BD
      */
+    @OptIn(ExperimentalTime::class)
     private suspend fun updateDatabaseRegistrationState(
         dbManager: DatabaseManager,
         accountId: String,
         newState: RegistrationState
     ) {
         val expiry = if (newState == RegistrationState.OK) {
-            Clock.System.now().toEpochMilliseconds() + 3600000L // 1 hora
+            kotlin.time.Clock.System.now().toEpochMilliseconds() + 3600000L // 1 hora
         } else null
 
         dbManager.updateSipAccountRegistrationState(accountId, newState, expiry)
@@ -1397,6 +1399,7 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
     /**
      * Método para verificar si el estado se guardó correctamente en BD
      */
+    @OptIn(ExperimentalTime::class)
     private suspend fun verifyDatabaseState(accountKey: String) {
         try {
             val dbManager = getDatabaseManager()
@@ -1415,7 +1418,7 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
                     dbManager.updateSipAccountRegistrationState(
                         dbAccount.id,
                         RegistrationState.OK,
-                        Clock.System.now().toEpochMilliseconds() + 3600000L
+                        kotlin.time.Clock.System.now().toEpochMilliseconds() + 3600000L
                     )
 
                     log.d(tag = TAG) { "✅ Forced DB update for $accountKey" }
@@ -1428,6 +1431,7 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
         }
     }
 
+    @OptIn(ExperimentalTime::class)
     suspend fun forceSyncRegistrationStateToDatabase(accountKey: String) {
         try {
             log.d(tag = TAG) { "🔄 Force syncing $accountKey to database..." }
@@ -1470,7 +1474,7 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
             }
 
             val expiry = if (currentState == RegistrationState.OK) {
-                Clock.System.now().toEpochMilliseconds() + 3600000L
+                kotlin.time.Clock.System.now().toEpochMilliseconds() + 3600000L
             } else null
 
             dbManager.updateSipAccountRegistrationState(
@@ -1558,12 +1562,13 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
         }
     }
 
+    @OptIn(ExperimentalTime::class)
     fun performRegistrationHealthCheck(): String {
         log.d(tag = TAG) { "Performing registration health check..." }
 
         val report = StringBuilder()
         report.appendLine("=== REGISTRATION HEALTH CHECK ===")
-        report.appendLine("Timestamp: ${Clock.System.now().toEpochMilliseconds()}")
+        report.appendLine("Timestamp: ${kotlin.time.Clock.System.now().toEpochMilliseconds()}")
 
         val issues = mutableListOf<String>()
         val corrections = mutableListOf<String>()
@@ -2274,15 +2279,16 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
         }
     }
 
+    @OptIn(ExperimentalTime::class)
     private fun parseFormattedDate(formattedDate: String): Long {
         // Implementación simple para parsear la fecha formateada
         // Formato esperado: "DD.MM.YYYY HH:MM"
         return try {
             // Para este ejemplo, usar timestamp actual si no se puede parsear
             // En producción, implementar parser completo
-            Clock.System.now().toEpochMilliseconds()
+            kotlin.time.Clock.System.now().toEpochMilliseconds()
         } catch (e: Exception) {
-            Clock.System.now().toEpochMilliseconds()
+            kotlin.time.Clock.System.now().toEpochMilliseconds()
         }
     }
 

@@ -1,7 +1,7 @@
 package com.eddyslarez.kmpsiprtc.data.models
 
 import kotlinx.serialization.Serializable
-import kotlinx.datetime.Clock
+import kotlin.time.ExperimentalTime
 
 @Serializable
 enum class PushMode {
@@ -26,10 +26,10 @@ data class PushModeConfig(
 )
 
 @Serializable
-data class PushModeState(
+data class PushModeState @OptIn(ExperimentalTime::class) constructor(
     val currentMode: PushMode,
     val previousMode: PushMode? = null,
-    val timestamp: Long = Clock.System.now().toEpochMilliseconds(),
+    val timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
     val reason: String = "",
     val accountsInPushMode: Set<String> = emptySet(),
     val wasInPushBeforeCall: Boolean = false,

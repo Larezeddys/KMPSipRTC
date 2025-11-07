@@ -11,9 +11,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.datetime.Clock
 import kotlin.collections.component1
 import kotlin.collections.component2
+import kotlin.time.ExperimentalTime
 
 object RegistrationStateManager {
 
@@ -32,13 +32,15 @@ object RegistrationStateManager {
         val registrationExpiry: Long = 0L,
         val consecutiveFailures: Int = 0
     ) {
+        @OptIn(ExperimentalTime::class)
         fun isExpired(): Boolean {
-            return registrationExpiry > 0 && Clock.System.now().toEpochMilliseconds() > registrationExpiry
+            return registrationExpiry > 0 && kotlin.time.Clock.System.now().toEpochMilliseconds() > registrationExpiry
         }
 
+        @OptIn(ExperimentalTime::class)
         fun needsRenewal(): Boolean {
             val renewalThreshold = registrationExpiry - (60 * 1000) // 1 minuto antes
-            return registrationExpiry > 0 && Clock.System.now().toEpochMilliseconds() > renewalThreshold
+            return registrationExpiry > 0 && kotlin.time.Clock.System.now().toEpochMilliseconds() > renewalThreshold
         }
 
         fun isHealthy(): Boolean {
@@ -84,6 +86,7 @@ object RegistrationStateManager {
     /**
      * Actualiza el estado de registro para una cuenta específica con validaciones mejoradas
      */
+    @OptIn(ExperimentalTime::class)
     fun updateAccountState(
         accountKey: String,
         newState: RegistrationState,
@@ -133,7 +136,7 @@ object RegistrationStateManager {
         }
 
         val lastSuccessfulRegistration = if (newState == RegistrationState.OK) {
-            Clock.System.now().toEpochMilliseconds()
+            kotlin.time.Clock.System.now().toEpochMilliseconds()
         } else {
             currentStateInfo?.lastSuccessfulRegistration ?: 0L
         }
@@ -142,7 +145,7 @@ object RegistrationStateManager {
         val newStateInfo = RegistrationStateInfo(
             state = newState,
             previousState = currentStateInfo?.state,
-            timestamp = Clock.System.now().toEpochMilliseconds(),
+            timestamp = kotlin.time.Clock.System.now().toEpochMilliseconds(),
             accountKey = accountKey,
             errorMessage = errorMessage,
             retryCount = retryCount,
@@ -337,11 +340,12 @@ object RegistrationStateManager {
     /**
      * Programa renovación de registro
      */
+    @OptIn(ExperimentalTime::class)
     private fun scheduleRenewal(accountKey: String, expiryTime: Long) {
         cancelRenewal(accountKey) // Cancelar renovación anterior
 
         val renewalTime = expiryTime - (60 * 1000) // 1 minuto antes de expirar
-        val delay = renewalTime - Clock.System.now().toEpochMilliseconds()
+        val delay = renewalTime - kotlin.time.Clock.System.now().toEpochMilliseconds()
 
         if (delay <= 0) {
             log.w(tag = TAG) { "Registration for $accountKey already expired or expires too soon" }
@@ -594,6 +598,7 @@ object RegistrationStateManager {
     /**
      * Fuerza verificación de salud de todas las cuentas
      */
+    @OptIn(ExperimentalTime::class)
     fun performHealthCheck() {
         log.d(tag = TAG) { "Performing health check on all accounts" }
 
@@ -603,7 +608,7 @@ object RegistrationStateManager {
 
         currentStates.forEach { (accountKey, stateInfo) ->
             val wasHealthy = stateInfo.isHealthy()
-            val currentTime = Clock.System.now().toEpochMilliseconds()
+            val currentTime = kotlin.time.Clock.System.now().toEpochMilliseconds()
 
             // Verificar expiración
             if (stateInfo.isExpired() && stateInfo.state == RegistrationState.OK) {

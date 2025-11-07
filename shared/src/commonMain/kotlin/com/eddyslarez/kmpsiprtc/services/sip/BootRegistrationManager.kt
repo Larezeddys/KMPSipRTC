@@ -18,7 +18,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
-import kotlinx.datetime.Clock
+import kotlin.time.ExperimentalTime
 
 class BootRegistrationManager(
     private val sipCoreManager: SipCoreManager,
@@ -265,11 +265,12 @@ class BootRegistrationManager(
     /**
      * Espera confirmación de registro con timeout
      */
+    @OptIn(ExperimentalTime::class)
     private suspend fun waitForRegistrationConfirmation(accountKey: String): Boolean {
-        val startTime = Clock.System.now().toEpochMilliseconds()
+        val startTime = kotlin.time.Clock.System.now().toEpochMilliseconds()
         val maxWaitTime = 10000L // 10 segundos máximo
 
-        while (Clock.System.now().toEpochMilliseconds() - startTime < maxWaitTime) {
+        while (kotlin.time.Clock.System.now().toEpochMilliseconds() - startTime < maxWaitTime) {
             val currentState = sipCoreManager.getRegistrationState(accountKey)
 
             when (currentState) {

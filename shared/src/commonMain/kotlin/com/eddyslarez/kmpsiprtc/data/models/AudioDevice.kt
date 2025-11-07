@@ -1,6 +1,7 @@
 package com.eddyslarez.kmpsiprtc.data.models
 
-import kotlinx.datetime.Clock
+import kotlin.time.ExperimentalTime
+
 
 data class AudioUnit(
     val type: AudioUnitTypes,
@@ -54,7 +55,7 @@ fun AudioDevice.toSimpleDescriptor(): String {
     }
 }
 
-data class AudioDevice(
+data class AudioDevice @OptIn(ExperimentalTime::class) constructor(
     val name: String,
     val descriptor: String,
     val nativeDevice: Any? = null,
@@ -68,7 +69,7 @@ data class AudioDevice(
     val latency: Int? = null,
     val vendorInfo: String? = null,
     val capabilities: AudioDeviceCapabilities = AudioDeviceCapabilities(), // ✅ agregado
-    val lastUpdated: Long = Clock.System.now().toEpochMilliseconds(),
+    val lastUpdated: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
     val deviceAddress: String? = null,                                      // ✅ para Bluetooth o USB
     val preferredSampleRate: Int? = null                                   // ✅ para sincronizar con WebRTC
 ) {

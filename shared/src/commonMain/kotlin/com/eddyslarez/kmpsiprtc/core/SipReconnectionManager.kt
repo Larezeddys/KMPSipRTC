@@ -20,12 +20,12 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
-import kotlinx.datetime.Clock
 import kotlin.math.min
 import kotlin.random.Random
 import kotlin.text.get
 import kotlin.text.set
 import kotlin.time.Duration.Companion.seconds
+import kotlin.time.ExperimentalTime
 
 class SipReconnectionManager(
     private val messageHandler: SipMessageHandler,
@@ -107,6 +107,7 @@ class SipReconnectionManager(
         )
     }
 
+    @OptIn(ExperimentalTime::class)
     private suspend fun syncAccountsFromCoreManager() {
         try {
             val activeAccounts = sipCoreManager.activeAccounts
@@ -114,7 +115,7 @@ class SipReconnectionManager(
             for ((key, value) in activeAccounts) {
                 cachedAccounts.put(key, value)
             }
-            lastAccountSync = Clock.System.now().toEpochMilliseconds()
+            lastAccountSync = kotlin.time.Clock.System.now().toEpochMilliseconds()
             log.d(tag = TAG) { "Synced ${cachedAccounts} accounts from SipCoreManager" }
         } catch (e: Exception) {
             log.e(tag = TAG) { "Error syncing accounts from SipCoreManager: ${e.message}" }
@@ -298,10 +299,11 @@ class SipReconnectionManager(
     }
 
 
+    @OptIn(ExperimentalTime::class)
     private suspend fun waitForReconnectionResult(accountInfo: AccountInfo, timeoutMs: Long): Boolean {
-        val start = Clock.System.now().toEpochMilliseconds()
+        val start = kotlin.time.Clock.System.now().toEpochMilliseconds()
         val checkInterval = 250L
-        while (Clock.System.now().toEpochMilliseconds() - start < timeoutMs) {
+        while (kotlin.time.Clock.System.now().toEpochMilliseconds() - start < timeoutMs) {
             if (accountInfo.isRegistered.value) return true
             if (!networkManager.isNetworkAvailable()) return false
             delay(checkInterval)

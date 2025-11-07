@@ -4,7 +4,7 @@ import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
 import com.eddyslarez.kmpsiprtc.data.models.RegistrationState
-import kotlinx.datetime.Clock
+import kotlin.time.ExperimentalTime
 
 @Entity(
     tableName = "sip_accounts",
@@ -12,7 +12,7 @@ import kotlinx.datetime.Clock
         Index(value = ["username", "domain"], unique = true)
     ]
 )
-data class SipAccountEntity(
+data class SipAccountEntity @OptIn(ExperimentalTime::class) constructor(
     @PrimaryKey
     val id: String,
     val username: String,
@@ -27,8 +27,8 @@ data class SipAccountEntity(
     val registrationExpiry: Long = 0L,
     val isActive: Boolean = true,
     val isDefault: Boolean = false,
-    val createdAt: Long = Clock.System.now().toEpochMilliseconds(),
-    val updatedAt: Long = Clock.System.now().toEpochMilliseconds(),
+    val createdAt: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
+    val updatedAt: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
 
     // Configuración avanzada
     val autoRegister: Boolean = true,

@@ -2,16 +2,18 @@ package com.eddyslarez.kmpsiprtc.utils
 
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.datetime.Clock
 import okio.ByteString.Companion.encodeUtf8
 import kotlin.random.Random
+import kotlin.time.ExperimentalTime
 
+@OptIn(ExperimentalTime::class)
 fun generateId(): String {
-    return "${Clock.System.now().toEpochMilliseconds()}-${Random.nextInt(100000)}"
+    return "${kotlin.time.Clock.System.now().toEpochMilliseconds()}-${Random.nextInt(100000)}"
 }
 
+@OptIn(ExperimentalTime::class)
 fun generateSipTag(): String {
-    return Clock.System.now().toEpochMilliseconds().toString() + "-" + (1000..9999).random()
+    return kotlin.time.Clock.System.now().toEpochMilliseconds().toString() + "-" + (1000..9999).random()
 }
 
 fun formatTime(minutes: Long, seconds: Long): String {

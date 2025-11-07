@@ -30,7 +30,7 @@ import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
-import kotlinx.datetime.Clock
+import kotlin.time.ExperimentalTime
 
 class DatabaseManager private constructor() {
 
@@ -86,10 +86,11 @@ class DatabaseManager private constructor() {
     /**
      * Obtiene cuentas que deberían estar registradas pero pueden estar desconectadas
      */
+    @OptIn(ExperimentalTime::class)
     suspend fun getAccountsForRecovery(): List<SipAccountEntity> {
         return try {
             val activeAccounts = getActiveSipAccounts().first()
-            val now = Clock.System.now().toEpochMilliseconds()
+            val now = kotlin.time.Clock.System.now().toEpochMilliseconds()
 
             // Filtrar cuentas que:
             // 1. Están activas
@@ -126,10 +127,11 @@ class DatabaseManager private constructor() {
     /**
      * Obtiene estadísticas de conectividad de cuentas
      */
+    @OptIn(ExperimentalTime::class)
     suspend fun getAccountConnectivityStats(): Map<String, Any> {
         return try {
             val activeAccounts = getActiveSipAccounts().first()
-            val now = Clock.System.now().toEpochMilliseconds()
+            val now = kotlin.time.Clock.System.now().toEpochMilliseconds()
 
             val stats = activeAccounts.groupBy { account ->
                 when {
@@ -299,7 +301,8 @@ class DatabaseManager private constructor() {
     /**
      * Finaliza llamada
      */
-    suspend fun endCall(callId: String, endTime: Long = Clock.System.now().toEpochMilliseconds()) {
+    @OptIn(ExperimentalTime::class)
+    suspend fun endCall(callId: String, endTime: Long = kotlin.time.Clock.System.now().toEpochMilliseconds()) {
         repository.endCall(callId, endTime)
     }
 

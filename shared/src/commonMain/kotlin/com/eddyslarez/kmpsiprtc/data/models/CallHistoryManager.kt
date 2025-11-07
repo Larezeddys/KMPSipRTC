@@ -20,8 +20,8 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.datetime.Clock
 import kotlinx.datetime.toLocalDateTime
+import kotlin.time.ExperimentalTime
 
 /**
  * CallHistoryManager con prevención de duplicados y preservación de datos históricos
@@ -98,13 +98,14 @@ class CallHistoryManager(
     /**
      * ✅ CORREGIDO: Método mejorado para agregar logs sin duplicados ni pérdida de datos
      */
+    @OptIn(ExperimentalTime::class)
     fun addCallLog(callData: CallData, callType: CallTypes, endTime: Long? = null) {
         scope.launch {
             processingMutex.withLock {
                 try {
                     val callId = callData.callId
-                    val startTime = callData.startTime ?: Clock.System.now().toEpochMilliseconds()
-                    val finalEndTime = endTime ?: Clock.System.now().toEpochMilliseconds()
+                    val startTime = callData.startTime ?: kotlin.time.Clock.System.now().toEpochMilliseconds()
+                    val finalEndTime = endTime ?: kotlin.time.Clock.System.now().toEpochMilliseconds()
 
                     // Calcular duración solo para llamadas exitosas
                     val duration = if (callType == CallTypes.SUCCESS &&
@@ -580,6 +581,7 @@ class CallHistoryManager(
         }
     }
 
+    @OptIn(ExperimentalTime::class)
     private fun formatStartDate(timestamp: Long): String {
         val instant =
             Instant.fromEpochMilliseconds(
@@ -603,12 +605,13 @@ class CallHistoryManager(
                 }"
     }
 
+    @OptIn(ExperimentalTime::class)
     private fun parseStartDateToTimestamp(
         dateString: String
     ): Long {
         return try {
             // Implementar parsing inverso si es necesario
-            Clock.System.now()
+            kotlin.time.Clock.System.now()
                 .toEpochMilliseconds()
         } catch (e: Exception) {
             0L
@@ -631,12 +634,13 @@ class CallHistoryManager(
     }
 }
 
+@OptIn(ExperimentalTime::class)
 private fun parseFormattedDate(formattedDate: String): Long {
     return try {
         // Implementar parser de fecha completo aquí
-        Clock.System.now().toEpochMilliseconds()
+        kotlin.time.Clock.System.now().toEpochMilliseconds()
     } catch (e: Exception) {
-        Clock.System.now().toEpochMilliseconds()
+        kotlin.time.Clock.System.now().toEpochMilliseconds()
     }
 }
 /**
@@ -658,6 +662,7 @@ fun CallLogWithContact.toCallLog(): CallLog {
     )
 }
 
+@OptIn(ExperimentalTime::class)
 private fun formatTimestamp(timestamp: Long): String {
     val instant = Instant.fromEpochMilliseconds(timestamp)
     val localDateTime = instant.toLocalDateTime(TimeZone.currentSystemDefault())

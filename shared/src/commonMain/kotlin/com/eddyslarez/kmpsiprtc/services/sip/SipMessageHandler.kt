@@ -11,12 +11,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.datetime.Clock
 import com.eddyslarez.kmpsiprtc.utils.generateId
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.services.calls.CallStateManager
 import com.eddyslarez.kmpsiprtc.services.calls.MultiCallManager
 import kotlinx.coroutines.IO
+import kotlin.time.ExperimentalTime
 
 class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
 
@@ -84,6 +84,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
     /**
      * Maneja respuestas de REGISTER
      */
+    @OptIn(ExperimentalTime::class)
     private suspend fun handleRegisterResponse(
         statusCode: Int,
         lines: List<String>,
@@ -102,7 +103,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                     // Extraer tiempo de expiración
                     val expiresValue = SipMessageParser.extractExpiresValue(fullResponse)
                     val expirationTime =
-                        Clock.System.now().toEpochMilliseconds() + (expiresValue * 1000L)
+                        kotlin.time.Clock.System.now().toEpochMilliseconds() + (expiresValue * 1000L)
 
                     // Configurar renovación automática
                     sipCoreManager.sharedWebSocketManager.setRegistrationExpiration(
@@ -474,6 +475,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
     /**
      * Maneja request INVITE entrante con preservación robusta de SDP
      */
+    @OptIn(ExperimentalTime::class)
     private suspend fun handleInviteRequest(lines: List<String>, accountInfo: AccountInfo) {
         try {
             log.d(tag = TAG) { "🔵 [INVITE] Handling incoming INVITE request" }
@@ -535,7 +537,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 from = fromUser,
                 to = accountInfo.username,
                 direction = CallDirections.INCOMING,
-                startTime = Clock.System.now().toEpochMilliseconds(),
+                startTime = kotlin.time.Clock.System.now().toEpochMilliseconds(),
                 fromTag = fromTag,
                 toTag = generateId(),
                 remoteContactUri = remoteContactUri,

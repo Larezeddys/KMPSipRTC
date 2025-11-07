@@ -1,8 +1,8 @@
 package com.eddyslarez.kmpsiprtc.data.models
 
 import com.eddyslarez.kmpsiprtc.platform.log
-import kotlinx.datetime.Clock
 import kotlinx.serialization.Serializable
+import kotlin.time.ExperimentalTime
 
 @Serializable
 enum class CallDirections {
@@ -29,12 +29,12 @@ enum class RegistrationState {
 }
 
 @Serializable
-data class CallData(
+data class CallData @OptIn(ExperimentalTime::class) constructor(
     var callId: String = "",
     val from: String = "",
     val to: String = "",
     val direction: CallDirections = CallDirections.OUTGOING,
-    val startTime: Long = Clock.System.now().toEpochMilliseconds(),
+    val startTime: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
     var toTag: String? = null,
     var fromTag: String? = null,
     var remoteContactUri: String? = null,

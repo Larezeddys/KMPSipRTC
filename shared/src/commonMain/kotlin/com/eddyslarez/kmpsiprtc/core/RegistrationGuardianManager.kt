@@ -14,12 +14,12 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.datetime.Clock
 import kotlin.collections.containsKey
 import kotlin.collections.set
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.text.get
 import kotlin.text.set
+import kotlin.time.ExperimentalTime
 
 class RegistrationGuardianManager(
     private val sipCoreManager: SipCoreManager,
@@ -204,9 +204,10 @@ class RegistrationGuardianManager(
     /**
      * Verificar si una cuenta está atorada en IN_PROGRESS
      */
+    @OptIn(ExperimentalTime::class)
     private fun isStuckInProgress(accountKey: String): Boolean {
         val lastRetry = runBlocking { lastRetryTimestamp.get(accountKey) } ?: 0L
-        val timeSinceLastRetry = Clock.System.now().toEpochMilliseconds() - lastRetry
+        val timeSinceLastRetry = kotlin.time.Clock.System.now().toEpochMilliseconds() - lastRetry
 
         // Si lleva más de 30 segundos en IN_PROGRESS, está atorado
         return timeSinceLastRetry > 30_000L
@@ -241,13 +242,14 @@ class RegistrationGuardianManager(
     /**
      * NÚCLEO: Recuperación con reintentos infinitos
      */
+    @OptIn(ExperimentalTime::class)
     private suspend fun recoverAccountWithInfiniteRetries(accountKey: String, accountInfo: AccountInfo) {
         var attemptNumber = retryCounters.get(accountKey) ?: 0
 
         while (isActive && !accountInfo.isRegistered.value) {
             attemptNumber++
             retryCounters.put(accountKey, attemptNumber)
-            lastRetryTimestamp.put(accountKey, Clock.System.now().toEpochMilliseconds())
+            lastRetryTimestamp.put(accountKey, kotlin.time.Clock.System.now().toEpochMilliseconds())
 
             if (!networkManager.isNetworkAvailable()) {
                 delay(NORMAL_RETRY_DELAY)
@@ -315,11 +317,12 @@ class RegistrationGuardianManager(
     /**
      * Esperar confirmación de registro
      */
+    @OptIn(ExperimentalTime::class)
     private suspend fun waitForRegistrationConfirmation(accountInfo: AccountInfo): Boolean {
-        val startTime = Clock.System.now().toEpochMilliseconds()
+        val startTime = kotlin.time.Clock.System.now().toEpochMilliseconds()
         val checkInterval = 500L
 
-        while (Clock.System.now().toEpochMilliseconds() - startTime < REGISTRATION_TIMEOUT) {
+        while (kotlin.time.Clock.System.now().toEpochMilliseconds() - startTime < REGISTRATION_TIMEOUT) {
             // Verificar si ya está registrado
             if (accountInfo.isRegistered.value) {
                 return true
@@ -431,6 +434,7 @@ class RegistrationGuardianManager(
      * Obtener estado de diagnóstico
      */
 
+    @OptIn(ExperimentalTime::class)
     suspend fun getDiagnosticInfo(): String {
         val retrySnapshot = retryCounters.snapshot()
         val lastRetrySnapshot = lastRetryTimestamp.snapshot()
@@ -446,7 +450,7 @@ class RegistrationGuardianManager(
             appendLine("\n--- Retry Counters ---")
             retrySnapshot.forEach { (account, count) ->
                 val lastRetryTime = lastRetrySnapshot[account] ?: 0L
-                val timeSinceLastRetry = Clock.System.now().toEpochMilliseconds() - lastRetryTime
+                val timeSinceLastRetry = kotlin.time.Clock.System.now().toEpochMilliseconds() - lastRetryTime
                 appendLine("$account: attempt #$count (${timeSinceLastRetry}ms ago)")
             }
 

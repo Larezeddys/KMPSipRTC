@@ -15,7 +15,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.datetime.Clock
+import kotlin.time.ExperimentalTime
 
 class SharedWebSocketManager(
     private val config: SipConfig,
@@ -118,6 +118,7 @@ class SharedWebSocketManager(
         }
     }
 
+    @OptIn(ExperimentalTime::class)
     fun isWebSocketHealthy(): Boolean {
         // Si no hay cliente o no está conectado, ya está mal
         val socketConnected = webSocketClient?.isConnected() == true
@@ -127,7 +128,7 @@ class SharedWebSocketManager(
         if (lastPongTimestamp == 0L) return true
 
         // Cuánto tiempo pasó desde el último pong
-        val elapsed = Clock.System.now().toEpochMilliseconds() - lastPongTimestamp
+        val elapsed = kotlin.time.Clock.System.now().toEpochMilliseconds() - lastPongTimestamp
 
         // Considerar no saludable si pasó más de 2 intervalos de ping
         return elapsed < (config.pingIntervalMs * 2)
@@ -192,6 +193,7 @@ class SharedWebSocketManager(
     /**
      * Configurar listeners del WebSocket
      */
+    @OptIn(ExperimentalTime::class)
     private fun setupWebSocketListeners() {
         webSocketClient?.setListener(object : MultiplatformWebSocket.Listener {
             override fun onOpen() {
@@ -245,7 +247,7 @@ class SharedWebSocketManager(
             }
 
             override fun onPong(timeMs: Long) {
-                lastPongTimestamp = Clock.System.now().toEpochMilliseconds()
+                lastPongTimestamp = kotlin.time.Clock.System.now().toEpochMilliseconds()
                 log.d(tag = TAG) { "🏓 Pong received: ${timeMs}ms" }
             }
 

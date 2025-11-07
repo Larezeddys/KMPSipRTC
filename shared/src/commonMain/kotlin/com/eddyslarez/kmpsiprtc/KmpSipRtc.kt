@@ -1,7 +1,6 @@
 package com.eddyslarez.kmpsiprtc
 
 import androidx.compose.runtime.mutableStateOf
-import kotlinx.datetime.Clock
 import com.eddyslarez.kmpsiprtc.core.*
 import com.eddyslarez.kmpsiprtc.data.database.*
 import com.eddyslarez.kmpsiprtc.data.database.converters.toCallLogs
@@ -25,6 +24,7 @@ import com.eddyslarez.kmpsiprtc.services.calls.MultiCallManager
 import kotlinx.datetime.Instant
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
+import kotlin.time.ExperimentalTime
 
 /**
  * KmpSipRtc - Biblioteca principal para gestión de llamadas SIP/WebRTC
@@ -487,6 +487,7 @@ class KmpSipRtc private constructor() {
     /**
      * Configura los listeners internos para eventos del core SIP
      */
+    @OptIn(ExperimentalTime::class)
     private fun setupInternalListeners() {
         sipCoreManager?.let { manager ->
             manager.setCallbacks(object : SipCallbacks {
@@ -536,7 +537,7 @@ class KmpSipRtc private constructor() {
                 CallStateManager.callStateFlow.collect { stateInfo ->
                     if (isFirstState) {
                         isFirstState = false
-                        if (stateInfo.timestamp > Clock.System.now().toEpochMilliseconds() + 1000) {
+                        if (stateInfo.timestamp > kotlin.time.Clock.System.now().toEpochMilliseconds() + 1000) {
                             log.w(tag = TAG) { "Skipping invalid initial state with future timestamp" }
                             return@collect
                         }
@@ -705,12 +706,13 @@ class KmpSipRtc private constructor() {
     /**
      * Obtiene el estado completo del modo push
      */
+    @OptIn(ExperimentalTime::class)
     fun getPushModeState(): PushModeState {
         checkInitialized()
         return pushModeManager?.getCurrentState() ?: PushModeState(
             currentMode = PushMode.FOREGROUND,
             previousMode = null,
-            timestamp = Clock.System.now().toEpochMilliseconds(),
+            timestamp = kotlin.time.Clock.System.now().toEpochMilliseconds(),
             reason = "Not initialized"
         )
     }
@@ -986,6 +988,7 @@ class KmpSipRtc private constructor() {
     /**
      * Crea información de llamada entrante desde la llamada actual
      */
+    @OptIn(ExperimentalTime::class)
     private fun createIncomingCallInfoFromCurrentCall(
         callerNumber: String,
         callerName: String?
@@ -999,7 +1002,7 @@ class KmpSipRtc private constructor() {
             callerNumber = callerNumber,
             callerName = callerName,
             targetAccount = account?.username ?: "",
-            timestamp = callData?.startTime ?: Clock.System.now().toEpochMilliseconds()
+            timestamp = callData?.startTime ?: kotlin.time.Clock.System.now().toEpochMilliseconds()
         )
     }
 
@@ -1008,6 +1011,7 @@ class KmpSipRtc private constructor() {
     /**
      * Obtiene información de llamada para un estado específico
      */
+    @OptIn(ExperimentalTime::class)
     private fun getCallInfoForState(stateInfo: CallStateInfo): CallInfo? {
         val manager = sipCoreManager ?: return null
         val calls = MultiCallManager.getAllCalls()
@@ -1029,7 +1033,7 @@ class KmpSipRtc private constructor() {
                 displayName = callData.remoteDisplayName.takeIf { it.isNotEmpty() },
                 direction = if (callData.direction == CallDirections.INCOMING) CallDirection.INCOMING else CallDirection.OUTGOING,
                 startTime = callData.startTime,
-                duration = if (callData.startTime > 0) Clock.System.now()
+                duration = if (callData.startTime > 0) kotlin.time.Clock.System.now()
                     .toEpochMilliseconds() - callData.startTime else 0,
                 isOnHold = callData.isOnHold ?: false,
                 isMuted = manager.webRtcManager.isMuted(),
@@ -1047,6 +1051,7 @@ class KmpSipRtc private constructor() {
     /**
      * Obtiene información de la llamada actual
      */
+    @OptIn(ExperimentalTime::class)
     private fun getCurrentCallInfo(): CallInfo? {
         val manager = sipCoreManager ?: return null
         val account = manager.currentAccountInfo ?: return null
@@ -1070,7 +1075,7 @@ class KmpSipRtc private constructor() {
                 displayName = callData.remoteDisplayName.takeIf { it.isNotEmpty() },
                 direction = if (callData.direction == CallDirections.INCOMING) CallDirection.INCOMING else CallDirection.OUTGOING,
                 startTime = manager.callStartTimeMillis,
-                duration = if (manager.callStartTimeMillis > 0) Clock.System.now()
+                duration = if (manager.callStartTimeMillis > 0) kotlin.time.Clock.System.now()
                     .toEpochMilliseconds() - manager.callStartTimeMillis else 0,
                 isOnHold = callData.isOnHold ?: false,
                 isMuted = manager.webRtcManager.isMuted(),
@@ -1101,8 +1106,9 @@ class KmpSipRtc private constructor() {
     /**
      * Genera ID único para llamada
      */
+    @OptIn(ExperimentalTime::class)
     private fun generateCallId(): String {
-        return "call_${Clock.System.now().toEpochMilliseconds()}_${(1000..9999).random()}"
+        return "call_${kotlin.time.Clock.System.now().toEpochMilliseconds()}_${(1000..9999).random()}"
     }
 
     // === API PÚBLICA - GESTIÓN DE LISTENERS ===
@@ -1395,6 +1401,7 @@ class KmpSipRtc private constructor() {
     /**
      * Obtiene todas las llamadas activas
      */
+    @OptIn(ExperimentalTime::class)
     fun getAllCalls(): List<CallInfo> {
         checkInitialized()
         return MultiCallManager.getAllCalls().mapNotNull { callData ->
@@ -1410,7 +1417,7 @@ class KmpSipRtc private constructor() {
                     displayName = callData.remoteDisplayName.takeIf { it.isNotEmpty() },
                     direction = if (callData.direction == CallDirections.INCOMING) CallDirection.INCOMING else CallDirection.OUTGOING,
                     startTime = callData.startTime,
-                    duration = if (callData.startTime > 0) Clock.System.now()
+                    duration = if (callData.startTime > 0) kotlin.time.Clock.System.now()
                         .toEpochMilliseconds() - callData.startTime else 0,
                     isOnHold = callData.isOnHold ?: false,
                     isMuted = sipCoreManager?.webRtcManager?.isMuted() ?: false,
@@ -1953,6 +1960,7 @@ class KmpSipRtc private constructor() {
     /**
      * Formatea timestamp para display
      */
+    @OptIn(ExperimentalTime::class)
     private fun formatTimestamp(timestamp: Long): String {
         val instant = Instant.fromEpochMilliseconds(timestamp)
         val localDateTime = instant.toLocalDateTime(TimeZone.currentSystemDefault())

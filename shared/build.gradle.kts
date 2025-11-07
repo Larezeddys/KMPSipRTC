@@ -10,20 +10,18 @@ import java.util.Properties
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 
 plugins {
-    alias(libs.plugins.kotlinMultiplatform)
-    alias(libs.plugins.androidLibrary)
-    alias(libs.plugins.jetbrainsCompose)
-    alias(libs.plugins.compose.compiler)
-    alias(libs.plugins.kotlinxSerialization)
-    alias(libs.plugins.gradleBuildConfig)
+    id("org.jetbrains.kotlin.multiplatform") version "2.2.20"
+    id("com.android.library") version "8.11.2"
+    id("org.jetbrains.compose") version "1.9.1"
+    id("org.jetbrains.kotlin.plugin.compose") version "2.2.20"
+    id("org.jetbrains.kotlin.plugin.serialization") version "2.2.20"
+    id("com.github.gmazzo.buildconfig") version "5.7.0"
 
-    id("org.jetbrains.kotlin.native.cocoapods") version "2.2.20"
+//    id("org.jetbrains.kotlin.native.cocoapods") version "2.2.20"
     id("com.google.devtools.ksp") version "2.2.20-2.0.4"
     id("androidx.room") version "2.8.2"
 
     id("maven-publish")
-
-
 }
 
 group = "com.github.larezeddys"
@@ -57,25 +55,25 @@ kotlin {
         }
     }
 
-    cocoapods {
-        summary = "Some description for the Shared Module"
-        homepage = "Link to the Shared Module homepage"
-        version = "1.0"
-        ios.deploymentTarget = "16.0"
-        framework {
-            baseName = "shared"
-            isStatic = true
-        }
-    }
+//    cocoapods {
+//        summary = "Some description for the Shared Module"
+//        homepage = "Link to the Shared Module homepage"
+//        version = "1.0"
+//        ios.deploymentTarget = "16.0"
+//        framework {
+//            baseName = "shared"
+//            isStatic = true
+//        }
+//    }
 
     sourceSets {
         // Common
         val commonMain by getting {
             dependencies {
-                implementation(libs.androidx.lifecycle.runtime.compose)
+                implementation("org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
+                implementation("org.jetbrains.kotlinx:kotlinx-datetime:0.7.1")
 
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
-                implementation("org.jetbrains.kotlinx:kotlinx-datetime:0.6.1")
                 implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
                 implementation("org.jetbrains.kotlinx:atomicfu:0.29.0")
                 implementation("io.ktor:ktor-client-core:3.3.1")
@@ -136,6 +134,7 @@ kotlin {
 
                 implementation("dev.onvoid.webrtc:webrtc-java:0.14.0")
                 implementation("io.ktor:ktor-client-okhttp:3.3.1")
+                implementation("org.jetbrains.kotlinx:kotlinx-datetime:0.7.1")
 
                 val osName = System.getProperty("os.name").lowercase()
                 val osArch = System.getProperty("os.arch").lowercase()

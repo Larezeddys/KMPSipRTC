@@ -7,10 +7,10 @@ import com.eddyslarez.kmpsiprtc.data.models.CallHistoryManager
 import com.eddyslarez.kmpsiprtc.data.models.CallTypes
 import com.eddyslarez.kmpsiprtc.data.models.RegistrationState
 import kotlinx.coroutines.flow.first
-import kotlinx.datetime.Clock
 import kotlinx.datetime.Instant
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
+import kotlin.time.ExperimentalTime
 
 /**
  * Herramienta de diagnóstico completa para verificar el sistema de base de datos
@@ -77,6 +77,7 @@ class DatabaseInspector(
     // ================================
     // ==== SIP ACCOUNTS ==============
     // ================================
+    @OptIn(ExperimentalTime::class)
     private suspend fun checkSipAccounts(): String {
         return try {
             buildString {
@@ -97,7 +98,7 @@ class DatabaseInspector(
                         appendLine("     • Created: ${formatTimestamp(account.createdAt)}")
                         appendLine("     • Updated: ${formatTimestamp(account.updatedAt)}")
                         if (account.registrationExpiry > 0) {
-                            val expiresIn = account.registrationExpiry - Clock.System.now().toEpochMilliseconds()
+                            val expiresIn = account.registrationExpiry - kotlin.time.Clock.System.now().toEpochMilliseconds()
                             appendLine("     • Expires in: ${expiresIn / 1000}s")
                         }
                         appendLine()
@@ -483,6 +484,7 @@ class DatabaseInspector(
         }
     }
 
+    @OptIn(ExperimentalTime::class)
     private suspend fun generateRecommendations(): String {
         return buildString {
             appendLine("┌─ RECOMMENDATIONS ─────────────────────────────┐")
@@ -494,7 +496,7 @@ class DatabaseInspector(
             val duplicates = groupedByCallId.filter { it.value.size > 1 }
             if (duplicates.isNotEmpty()) recommendations.add("Remove ${duplicates.size} duplicate call logs")
 
-            val now = Clock.System.now().toEpochMilliseconds()
+            val now = kotlin.time.Clock.System.now().toEpochMilliseconds()
             val veryOldLogs = callLogs.filter { now - it.callLog.startTime > (90 * 24 * 60 * 60 * 1000L) }
             if (veryOldLogs.isNotEmpty()) recommendations.add("Consider cleaning ${veryOldLogs.size} logs older than 90 days")
 
@@ -546,12 +548,13 @@ class DatabaseInspector(
         /**
      * Test de escritura y lectura
      */
+    @OptIn(ExperimentalTime::class)
     suspend fun testDatabaseReadWrite(): String {
         return try {
             buildString {
                 appendLine("┌─ READ/WRITE TEST ─────────────────────────────┐")
 
-                val testAccountId = "test_account_${Clock.System.now().toEpochMilliseconds()}"
+                val testAccountId = "test_account_${kotlin.time.Clock.System.now().toEpochMilliseconds()}"
 
                 // Test 1: Crear cuenta
                 appendLine("  Test 1: Creating test account...")
@@ -573,18 +576,18 @@ class DatabaseInspector(
                 // Test 3: Crear call log
                 appendLine("\n  Test 3: Creating call log...")
                 val testCallData = CallData(
-                    callId = "test_call_${Clock.System.now().toEpochMilliseconds()}",
+                    callId = "test_call_${kotlin.time.Clock.System.now().toEpochMilliseconds()}",
                     from = "+1234567890",
                     to = "+0987654321",
                     direction = CallDirections.OUTGOING,
-                    startTime = Clock.System.now().toEpochMilliseconds()
+                    startTime = kotlin.time.Clock.System.now().toEpochMilliseconds()
                 )
 
                 val callLog = databaseManager.createCallLog(
                     accountId = account.id,
                     callData = testCallData,
                     callType = CallTypes.SUCCESS,
-                    endTime = Clock.System.now().toEpochMilliseconds() + 30000
+                    endTime = kotlin.time.Clock.System.now().toEpochMilliseconds() + 30000
                 )
                 appendLine("  ✅ Call log created: ${callLog.id}")
 
@@ -629,6 +632,7 @@ class DatabaseInspector(
     // ================================
     // ==== HELPER METHODS ============
     // ================================
+    @OptIn(ExperimentalTime::class)
     private fun formatTimestamp(timestamp: Long): String {
         val instant = Instant.fromEpochMilliseconds(timestamp)
         val localDateTime = instant.toLocalDateTime(TimeZone.currentSystemDefault())

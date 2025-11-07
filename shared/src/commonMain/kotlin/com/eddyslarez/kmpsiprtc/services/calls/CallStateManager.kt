@@ -15,17 +15,18 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.datetime.Clock
+import kotlin.time.ExperimentalTime
 
 object CallStateManager {
 
     private val scope = CoroutineScope(Dispatchers.IO)
 
+    @OptIn(ExperimentalTime::class)
     private val _callStateFlow = MutableStateFlow(
         CallStateInfo(
             state = CallState.IDLE,
             previousState = null,
-            timestamp = Clock.System.now().toEpochMilliseconds()
+            timestamp = kotlin.time.Clock.System.now().toEpochMilliseconds()
         )
     )
     val callStateFlow: StateFlow<CallStateInfo> = _callStateFlow.asStateFlow()
@@ -56,6 +57,7 @@ object CallStateManager {
     /**
      * Actualiza el estado de la llamada con validaciones estrictas
      */
+    @OptIn(ExperimentalTime::class)
     internal fun updateCallState(
         newState: CallState,
         callId: String = currentCallId,
@@ -74,7 +76,7 @@ object CallStateManager {
             return false
         }
 
-        val currentTime = Clock.System.now().toEpochMilliseconds()
+        val currentTime = kotlin.time.Clock.System.now().toEpochMilliseconds()
         val currentStateInfo = _callStateFlow.value
 
         // Prevenir actualizaciones muy frecuentes (spam)
@@ -223,6 +225,7 @@ object CallStateManager {
 
     // === MÉTODOS MEJORADOS PARA TRANSICIONES ===
 
+    @OptIn(ExperimentalTime::class)
     fun startOutgoingCall(callId: String, phoneNumber: String) {
         if (!isInitialized) return
 
@@ -233,7 +236,7 @@ object CallStateManager {
             to = phoneNumber,
             from = "",
             direction = CallDirections.OUTGOING,
-            startTime = Clock.System.now().toEpochMilliseconds()
+            startTime = kotlin.time.Clock.System.now().toEpochMilliseconds()
         )
         MultiCallManager.addCall(callData)
 
@@ -245,6 +248,7 @@ object CallStateManager {
         )
     }
 
+    @OptIn(ExperimentalTime::class)
     fun incomingCallReceived(callId: String, callerNumber: String) {
         if (!isInitialized) return
 
@@ -255,7 +259,7 @@ object CallStateManager {
             to = "",
             from = callerNumber,
             direction = CallDirections.INCOMING,
-            startTime = Clock.System.now().toEpochMilliseconds()
+            startTime = kotlin.time.Clock.System.now().toEpochMilliseconds()
         )
         MultiCallManager.addCall(callData)
 

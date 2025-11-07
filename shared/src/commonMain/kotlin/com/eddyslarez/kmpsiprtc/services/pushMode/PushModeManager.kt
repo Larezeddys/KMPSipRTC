@@ -17,13 +17,14 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlin.coroutines.cancellation.CancellationException
-import kotlinx.datetime.Clock
+import kotlin.time.ExperimentalTime
 
 
 class PushModeManager(
     private val config: PushModeConfig = PushModeConfig()
 ) {
-    val timestamp = Clock.System.now().toEpochMilliseconds()
+    @OptIn(ExperimentalTime::class)
+    val timestamp = kotlin.time.Clock.System.now().toEpochMilliseconds()
 
     // Estados
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -31,11 +32,12 @@ class PushModeManager(
     private val TAG1 = "ProcesoPush"
 
     // Estados
+    @OptIn(ExperimentalTime::class)
     private val _pushModeStateFlow = MutableStateFlow(
         PushModeState(
             currentMode = PushMode.FOREGROUND,
             previousMode = null,
-          timestamp = Clock.System.now().toEpochMilliseconds(),
+          timestamp = kotlin.time.Clock.System.now().toEpochMilliseconds(),
             reason = "Initial state"
         )
     )
@@ -235,6 +237,7 @@ class PushModeManager(
     /**
      * Transición de una cuenta específica a modo foreground
      */
+    @OptIn(ExperimentalTime::class)
     private fun transitionSpecificAccountToForeground(accountKey: String, reason: String) {
         val currentState = _pushModeStateFlow.value
 
@@ -247,7 +250,7 @@ class PushModeManager(
         val newState = PushModeState(
             currentMode = if (updatedAccountsInPush.isEmpty()) PushMode.FOREGROUND else PushMode.PUSH,
             previousMode = currentState.currentMode,
-            timestamp = Clock.System.now().toEpochMilliseconds(),
+            timestamp = kotlin.time.Clock.System.now().toEpochMilliseconds(),
             reason = reason,
             accountsInPushMode = updatedAccountsInPush,
             wasInPushBeforeCall = currentState.wasInPushBeforeCall,
@@ -353,6 +356,7 @@ class PushModeManager(
     /**
      * Transición de una cuenta específica a modo push
      */
+    @OptIn(ExperimentalTime::class)
     private fun transitionSpecificAccountToPush(accountKey: String, reason: String) {
         val currentState = _pushModeStateFlow.value
 
@@ -365,7 +369,7 @@ class PushModeManager(
         val newState = PushModeState(
             currentMode = PushMode.PUSH,
             previousMode = currentState.currentMode,
-            timestamp = Clock.System.now().toEpochMilliseconds(),
+            timestamp = kotlin.time.Clock.System.now().toEpochMilliseconds(),
             reason = reason,
             accountsInPushMode = updatedAccountsInPush,
             wasInPushBeforeCall = currentState.wasInPushBeforeCall,
@@ -468,6 +472,7 @@ class PushModeManager(
     /**
      * Transición inmediata a modo push con logging detallado
      */
+    @OptIn(ExperimentalTime::class)
     private fun transitionToPush(accounts: Set<String>, reason: String) {
         val currentState = _pushModeStateFlow.value
 
@@ -488,7 +493,7 @@ class PushModeManager(
         val newState = PushModeState(
             currentMode = PushMode.PUSH,
             previousMode = currentState.currentMode,
-            timestamp = Clock.System.now().toEpochMilliseconds(),
+            timestamp = kotlin.time.Clock.System.now().toEpochMilliseconds(),
             reason = reason,
             accountsInPushMode = accounts,
             wasInPushBeforeCall = currentState.wasInPushBeforeCall
@@ -540,6 +545,7 @@ class PushModeManager(
     /**
      * Transición inmediata a modo foreground con logging detallado
      */
+    @OptIn(ExperimentalTime::class)
     private fun transitionToForeground(accounts: Set<String>, reason: String) {
         val currentState = _pushModeStateFlow.value
 
@@ -558,7 +564,7 @@ class PushModeManager(
         val newState = PushModeState(
             currentMode = PushMode.FOREGROUND,
             previousMode = currentState.currentMode,
-            timestamp = Clock.System.now().toEpochMilliseconds(),
+            timestamp = kotlin.time.Clock.System.now().toEpochMilliseconds(),
             reason = reason,
             accountsInPushMode = emptySet(),
             wasInPushBeforeCall = currentState.wasInPushBeforeCall

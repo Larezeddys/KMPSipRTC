@@ -12,8 +12,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.datetime.Clock
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.time.ExperimentalTime
 
 class CallLifecycleManager(
     private val sipCoreManager: SipCoreManager,
@@ -38,6 +38,7 @@ class CallLifecycleManager(
     /**
      * Llamada cuando se recibe una llamada entrante
      */
+    @OptIn(ExperimentalTime::class)
     suspend fun onIncomingCallReceived(accountKey: String) {
         log.d(tag = TAG) { "📞 Incoming call received for $accountKey" }
 
@@ -50,7 +51,7 @@ class CallLifecycleManager(
             CallLifecycleState(
                 accountKey = accountKey,
                 wasInPushBeforeCall = wasInPush == true,
-                callStartTime = Clock.System.now().toEpochMilliseconds()
+                callStartTime = kotlin.time.Clock.System.now().toEpochMilliseconds()
             )
         )
 
@@ -71,6 +72,7 @@ class CallLifecycleManager(
     /**
      * Llamada cuando termina una llamada
      */
+    @OptIn(ExperimentalTime::class)
     suspend fun onCallEnded(accountKey: String) {
         log.d(tag = TAG) { "📴 Call ended for $accountKey" }
 
@@ -81,7 +83,7 @@ class CallLifecycleManager(
             return
         }
 
-        lifecycleState.callEndTime = Clock.System.now().toEpochMilliseconds()
+        lifecycleState.callEndTime = kotlin.time.Clock.System.now().toEpochMilliseconds()
 
         // Si estaba en push antes de la llamada, programar retorno
         if (lifecycleState.wasInPushBeforeCall) {

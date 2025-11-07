@@ -8,7 +8,7 @@ import androidx.room.Query
 import androidx.room.Update
 import com.eddyslarez.kmpsiprtc.data.database.entities.ContactEntity
 import kotlinx.coroutines.flow.Flow
-import kotlinx.datetime.Clock
+import kotlin.time.ExperimentalTime
 
 @Dao
 interface ContactDao {
@@ -65,33 +65,40 @@ interface ContactDao {
 
     // === OPERACIONES DE FAVORITOS ===
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE contacts SET isFavorite = :isFavorite, updatedAt = :timestamp WHERE id = :contactId")
-    suspend fun setFavorite(contactId: String, isFavorite: Boolean, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun setFavorite(contactId: String, isFavorite: Boolean, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE contacts SET isFavorite = 1, updatedAt = :timestamp WHERE phoneNumber = :phoneNumber")
-    suspend fun setFavoriteByPhoneNumber(phoneNumber: String, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun setFavoriteByPhoneNumber(phoneNumber: String, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
     // === OPERACIONES DE BLOQUEO ===
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE contacts SET isBlocked = :isBlocked, updatedAt = :timestamp WHERE id = :contactId")
-    suspend fun setBlocked(contactId: String, isBlocked: Boolean, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun setBlocked(contactId: String, isBlocked: Boolean, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE contacts SET isBlocked = 1, updatedAt = :timestamp WHERE phoneNumber = :phoneNumber")
-    suspend fun blockByPhoneNumber(phoneNumber: String, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun blockByPhoneNumber(phoneNumber: String, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
     @Query("SELECT isBlocked FROM contacts WHERE phoneNumber = :phoneNumber")
     suspend fun isPhoneNumberBlocked(phoneNumber: String): Boolean?
 
     // === ESTADÍSTICAS ===
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE contacts SET totalCalls = totalCalls + 1, lastCallTime = :timestamp, updatedAt = :timestamp WHERE phoneNumber = :phoneNumber")
-    suspend fun incrementCallCount(phoneNumber: String, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun incrementCallCount(phoneNumber: String, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE contacts SET totalCallDuration = totalCallDuration + :duration, updatedAt = :timestamp WHERE phoneNumber = :phoneNumber")
-    suspend fun addCallDuration(phoneNumber: String, duration: Long, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun addCallDuration(phoneNumber: String, duration: Long, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE contacts SET missedCalls = missedCalls + 1, updatedAt = :timestamp WHERE phoneNumber = :phoneNumber")
-    suspend fun incrementMissedCalls(phoneNumber: String, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun incrementMissedCalls(phoneNumber: String, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
     // === CONSULTAS AVANZADAS ===
 
@@ -118,14 +125,16 @@ interface ContactDao {
 
     // === SINCRONIZACIÓN ===
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE contacts SET syncedAt = :timestamp WHERE id = :contactId")
-    suspend fun updateSyncTime(contactId: String, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun updateSyncTime(contactId: String, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
     @Query("SELECT * FROM contacts WHERE syncedAt < :threshold OR syncedAt = 0")
     suspend fun getContactsNeedingSync(threshold: Long): List<ContactEntity>
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE contacts SET syncedAt = :timestamp WHERE source = :source")
-    suspend fun updateSyncTimeBySource(source: String, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun updateSyncTimeBySource(source: String, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
     // === LIMPIEZA ===
 
@@ -140,19 +149,22 @@ interface ContactDao {
 
     // === OPERACIONES DE AVATAR ===
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE contacts SET avatarUrl = :avatarUrl, updatedAt = :timestamp WHERE id = :contactId")
-    suspend fun updateAvatar(contactId: String, avatarUrl: String?, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun updateAvatar(contactId: String, avatarUrl: String?, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
     // === OPERACIONES DE RINGTONE ===
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE contacts SET ringtoneUri = :ringtoneUri, updatedAt = :timestamp WHERE id = :contactId")
-    suspend fun updateRingtone(contactId: String, ringtoneUri: String?, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun updateRingtone(contactId: String, ringtoneUri: String?, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
     @Query("SELECT ringtoneUri FROM contacts WHERE phoneNumber = :phoneNumber")
     suspend fun getRingtoneForPhoneNumber(phoneNumber: String): String?
 
     // === OPERACIONES DE NOTAS ===
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE contacts SET notes = :notes, updatedAt = :timestamp WHERE id = :contactId")
-    suspend fun updateNotes(contactId: String, notes: String?, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun updateNotes(contactId: String, notes: String?, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 }
