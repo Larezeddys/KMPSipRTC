@@ -1,12 +1,4 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-import org.jetbrains.kotlin.gradle.plugin.KotlinSourceSet
-import com.android.utils.osArchitecture
-import org.gradle.kotlin.dsl.implementation
-import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
-import java.io.FileInputStream
-import java.io.FileOutputStream
-import java.time.LocalDate
-import java.util.Properties
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 
 plugins {
@@ -16,11 +8,11 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose") version "2.2.20"
     id("org.jetbrains.kotlin.plugin.serialization") version "2.2.20"
     id("com.github.gmazzo.buildconfig") version "5.7.0"
+    id("org.jetbrains.kotlin.native.cocoapods") version "2.2.20"
+    id("org.jetbrains.kotlinx.atomicfu") version "0.29.0"
 
-//    id("org.jetbrains.kotlin.native.cocoapods") version "2.2.20"
     id("com.google.devtools.ksp") version "2.2.20-2.0.4"
     id("androidx.room") version "2.8.2"
-
     id("maven-publish")
 }
 
@@ -40,9 +32,9 @@ kotlin {
     }
 
     // iOS targets
-    iosX64()
-    iosArm64()
-    iosSimulatorArm64()
+    val iosX64Target = iosX64()
+    val iosArm64Target = iosArm64()
+    val iosSimulatorArm64Target = iosSimulatorArm64()
 
     // Desktop target
     jvm("desktop") {
@@ -55,16 +47,21 @@ kotlin {
         }
     }
 
-//    cocoapods {
-//        summary = "Some description for the Shared Module"
-//        homepage = "Link to the Shared Module homepage"
-//        version = "1.0"
-//        ios.deploymentTarget = "16.0"
-//        framework {
-//            baseName = "shared"
-//            isStatic = true
-//        }
-//    }
+    // Cocoapods config
+    cocoapods {
+        summary = "Some description for the Shared Module"
+        homepage = "Link to the Shared Module homepage"
+        version = "1.0"
+        ios.deploymentTarget = "16.0"
+        framework {
+            baseName = "shared"
+            isStatic = true
+        }
+        pod("WebRTC-SDK") {
+            version = "125.6422.05"
+            moduleName = "WebRTC"
+        }
+    }
 
     sourceSets {
         // Common
@@ -72,13 +69,11 @@ kotlin {
             dependencies {
                 implementation("org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
                 implementation("org.jetbrains.kotlinx:kotlinx-datetime:0.7.1")
-
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
                 implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
                 implementation("org.jetbrains.kotlinx:atomicfu:0.29.0")
                 implementation("io.ktor:ktor-client-core:3.3.1")
                 implementation("io.ktor:ktor-client-websockets:3.3.1")
-                implementation("org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
                 implementation(compose.ui)
                 implementation(compose.components.resources)
                 implementation(compose.components.uiToolingPreview)
@@ -87,9 +82,9 @@ kotlin {
                 // Room
                 implementation("androidx.room:room-runtime:2.8.2")
                 implementation("androidx.sqlite:sqlite-bundled:2.6.1")
-
             }
         }
+
         val commonTest by getting {
             dependencies {
                 implementation(libs.kotlin.test)
@@ -101,11 +96,9 @@ kotlin {
             dependencies {
                 implementation(libs.androidx.lifecycle.process)
                 implementation("io.github.webrtc-sdk:android:137.7151.04")
-
                 implementation("androidx.core:core-ktx:1.17.0")
                 implementation("io.insert-koin:koin-android:4.1.1")
                 implementation("io.ktor:ktor-client-okhttp:3.3.1")
-//                implementation("com.shepeliev:webrtc-kmp:0.125.11")
                 implementation("androidx.room:room-sqlite-wrapper:2.8.2")
             }
         }
@@ -116,10 +109,10 @@ kotlin {
         val iosSimulatorArm64Main by getting
 
         val iosMain by creating {
-//            dependsOn(commonMain)
-//            iosX64Main.dependsOn(this)
-//            iosArm64Main.dependsOn(this)
-//            iosSimulatorArm64Main.dependsOn(this)
+            dependsOn(commonMain)
+            iosX64Main.dependsOn(this)
+            iosArm64Main.dependsOn(this)
+            iosSimulatorArm64Main.dependsOn(this)
 
             dependencies {
                 implementation("io.ktor:ktor-client-darwin:3.3.1")
@@ -131,14 +124,12 @@ kotlin {
         val desktopMain by getting {
             dependencies {
                 implementation(compose.desktop.currentOs)
-
                 implementation("dev.onvoid.webrtc:webrtc-java:0.14.0")
                 implementation("io.ktor:ktor-client-okhttp:3.3.1")
                 implementation("org.jetbrains.kotlinx:kotlinx-datetime:0.7.1")
 
                 val osName = System.getProperty("os.name").lowercase()
                 val osArch = System.getProperty("os.arch").lowercase()
-
                 when {
                     osName.contains("mac") -> {
                         if (osArch.contains("x86_64") || osArch.contains("arm")) {
@@ -147,14 +138,8 @@ kotlin {
                             runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.10.0:macos-aarch64")
                         }
                     }
-
-                    osName.contains("win") -> {
-                        runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.10.0:windows-x86_64")
-                    }
-
-                    osName.contains("linux") -> {
-                        runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.10.0:linux-x86_64")
-                    }
+                    osName.contains("win") -> runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.10.0:windows-x86_64")
+                    osName.contains("linux") -> runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.10.0:linux-x86_64")
                 }
             }
         }
@@ -180,6 +165,7 @@ room {
     schemaDirectory("$projectDir/schemas")
 }
 
+// KSP para todos los targets
 dependencies {
     add("kspAndroid", "androidx.room:room-compiler:2.8.2")
     add("kspIosSimulatorArm64", "androidx.room:room-compiler:2.8.2")

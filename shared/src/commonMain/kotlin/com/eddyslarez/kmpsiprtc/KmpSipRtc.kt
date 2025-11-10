@@ -10,8 +10,6 @@ import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.repository.*
 import com.eddyslarez.kmpsiprtc.services.calls.*
 import com.eddyslarez.kmpsiprtc.services.pushMode.PushModeManager
-import kotlinx.atomicfu.locks.SynchronizedObject
-import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
@@ -25,7 +23,8 @@ import kotlinx.datetime.Instant
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
 import kotlin.time.ExperimentalTime
-
+import com.eddyslarez.kmpsiprtc.utils.Lock
+import com.eddyslarez.kmpsiprtc.utils.synchronized
 /**
  * KmpSipRtc - Biblioteca principal para gestión de llamadas SIP/WebRTC
  *
@@ -67,7 +66,7 @@ class KmpSipRtc private constructor() {
     companion object {
         @Volatile
         private var INSTANCE: KmpSipRtc? = null
-        private val LOCK = SynchronizedObject()
+        private val LOCK = Lock()
         private const val TAG = "KmpSipRtc"
 
         /**
@@ -2053,7 +2052,7 @@ private class mutableStateOf<T>(initialValue: T) {
 //    companion object {
 //        @Volatile
 //        private var INSTANCE: KmpSipRtc? = null
-//        private val LOCK = SynchronizedObject()
+
 //        private const val TAG = "KmpSipRtc"
 //
 //        fun getInstance(): KmpSipRtc {

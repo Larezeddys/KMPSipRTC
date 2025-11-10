@@ -1,12 +1,10 @@
 package com.eddyslarez.kmpsiprtc.core
 
-import kotlinx.atomicfu.locks.SynchronizedObject
-import kotlinx.atomicfu.locks.synchronized
+
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.coroutines.*
 import platform.Network.*
 import platform.darwin.dispatch_queue_create
-import kotlin.concurrent.Volatile
 
 @OptIn(ExperimentalForeignApi::class)
 actual fun createNetworkManager(): NetworkManager = IOSNetworkManager()

@@ -2,10 +2,10 @@ package com.eddyslarez.kmpsiprtc.services.recording
 
 import com.eddyslarez.kmpsiprtc.data.models.RecordingResult
 import com.eddyslarez.kmpsiprtc.platform.log
+import com.eddyslarez.kmpsiprtc.utils.Lock
 import kotlinx.cinterop.*
 import kotlinx.coroutines.*
-import kotlinx.coroutines.internal.SynchronizedObject
-import kotlinx.coroutines.internal.synchronized
+import com.eddyslarez.kmpsiprtc.utils.synchronized
 import platform.AVFAudio.*
 import platform.Foundation.*
 import platform.darwin.NSObject
@@ -135,7 +135,7 @@ class IosCallRecorder : CallRecorder {
             byteArray[i * 2 + 1] = ((sample.toInt() shr 8) and 0xFF).toByte()
         }
 
-        synchronized(localAudioBuffer as SynchronizedObject) {
+        synchronized(localAudioBuffer as Lock) {
             localAudioBuffer.add(byteArray)
         }
     }
@@ -182,7 +182,7 @@ class IosCallRecorder : CallRecorder {
     override fun captureRemoteAudio(audioData: ByteArray) {
         if (!isRecording) return
 
-        synchronized(remoteAudioBuffer as SynchronizedObject) {
+        synchronized(remoteAudioBuffer as  Lock) {
             remoteAudioBuffer.add(audioData.copyOf())
         }
     }

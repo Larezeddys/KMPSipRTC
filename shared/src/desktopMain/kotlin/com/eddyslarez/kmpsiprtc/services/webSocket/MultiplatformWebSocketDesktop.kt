@@ -11,7 +11,7 @@ import kotlin.concurrent.timer
 
 actual fun createWebSocket(url: String, headers: Map<String, String>): MultiplatformWebSocket = DesktopWebSocket(url, headers)
 
-class DesktopWebSocket(private val url: String, headers: Map<String, String>) : MultiplatformWebSocket {
+class DesktopWebSocket(private val url: String, private val headers: Map<String, String>) : MultiplatformWebSocket {
     private var listener: MultiplatformWebSocket.Listener? = null
     private var webSocket: WebSocket? = null
     private var pingTimer: Timer? = null
@@ -21,10 +21,25 @@ class DesktopWebSocket(private val url: String, headers: Map<String, String>) : 
     private var isConnecting = false
 
     override fun connect() {
-        val client = OkHttpClient()
-        val request = Request.Builder().url(url).build()
-        webSocket = client.newWebSocket(request, object : WebSocketListener() {
+        log.i(tag = "DesktopWebSocket") { "Connecting to $url" }
+        log.i(tag = "DesktopWebSocket") { "Headers: $headers" }
+
+        client = OkHttpClient()
+
+        // Construir el request con los headers
+        val requestBuilder = Request.Builder().url(url)
+
+        // Añadir todos los headers recibidos
+        headers.forEach { (key, value) ->
+            requestBuilder.addHeader(key, value)
+            log.i(tag = "DesktopWebSocket") { "Added header $key = $value" }
+        }
+
+        val request = requestBuilder.build()
+
+        webSocket = client!!.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
+                log.i(tag = "DesktopWebSocket") { "WebSocket connection opened with protocol: ${response.protocol}" }
                 listener?.onOpen()
             }
 
@@ -33,10 +48,13 @@ class DesktopWebSocket(private val url: String, headers: Map<String, String>) : 
             }
 
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
+                log.i(tag = "DesktopWebSocket") { "WebSocket closed with code: $code, reason: $reason" }
                 listener?.onClose(code, reason)
             }
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
+                log.e(tag = "DesktopWebSocket") { "WebSocket error: ${t.message}" }
+                log.e(tag = "DesktopWebSocket") { "Response: ${response?.code} - ${response?.message}" }
                 listener?.onError(Exception(t))
             }
         })
@@ -60,7 +78,7 @@ class DesktopWebSocket(private val url: String, headers: Map<String, String>) : 
             client = null
 
         } catch (e: Exception) {
-            log.e(tag = "AndroidWebSocket") { "Error closing WebSocket: ${e.message}" }
+            log.e(tag = "DesktopWebSocket") { "Error closing WebSocket: ${e.message}" }
         }
     }
 

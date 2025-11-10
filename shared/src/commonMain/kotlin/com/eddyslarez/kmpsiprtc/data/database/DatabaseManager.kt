@@ -26,7 +26,8 @@ import com.eddyslarez.kmpsiprtc.data.models.RegistrationState
 import com.eddyslarez.kmpsiprtc.repository.CallLogWithContact
 import com.eddyslarez.kmpsiprtc.repository.GeneralStatistics
 import com.eddyslarez.kmpsiprtc.repository.SipRepository
-import kotlinx.atomicfu.locks.SynchronizedObject
+import com.eddyslarez.kmpsiprtc.utils.Lock
+import com.eddyslarez.kmpsiprtc.utils.synchronized
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -52,10 +53,10 @@ class DatabaseManager private constructor() {
     companion object {
         @Volatile
         private var INSTANCE: DatabaseManager? = null
-        private val LOCK = Any()
+        private val LOCK =  Lock()
 
         fun getInstance(): DatabaseManager {
-            return INSTANCE ?: synchronized(LOCK as SynchronizedObject) {
+            return INSTANCE ?: synchronized(LOCK) {
                 INSTANCE ?: DatabaseManager().also {
                     INSTANCE = it
                     it.ensureInitialized()
@@ -500,7 +501,7 @@ class DatabaseManager private constructor() {
                 // Cerrar la base de datos
                 database.close()
 
-                synchronized(LOCK as SynchronizedObject) {
+                synchronized(LOCK ) {
                     INSTANCE = null
                     isInitialized = false
                 }

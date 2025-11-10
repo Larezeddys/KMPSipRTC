@@ -14,8 +14,6 @@ import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.repository.GeneralStatistics
 import com.eddyslarez.kmpsiprtc.services.calls.CallStateManager
 import com.eddyslarez.kmpsiprtc.services.calls.MultiCallManager
-import kotlinx.atomicfu.locks.SynchronizedObject
-import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
@@ -28,6 +26,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlin.concurrent.Volatile
 import kotlin.time.ExperimentalTime
+import com.eddyslarez.kmpsiprtc.utils.Lock
+import com.eddyslarez.kmpsiprtc.utils.synchronized
 
 class DatabaseAutoIntegration private constructor(
     private val sipCoreManager: SipCoreManager
@@ -41,7 +41,7 @@ class DatabaseAutoIntegration private constructor(
     companion object {
         @Volatile
         private var INSTANCE: DatabaseAutoIntegration? = null
-        private val LOCK = SynchronizedObject()
+        private val LOCK = Lock()
 
         fun getInstance(
             sipCoreManager: SipCoreManager
