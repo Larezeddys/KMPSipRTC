@@ -29,7 +29,7 @@ class RegistrationGuardianManager(
         private const val TAG = "RegistrationGuardian"
 
         // Intervalos de verificación
-        private const val HEALTH_CHECK_INTERVAL = 30_000L // 30 segundos
+        private const val HEALTH_CHECK_INTERVAL = 60_000L // 30 segundos
         private const val QUICK_RETRY_DELAY = 3_000L // 3 segundos
         private const val NORMAL_RETRY_DELAY = 10_000L // 10 segundos
         private const val MAX_RETRY_DELAY = 60_000L // 1 minuto
@@ -159,6 +159,12 @@ class RegistrationGuardianManager(
             "🔍 Health check for $accountKey: state=$currentState, registered=${accountInfo.isRegistered.value}"
         }
 
+        // ✅ CRÍTICO: Si está registrado Y el estado es OK, NO hacer nada
+        if (accountInfo.isRegistered.value && currentState == RegistrationState.OK && isWebSocketHealthy) {
+            log.d(tag = TAG) { "✅ Account $accountKey is healthy, skipping action" }
+            return
+        }
+
         // Detectar problemas
         val needsAction = when {
             // Caso 1: Estado FAILED - SIEMPRE reintenta
@@ -174,8 +180,7 @@ class RegistrationGuardianManager(
             }
 
             // Caso 3: Estado OK pero WebSocket no saludable
-            currentState == RegistrationState.OK && !isWebSocketHealthy
-                -> {
+            currentState == RegistrationState.OK && !isWebSocketHealthy -> {
                 log.w(tag = TAG) { "⚠️ Account $accountKey is OK but WebSocket unhealthy" }
                 true
             }
@@ -186,11 +191,12 @@ class RegistrationGuardianManager(
                 true
             }
 
+            // ❌ REMOVER ESTE CASO - Es el que causa el problema
             // Caso 5: Marcado como registrado pero estado no es OK
-            accountInfo.isRegistered.value && currentState != RegistrationState.OK -> {
-                log.w(tag = TAG) { "🔀 Account $accountKey has inconsistent state" }
-                true
-            }
+            // accountInfo.isRegistered.value && currentState != RegistrationState.OK -> {
+            //     log.w(tag = TAG) { "🔀 Account $accountKey has inconsistent state" }
+            //     true
+            // }
 
             else -> false
         }
