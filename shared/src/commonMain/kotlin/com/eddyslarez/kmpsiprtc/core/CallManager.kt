@@ -297,7 +297,6 @@ class CallManager(
                 targetCallData.callId,
                 errorReason = CallErrorReason.MEDIA_ERROR
             )
-            // ✅ Registrar error
             registerCallInHistory(targetCallData, CallState.ERROR)
             sipCoreManager.sipCallbacks?.onCallFailed("Remote SDP not available")
             return
@@ -309,8 +308,19 @@ class CallManager(
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 log.d(tag = TAG) { "🎤 Preparing audio..." }
+
+                // ✅ CRÍTICO: Asegurar que WebRTC está inicializado
+                if (!webRtcManager.isInitialized()) {
+                    log.d(tag = TAG) { "⚠️ WebRTC not initialized, initializing now..." }
+                    webRtcManager.initialize()
+                    delay(500) // Dar tiempo para inicialización
+                }
+
                 audioManager.prepareAudioForIncomingCall()
-                log.d(tag = TAG) { "📞 Creating answer with remote SDP" }
+
+                log.d(tag = TAG) { "📞 Creating answer with remote SDP (${remoteSdp.length} chars)" }
+
+                // ✅ CAMBIO: createAnswer ahora maneja el remote SDP internamente
                 val answerSdp = audioManager.createAnswer(remoteSdp)
 
                 log.d(tag = TAG) { "✅ Answer created: ${answerSdp.length} chars" }
@@ -343,9 +353,7 @@ class CallManager(
                     errorReason = CallErrorReason.MEDIA_ERROR
                 )
 
-                // ✅ Registrar error en aceptación
                 registerCallInHistory(targetCallData, CallState.ERROR)
-
                 sipCoreManager.sipCallbacks?.onCallFailed("Failed to accept: ${e.message}")
 
                 try {
@@ -356,6 +364,95 @@ class CallManager(
             }
         }
     }
+//    fun acceptCall(callId: String? = null, recordCall: Boolean = true) {
+//        val accountInfo = sipCoreManager.currentAccountInfo ?: run {
+//            log.e(tag = TAG) { "❌ No current account" }
+//            return
+//        }
+//
+//        val targetCallData = accountInfo.currentCallData.value ?: run {
+//            log.e(tag = TAG) { "❌ No call data in AccountInfo" }
+//            return
+//        }
+//
+//        if (targetCallData.direction != CallDirections.INCOMING) {
+//            log.w(tag = TAG) { "❌ Cannot accept - not incoming" }
+//            return
+//        }
+//
+//        val callState = CallStateManager.getCurrentState()
+//        if (callState.state != CallState.INCOMING_RECEIVED) {
+//            log.w(tag = TAG) { "❌ Cannot accept - invalid state: ${callState.state}" }
+//            return
+//        }
+//
+//        val remoteSdp = targetCallData.remoteSdp
+//
+//        if (remoteSdp.isBlank()) {
+//            log.e(tag = TAG) { "❌ FATAL: remoteSdp is blank!" }
+//            CallStateManager.callError(
+//                targetCallData.callId,
+//                errorReason = CallErrorReason.MEDIA_ERROR
+//            )
+//            // ✅ Registrar error
+//            registerCallInHistory(targetCallData, CallState.ERROR)
+//            sipCoreManager.sipCallbacks?.onCallFailed("Remote SDP not available")
+//            return
+//        }
+//
+//        log.d(tag = TAG) { "Accepting call: ${targetCallData.callId}" }
+//        audioManager.stopAllRingtones()
+//
+//        CoroutineScope(Dispatchers.IO).launch {
+//            try {
+//                log.d(tag = TAG) { "🎤 Preparing audio..." }
+//                audioManager.prepareAudioForIncomingCall()
+//                log.d(tag = TAG) { "📞 Creating answer with remote SDP" }
+//                val answerSdp = audioManager.createAnswer(remoteSdp)
+//
+//                log.d(tag = TAG) { "✅ Answer created: ${answerSdp.length} chars" }
+//                targetCallData.localSdp = answerSdp
+//
+//                if (recordCall) {
+//                    webRtcManager.startCallRecording(targetCallData.callId)
+//                    log.d(TAG) { "🎙️ Recording started for incoming call ${targetCallData.callId}" }
+//                }
+//
+//                log.d(tag = TAG) { "📤 Sending 200 OK..." }
+//                messageHandler.sendInviteOkResponse(accountInfo, targetCallData)
+//
+//                CallStateManager.callConnected(targetCallData.callId, 200)
+//                sipCoreManager.notifyCallStateChanged(CallState.CONNECTED)
+//
+//                delay(500)
+//
+//                log.d(tag = TAG) { "🔊 Enabling audio..." }
+//                audioManager.setAudioEnabled(true)
+//
+//                log.d(tag = TAG) { "✅ Call accepted successfully" }
+//
+//            } catch (e: Exception) {
+//                log.e(tag = TAG) { "💥 Error accepting call: ${e.message}" }
+//                log.e(tag = TAG) { e.stackTraceToString() }
+//
+//                CallStateManager.callError(
+//                    targetCallData.callId,
+//                    errorReason = CallErrorReason.MEDIA_ERROR
+//                )
+//
+//                // ✅ Registrar error en aceptación
+//                registerCallInHistory(targetCallData, CallState.ERROR)
+//
+//                sipCoreManager.sipCallbacks?.onCallFailed("Failed to accept: ${e.message}")
+//
+//                try {
+//                    declineCall(callId)
+//                } catch (declineError: Exception) {
+//                    log.e(tag = TAG) { "Error declining after failure: ${declineError.message}" }
+//                }
+//            }
+//        }
+//    }
 
     /**
      * ✅ MEJORADO: declineCall con registro en historial

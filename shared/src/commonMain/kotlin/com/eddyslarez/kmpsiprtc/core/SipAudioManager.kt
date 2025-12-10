@@ -64,11 +64,27 @@ class SipAudioManager(
      * Preparar audio para llamada entrante
      */
     suspend fun prepareAudioForIncomingCall() {
-        if (!webRtcManager.isInitialized()) {
-            webRtcManager.initialize()
-            delay(1000)
+        try {
+            if (!webRtcManager.isInitialized()) {
+                log.d(tag = TAG) { "🔧 Initializing WebRTC for incoming call..." }
+                webRtcManager.initialize()
+                delay(1000) // Dar más tiempo para inicialización completa
+            }
+
+            log.d(tag = TAG) { "🎤 Preparing audio for incoming call..." }
+            webRtcManager.prepareAudioForIncomingCall()
+
+            // ✅ NUEVO: Verificar que el audio está listo
+            if (!webRtcManager.isInitialized()) {
+                throw Exception("WebRTC failed to initialize properly")
+            }
+
+            log.d(tag = TAG) { "✅ Audio prepared successfully" }
+
+        } catch (e: Exception) {
+            log.e(tag = TAG) { "❌ Error preparing audio: ${e.message}" }
+            throw e
         }
-        webRtcManager.prepareAudioForIncomingCall()
     }
 
     /**
@@ -265,9 +281,16 @@ class SipAudioManager(
     /**
      * Crear SDP answer para llamada entrante
      */
-    suspend fun createAnswer( remoteSdp: String): String {
-        return webRtcManager.createAnswer( remoteSdp)
+    suspend fun createAnswer(remoteSdp: String): String {
+        if (!webRtcManager.isInitialized()) {
+            log.w(tag = TAG) { "⚠️ WebRTC not initialized in createAnswer, initializing..." }
+            webRtcManager.initialize()
+            delay(500)
+        }
+
+        return webRtcManager.createAnswer(remoteSdp)
     }
+
 
     /**
      * Limpiar recursos de audio

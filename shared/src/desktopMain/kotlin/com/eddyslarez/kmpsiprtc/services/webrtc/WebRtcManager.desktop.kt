@@ -7,6 +7,7 @@ import com.eddyslarez.kmpsiprtc.data.models.DeviceConnectionState
 import com.eddyslarez.kmpsiprtc.data.models.RecordingResult
 import com.eddyslarez.kmpsiprtc.data.models.SdpType
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
+import com.eddyslarez.kmpsiprtc.platform.log
 import dev.onvoid.webrtc.*
 import dev.onvoid.webrtc.media.audio.AudioDeviceModule
 import dev.onvoid.webrtc.media.audio.AudioLayer
@@ -29,6 +30,10 @@ class DesktopWebRtcManager : WebRtcManager {
     private var localAudioTrack: dev.onvoid.webrtc.media.audio.AudioTrack? = null
     private var dtmfSender: RTCDtmfSender? = null
     private var isMutedState = false
+
+    companion object {
+        private const val TAG = "WebRtcManager"
+    }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -136,17 +141,34 @@ class DesktopWebRtcManager : WebRtcManager {
     override suspend fun createAnswer(offerSdp: String): String = suspendCoroutine { continuation ->
         scope.launch {
             try {
-                val pc = peerConnection ?: run {
-                    continuation.resumeWithException(Exception("PeerConnection not initialized"))
+                // ✅ CRÍTICO: Primero crear/obtener PeerConnection
+                val pc = getOrCreatePeerConnection { error ->
+                    continuation.resumeWithException(Exception(error))
+                } ?: run {
+                    continuation.resumeWithException(Exception("Failed to create PeerConnection"))
                     return@launch
                 }
 
-                val options = RTCAnswerOptions()
-                pc.createAnswer(options, object : CreateSessionDescriptionObserver {
-                    override fun onSuccess(description: RTCSessionDescription) {
-                        pc.setLocalDescription(description, object : SetSessionDescriptionObserver {
-                            override fun onSuccess() {
-                                continuation.resume(description.sdp)
+                // ✅ NUEVO: Configurar el remote SDP ANTES de crear la respuesta
+                val sdpType = RTCSdpType.OFFER
+                val sessionDescription = RTCSessionDescription(sdpType, offerSdp)
+
+                // Establecer remote description primero
+                pc.setRemoteDescription(sessionDescription, object : SetSessionDescriptionObserver {
+                    override fun onSuccess() {
+                        // Ahora crear el answer
+                        val options = RTCAnswerOptions()
+                        pc.createAnswer(options, object : CreateSessionDescriptionObserver {
+                            override fun onSuccess(description: RTCSessionDescription) {
+                                pc.setLocalDescription(description, object : SetSessionDescriptionObserver {
+                                    override fun onSuccess() {
+                                        continuation.resume(description.sdp)
+                                    }
+
+                                    override fun onFailure(error: String) {
+                                        continuation.resumeWithException(Exception(error))
+                                    }
+                                })
                             }
 
                             override fun onFailure(error: String) {
@@ -156,9 +178,10 @@ class DesktopWebRtcManager : WebRtcManager {
                     }
 
                     override fun onFailure(error: String) {
-                        continuation.resumeWithException(Exception(error))
+                        continuation.resumeWithException(Exception("Failed to set remote description: $error"))
                     }
                 })
+
             } catch (e: Exception) {
                 continuation.resumeWithException(e)
             }
@@ -270,10 +293,30 @@ class DesktopWebRtcManager : WebRtcManager {
 
     override fun prepareAudioForCall() {
         try {
+            log.d(tag = TAG) { "🎤 Preparing audio for incoming call..." }
+
+            // Asegurar que el AudioDeviceModule está listo
+            if (audioDeviceModule == null) {
+                log.w(tag = TAG) { "⚠️ AudioDeviceModule is null, creating..." }
+                audioDeviceModule = AudioDeviceModule(AudioLayer.kPlatformDefaultAudio)
+            }
+
             audioDeviceModule?.initRecording()
             audioDeviceModule?.initPlayout()
+
+            // ✅ IMPORTANTE: Crear PeerConnection aquí si no existe
+            if (peerConnection == null) {
+                log.d(tag = TAG) { "📞 Creating PeerConnection for incoming call..." }
+                getOrCreatePeerConnection { error ->
+                    log.e(tag = TAG) { "❌ Failed to create PeerConnection: $error" }
+                }
+            }
+
             refreshAudioDevices()
+            log.d(tag = TAG) { "✅ Audio prepared successfully" }
+
         } catch (e: Exception) {
+            log.e(tag = TAG) { "❌ Error preparing audio: ${e.message}" }
             e.printStackTrace()
         }
     }
@@ -610,7 +653,7 @@ class DesktopWebRtcManager : WebRtcManager {
 
         val rtcConfig = RTCConfiguration().apply {
             iceServers.addAll(localIceServers)
-            bundlePolicy = RTCBundlePolicy.MAX_BUNDLE
+            bundlePolicy = RTCBundlePolicy.BALANCED
             rtcpMuxPolicy = RTCRtcpMuxPolicy.REQUIRE
         }
 

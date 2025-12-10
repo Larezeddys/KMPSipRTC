@@ -2,13 +2,13 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 
 plugins {
-    id("org.jetbrains.kotlin.multiplatform") version "2.2.20"
+    id("org.jetbrains.kotlin.multiplatform") version "2.2.21"
     id("com.android.library") version "8.11.2"
-    id("org.jetbrains.compose") version "1.9.1"
-    id("org.jetbrains.kotlin.plugin.compose") version "2.2.20"
-    id("org.jetbrains.kotlin.plugin.serialization") version "2.2.20"
+    id("org.jetbrains.compose") version "1.9.3"
+    id("org.jetbrains.kotlin.plugin.compose") version "2.2.21"
+    id("org.jetbrains.kotlin.plugin.serialization") version "2.2.21"
     id("com.github.gmazzo.buildconfig") version "5.7.0"
-    id("org.jetbrains.kotlin.native.cocoapods") version "2.2.20"
+    id("org.jetbrains.kotlin.native.cocoapods") version "2.2.21"
     id("org.jetbrains.kotlinx.atomicfu") version "0.29.0"
 
     id("com.google.devtools.ksp") version "2.2.20-2.0.4"
@@ -67,6 +67,8 @@ kotlin {
         // Common
         val commonMain by getting {
             dependencies {
+
+
                 implementation("org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
                 implementation("org.jetbrains.kotlinx:kotlinx-datetime:0.7.1")
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
@@ -109,11 +111,6 @@ kotlin {
         val iosSimulatorArm64Main by getting
 
         val iosMain by creating {
-            dependsOn(commonMain)
-            iosX64Main.dependsOn(this)
-            iosArm64Main.dependsOn(this)
-            iosSimulatorArm64Main.dependsOn(this)
-
             dependencies {
                 implementation("io.ktor:ktor-client-darwin:3.3.1")
                 implementation("com.shepeliev:webrtc-kmp:0.125.11")
