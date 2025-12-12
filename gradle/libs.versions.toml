@@ -1,6 +1,6 @@
 [versions]
-agp = "8.9.0"
-kotlin = "2.2.20"
+agp = "8.11.2"
+kotlin = "2.2.21"
 compose = "1.9.3"
 compose-material3 = "1.4.0"
 androidx-activityCompose = "1.11.0"
@@ -9,7 +9,7 @@ buildConfig = "5.7.0"
 room = "2.8.2"
 sqlite = "2.6.1"
 ksp = "2.2.20-2.0.4"
-compose-plugin = "1.9.0"
+compose-plugin = "1.9.1"
 androidx-lifecycle = "2.8.4"
 lifecycleProcess = "2.9.0"
 

@@ -11,7 +11,7 @@ import com.eddyslarez.kmpsiprtc.data.database.entities.CallDataEntity
 import com.eddyslarez.kmpsiprtc.data.models.CallDirections
 import com.eddyslarez.kmpsiprtc.data.models.CallState
 import kotlinx.coroutines.flow.Flow
-import kotlinx.datetime.Clock
+import kotlin.time.ExperimentalTime
 
 @Dao
 interface CallDataDao {
@@ -53,63 +53,79 @@ interface CallDataDao {
     @Query("SELECT * FROM call_data WHERE currentState = :state ORDER BY startTime DESC")
     fun getCallDataByState(state: CallState): Flow<List<CallDataEntity>>
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE call_data SET currentState = :state, updatedAt = :timestamp WHERE callId = :callId")
-    suspend fun updateCallState(callId: String, state: CallState, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun updateCallState(callId: String, state: CallState, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE call_data SET connectTime = :connectTime, updatedAt = :timestamp WHERE callId = :callId")
-    suspend fun updateConnectTime(callId: String, connectTime: Long, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun updateConnectTime(callId: String, connectTime: Long, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE call_data SET endTime = :endTime, isActive = 0, updatedAt = :timestamp WHERE callId = :callId")
-    suspend fun endCall(callId: String, endTime: Long, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun endCall(callId: String, endTime: Long, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE call_data SET isActive = :isActive, updatedAt = :timestamp WHERE callId = :callId")
-    suspend fun setCallActive(callId: String, isActive: Boolean, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun setCallActive(callId: String, isActive: Boolean, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
     // === OPERACIONES DE HOLD/MUTE ===
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE call_data SET isOnHold = :isOnHold, updatedAt = :timestamp WHERE callId = :callId")
-    suspend fun updateHoldState(callId: String, isOnHold: Boolean, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun updateHoldState(callId: String, isOnHold: Boolean, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE call_data SET isMuted = :isMuted, updatedAt = :timestamp WHERE callId = :callId")
-    suspend fun updateMuteState(callId: String, isMuted: Boolean, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun updateMuteState(callId: String, isMuted: Boolean, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE call_data SET isRecording = :isRecording, updatedAt = :timestamp WHERE callId = :callId")
-    suspend fun updateRecordingState(callId: String, isRecording: Boolean, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun updateRecordingState(callId: String, isRecording: Boolean, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
     // === OPERACIONES SDP ===
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE call_data SET localSdp = :sdp, updatedAt = :timestamp WHERE callId = :callId")
-    suspend fun updateLocalSdp(callId: String, sdp: String, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun updateLocalSdp(callId: String, sdp: String, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE call_data SET remoteSdp = :sdp, updatedAt = :timestamp WHERE callId = :callId")
-    suspend fun updateRemoteSdp(callId: String, sdp: String, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun updateRemoteSdp(callId: String, sdp: String, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE call_data SET iceUfrag = :ufrag, icePwd = :pwd, updatedAt = :timestamp WHERE callId = :callId")
-    suspend fun updateIceCredentials(callId: String, ufrag: String?, pwd: String?, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun updateIceCredentials(callId: String, ufrag: String?, pwd: String?, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE call_data SET dtlsFingerprint = :fingerprint, updatedAt = :timestamp WHERE callId = :callId")
-    suspend fun updateDtlsFingerprint(callId: String, fingerprint: String?, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun updateDtlsFingerprint(callId: String, fingerprint: String?, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
     // === OPERACIONES DE TAGS ===
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE call_data SET fromTag = :fromTag, toTag = :toTag, updatedAt = :timestamp WHERE callId = :callId")
-    suspend fun updateTags(callId: String, fromTag: String?, toTag: String?, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun updateTags(callId: String, fromTag: String?, toTag: String?, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE call_data SET inviteFromTag = :fromTag, inviteToTag = :toTag, updatedAt = :timestamp WHERE callId = :callId")
-    suspend fun updateInviteTags(callId: String, fromTag: String, toTag: String, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun updateInviteTags(callId: String, fromTag: String, toTag: String, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
     // === OPERACIONES DE CONTACTO REMOTO ===
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE call_data SET remoteContactUri = :uri, remoteDisplayName = :displayName, remoteUserAgent = :userAgent, updatedAt = :timestamp WHERE callId = :callId")
-    suspend fun updateRemoteContact(callId: String, uri: String?, displayName: String, userAgent: String?, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun updateRemoteContact(callId: String, uri: String?, displayName: String, userAgent: String?, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
     // === OPERACIONES DE CALIDAD ===
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE call_data SET audioCodec = :codec, updatedAt = :timestamp WHERE callId = :callId")
-    suspend fun updateAudioCodec(callId: String, codec: String?, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun updateAudioCodec(callId: String, codec: String?, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE call_data SET packetsSent = :sent, packetsReceived = :received, bytesTransferred = :bytes, updatedAt = :timestamp WHERE callId = :callId")
-    suspend fun updateCallStatistics(callId: String, sent: Long, received: Long, bytes: Long, timestamp: Long = Clock.System.now().toEpochMilliseconds())
+    suspend fun updateCallStatistics(callId: String, sent: Long, received: Long, bytes: Long, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
     // === CONSULTAS ESPECÍFICAS ===
 
@@ -128,8 +144,9 @@ interface CallDataDao {
     @Query("SELECT * FROM call_data WHERE fromNumber = :phoneNumber OR toNumber = :phoneNumber ORDER BY startTime DESC")
     fun getCallDataForNumber(phoneNumber: String): Flow<List<CallDataEntity>>
 
-    @Query("SELECT COUNT(*) FROM call_logs")
-    suspend fun getCallLogCount(): Int
+    @Query("SELECT COUNT(*) FROM call_data")
+    suspend fun getCallDataCount(): Int
+
     // === ESTADÍSTICAS ===
 
     @Query("SELECT COUNT(*) FROM call_data WHERE isActive = 1")
@@ -158,13 +175,7 @@ interface CallDataDao {
     @Query("DELETE FROM call_data WHERE accountId = :accountId")
     suspend fun deleteCallDataByAccount(accountId: String)
 
-    // === OPERACIONES COMPLEJAS ===
-
-    @Transaction
-    suspend fun endCallWithCleanup(callId: String, endTime: Long) {
-        endCall(callId, endTime)
-        // Aquí podrías agregar lógica adicional de limpieza
-    }
+    // === CONSULTAS COMPLEJAS (sin @Transaction) ===
 
     @Query("SELECT * FROM call_data WHERE currentState IN ('CONNECTED', 'STREAMS_RUNNING') AND isActive = 1")
     fun getConnectedCalls(): Flow<List<CallDataEntity>>

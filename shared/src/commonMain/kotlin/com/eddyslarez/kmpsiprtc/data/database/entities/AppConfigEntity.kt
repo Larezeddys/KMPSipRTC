@@ -2,11 +2,11 @@ package com.eddyslarez.kmpsiprtc.data.database.entities
 
 import androidx.room.Entity
 import androidx.room.PrimaryKey
-import kotlinx.datetime.Clock
+import kotlin.time.ExperimentalTime
 
 
 @Entity(tableName = "app_configuration")
-data class AppConfigEntity(
+data class AppConfigEntity @OptIn(ExperimentalTime::class) constructor(
     @PrimaryKey
     val id: String = "default_config",
     val incomingRingtoneUri: String? = null,
@@ -17,6 +17,6 @@ data class AppConfigEntity(
     val enableLogs: Boolean = true,
     val enableAutoReconnect: Boolean = true,
     val pingIntervalMs: Long = 30000L,
-    val createdAt: Long = Clock.System.now().toEpochMilliseconds(),
-    val updatedAt: Long = Clock.System.now().toEpochMilliseconds()
+    val createdAt: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
+    val updatedAt: Long = kotlin.time.Clock.System.now().toEpochMilliseconds()
 )

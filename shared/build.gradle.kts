@@ -1,31 +1,27 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-import org.jetbrains.kotlin.gradle.plugin.KotlinSourceSet
-import com.android.utils.osArchitecture
-import org.gradle.kotlin.dsl.implementation
-import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
-import java.io.FileInputStream
-import java.io.FileOutputStream
-import java.time.LocalDate
-import java.util.Properties
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 
 plugins {
-    alias(libs.plugins.kotlinMultiplatform)
-    alias(libs.plugins.kotlinCocoapods)
-    alias(libs.plugins.androidLibrary)
-    alias(libs.plugins.jetbrainsCompose)
-    id("maven-publish") // <- esto es necesario
+    id("org.jetbrains.kotlin.multiplatform") version "2.2.21"
+    id("com.android.library") version "8.11.2"
+    id("org.jetbrains.compose") version "1.9.3"
+    id("org.jetbrains.kotlin.plugin.compose") version "2.2.21"
+    id("org.jetbrains.kotlin.plugin.serialization") version "2.2.21"
+    id("com.github.gmazzo.buildconfig") version "5.7.0"
+    id("org.jetbrains.kotlin.native.cocoapods") version "2.2.21"
+    id("org.jetbrains.kotlinx.atomicfu") version "0.29.0"
 
-    alias(libs.plugins.compose.compiler)
-    alias(libs.plugins.kotlinxSerialization)
-    alias(libs.plugins.gradleBuildConfig)
-    // Room plugins
-    alias(libs.plugins.ksp)
-    alias(libs.plugins.androidx.room)
+    id("com.google.devtools.ksp") version "2.2.20-2.0.4"
+    id("androidx.room") version "2.8.2"
+    id("maven-publish")
 }
+
+group = "com.github.larezeddys"
+version = "1.0.0"
 
 kotlin {
     androidTarget {
+        publishLibraryVariants("release", "debug")
         compilations.all {
             compileTaskProvider.configure {
                 compilerOptions {
@@ -36,9 +32,9 @@ kotlin {
     }
 
     // iOS targets
-    iosX64()
-    iosArm64()
-    iosSimulatorArm64()
+    val iosX64Target = iosX64()
+    val iosArm64Target = iosArm64()
+    val iosSimulatorArm64Target = iosSimulatorArm64()
 
     // Desktop target
     jvm("desktop") {
@@ -51,6 +47,7 @@ kotlin {
         }
     }
 
+    // Cocoapods config
     cocoapods {
         summary = "Some description for the Shared Module"
         homepage = "Link to the Shared Module homepage"
@@ -59,8 +56,10 @@ kotlin {
         framework {
             baseName = "shared"
             isStatic = true
-            // Requerido si usas NativeSQLiteDriver
-            // linkerOpts.add("-lsqlite3")
+        }
+        pod("WebRTC-SDK") {
+            version = "125.6422.05"
+            moduleName = "WebRTC"
         }
     }
 
@@ -68,25 +67,26 @@ kotlin {
         // Common
         val commonMain by getting {
             dependencies {
-                implementation(libs.androidx.lifecycle.runtime.compose)
 
+
+                implementation("org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
+                implementation("org.jetbrains.kotlinx:kotlinx-datetime:0.7.1")
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
-                implementation("org.jetbrains.kotlinx:kotlinx-datetime:0.6.1")
                 implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
                 implementation("org.jetbrains.kotlinx:atomicfu:0.29.0")
                 implementation("io.ktor:ktor-client-core:3.3.1")
                 implementation("io.ktor:ktor-client-websockets:3.3.1")
-                implementation("org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
                 implementation(compose.ui)
                 implementation(compose.components.resources)
                 implementation(compose.components.uiToolingPreview)
                 implementation("com.squareup.okio:okio:3.9.0")
 
                 // Room
-                implementation(libs.androidx.room.runtime)
-                implementation(libs.androidx.sqlite.bundled)
+                implementation("androidx.room:room-runtime:2.8.2")
+                implementation("androidx.sqlite:sqlite-bundled:2.6.1")
             }
         }
+
         val commonTest by getting {
             dependencies {
                 implementation(libs.kotlin.test)
@@ -97,14 +97,11 @@ kotlin {
         val androidMain by getting {
             dependencies {
                 implementation(libs.androidx.lifecycle.process)
-
+                implementation("io.github.webrtc-sdk:android:137.7151.04")
                 implementation("androidx.core:core-ktx:1.17.0")
                 implementation("io.insert-koin:koin-android:4.1.1")
                 implementation("io.ktor:ktor-client-okhttp:3.3.1")
-                implementation("com.shepeliev:webrtc-kmp:0.125.11")
-
-                // Room SQLite Wrapper (opcional)
-                implementation(libs.androidx.room.sqlite.wrapper)
+                implementation("androidx.room:room-sqlite-wrapper:2.8.2")
             }
         }
 
@@ -114,11 +111,6 @@ kotlin {
         val iosSimulatorArm64Main by getting
 
         val iosMain by creating {
-            dependsOn(commonMain)
-            iosX64Main.dependsOn(this)
-            iosArm64Main.dependsOn(this)
-            iosSimulatorArm64Main.dependsOn(this)
-
             dependencies {
                 implementation("io.ktor:ktor-client-darwin:3.3.1")
                 implementation("com.shepeliev:webrtc-kmp:0.125.11")
@@ -129,14 +121,12 @@ kotlin {
         val desktopMain by getting {
             dependencies {
                 implementation(compose.desktop.currentOs)
-
                 implementation("dev.onvoid.webrtc:webrtc-java:0.14.0")
                 implementation("io.ktor:ktor-client-okhttp:3.3.1")
+                implementation("org.jetbrains.kotlinx:kotlinx-datetime:0.7.1")
 
-                // Detectar arquitectura automáticamente
                 val osName = System.getProperty("os.name").lowercase()
                 val osArch = System.getProperty("os.arch").lowercase()
-
                 when {
                     osName.contains("mac") -> {
                         if (osArch.contains("x86_64") || osArch.contains("arm")) {
@@ -145,30 +135,8 @@ kotlin {
                             runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.10.0:macos-aarch64")
                         }
                     }
-                    osName.contains("win") -> {
-                        runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.10.0:windows-x86_64")
-                    }
-                    osName.contains("linux") -> {
-                        runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.10.0:linux-x86_64")
-                    }
-                }
-            }
-        }
-    }
-}
-
-publishing {
-    publications {
-        create<MavenPublication>("release") {
-            groupId = "com.github.Eddyslarez88"
-            artifactId = "KMPSipRTC"
-            version = "1.0.0"
-
-            afterEvaluate {
-                // Publica todos los targets de KMP
-                kotlin.targets.forEach { target ->
-                    // Solo targets con componentes
-                    target.components.find { it.name == "kotlin" }?.let { from(it) }
+                    osName.contains("win") -> runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.10.0:windows-x86_64")
+                    osName.contains("linux") -> runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.10.0:linux-x86_64")
                 }
             }
         }
@@ -179,8 +147,10 @@ android {
     namespace = "com.eddyslarez.kmpsiprtc"
     compileSdk = 35
     defaultConfig {
-        minSdk = 29
+        minSdk = 28
     }
+    sourceSets["main"].manifest.srcFile("src/androidMain/AndroidManifest.xml")
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_1_8
         targetCompatibility = JavaVersion.VERSION_1_8
@@ -192,11 +162,15 @@ room {
     schemaDirectory("$projectDir/schemas")
 }
 
-// Dependencias de KSP para cada plataforma
+// KSP para todos los targets
 dependencies {
-    add("kspAndroid", libs.androidx.room.compiler)
-    add("kspIosSimulatorArm64", libs.androidx.room.compiler)
-    add("kspIosX64", libs.androidx.room.compiler)
-    add("kspIosArm64", libs.androidx.room.compiler)
-    add("kspDesktop", libs.androidx.room.compiler)
+    add("kspAndroid", "androidx.room:room-compiler:2.8.2")
+    add("kspIosSimulatorArm64", "androidx.room:room-compiler:2.8.2")
+    add("kspIosX64", "androidx.room:room-compiler:2.8.2")
+    add("kspIosArm64", "androidx.room:room-compiler:2.8.2")
+    add("kspDesktop", "androidx.room:room-compiler:2.8.2")
 }
+
+// CONFIGURACIÓN PARA JITPACK
+// JitPack automáticamente publica todos los targets de KMP
+// No necesitas configurar publishing manualmente

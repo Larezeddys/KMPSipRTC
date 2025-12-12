@@ -7,28 +7,17 @@ import androidx.room.PrimaryKey
 import com.eddyslarez.kmpsiprtc.data.models.CallDirections
 import com.eddyslarez.kmpsiprtc.data.models.CallTypes
 import com.eddyslarez.kmpsiprtc.utils.formatDuration
-import kotlinx.datetime.Clock
+import kotlin.time.ExperimentalTime
 
 @Entity(
     tableName = "call_logs",
-    foreignKeys = [
-        ForeignKey(
-            entity = SipAccountEntity::class,
-            parentColumns = ["id"],
-            childColumns = ["accountId"],
-            onDelete = ForeignKey.CASCADE
-        )
-    ],
     indices = [
         Index(value = ["accountId"]),
-        Index(value = ["startTime"]),
         Index(value = ["phoneNumber"]),
-        Index(value = ["callType"]),
-        Index(value = ["direction"]),
-        Index(value = ["isRead"])
+        Index(value = ["startTime"])
     ]
 )
-data class CallLogEntity(
+data class CallLogEntity @OptIn(ExperimentalTime::class) constructor(
     @PrimaryKey
     val id: String,
     val accountId: String,
@@ -57,16 +46,6 @@ data class CallLogEntity(
     val jitter: Int = 0,
 
     // Metadatos
-    val createdAt: Long = Clock.System.now().toEpochMilliseconds(),
-    val updatedAt: Long = Clock.System.now().toEpochMilliseconds()
-) {
-    fun getFormattedDuration(): String {
-        return formatDuration(duration)
-    }
-
-
-    fun isMissedCall(): Boolean = callType == CallTypes.MISSED
-    fun isSuccessfulCall(): Boolean = callType == CallTypes.SUCCESS
-    fun isIncomingCall(): Boolean = direction == CallDirections.INCOMING
-    fun isOutgoingCall(): Boolean = direction == CallDirections.OUTGOING
-}
+    val createdAt: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
+    val updatedAt: Long = kotlin.time.Clock.System.now().toEpochMilliseconds()
+)

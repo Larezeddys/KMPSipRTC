@@ -33,7 +33,7 @@ fun getTemporaryDatabaseBuilder(): RoomDatabase.Builder<SipDatabase> {
     )
 }
 
-actual fun getDatabaseBuilder(context: Any?): RoomDatabase.Builder<SipDatabase> {
+actual fun getDatabaseBuilder(): RoomDatabase.Builder<SipDatabase> {
     val dbFile = getDatabaseFile()
     return Room.databaseBuilder<SipDatabase>(
         name = dbFile.absolutePath

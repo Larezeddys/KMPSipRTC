@@ -26,11 +26,12 @@ import com.eddyslarez.kmpsiprtc.data.models.RegistrationState
 import com.eddyslarez.kmpsiprtc.repository.CallLogWithContact
 import com.eddyslarez.kmpsiprtc.repository.GeneralStatistics
 import com.eddyslarez.kmpsiprtc.repository.SipRepository
-import kotlinx.atomicfu.locks.SynchronizedObject
+import com.eddyslarez.kmpsiprtc.utils.Lock
+import com.eddyslarez.kmpsiprtc.utils.synchronized
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
-import kotlinx.datetime.Clock
+import kotlin.time.ExperimentalTime
 
 class DatabaseManager private constructor() {
 
@@ -52,7 +53,7 @@ class DatabaseManager private constructor() {
     companion object {
         @Volatile
         private var INSTANCE: DatabaseManager? = null
-        private val LOCK = SynchronizedObject()
+        private val LOCK =  Lock()
 
         fun getInstance(): DatabaseManager {
             return INSTANCE ?: synchronized(LOCK) {
@@ -62,31 +63,35 @@ class DatabaseManager private constructor() {
                 }
             }
         }
+    }
 
-        /**
-         * Método para verificar si existe una instancia
-         */
-        fun hasInstance(): Boolean {
-            return INSTANCE != null
-        }
-
-        /**
-         * Obtiene instancia existente sin crear una nueva
-         */
-        fun getExistingInstance(): DatabaseManager? {
-            return INSTANCE
+    private fun ensureInitialized() {
+        if (!isInitialized) {
+            scope.launch {
+                try {
+                    // Forzar apertura de la base de datos
+                    val stats = getGeneralStatistics()
+                    log.d(tag = TAG) { "Database initialized with ${stats.totalAccounts} accounts" }
+                    isInitialized = true
+                } catch (e: Exception) {
+                    log.e(tag = TAG) { "Error initializing database: ${e.message}" }
+                    e.printStackTrace()
+                }
+            }
         }
     }
+
 
     // === OPERACIONES DE CUENTAS SIP ===
 
     /**
      * Obtiene cuentas que deberían estar registradas pero pueden estar desconectadas
      */
+    @OptIn(ExperimentalTime::class)
     suspend fun getAccountsForRecovery(): List<SipAccountEntity> {
         return try {
             val activeAccounts = getActiveSipAccounts().first()
-            val now = Clock.System.now().toEpochMilliseconds()
+            val now = kotlin.time.Clock.System.now().toEpochMilliseconds()
 
             // Filtrar cuentas que:
             // 1. Están activas
@@ -123,10 +128,11 @@ class DatabaseManager private constructor() {
     /**
      * Obtiene estadísticas de conectividad de cuentas
      */
+    @OptIn(ExperimentalTime::class)
     suspend fun getAccountConnectivityStats(): Map<String, Any> {
         return try {
             val activeAccounts = getActiveSipAccounts().first()
-            val now = Clock.System.now().toEpochMilliseconds()
+            val now = kotlin.time.Clock.System.now().toEpochMilliseconds()
 
             val stats = activeAccounts.groupBy { account ->
                 when {
@@ -296,7 +302,8 @@ class DatabaseManager private constructor() {
     /**
      * Finaliza llamada
      */
-    suspend fun endCall(callId: String, endTime: Long = Clock.System.now().toEpochMilliseconds()) {
+    @OptIn(ExperimentalTime::class)
+    suspend fun endCall(callId: String, endTime: Long = kotlin.time.Clock.System.now().toEpochMilliseconds()) {
         repository.endCall(callId, endTime)
     }
 
@@ -414,24 +421,6 @@ class DatabaseManager private constructor() {
         log.d(tag = TAG) { "DatabaseManager instance created" }
     }
 
-    // === MÉTODOS DE UTILIDAD ===
-
-    private fun ensureInitialized() {
-        if (!isInitialized) {
-            scope.launch {
-                try {
-                    // Verificar integridad de la base de datos
-                    val stats = getGeneralStatistics()
-                    log.d(tag = TAG) { "Database initialized with ${stats.totalAccounts} accounts and ${stats.totalCalls} calls" }
-                    isInitialized = true
-                } catch (e: Exception) {
-                    log.e(tag = TAG) { "Error initializing database: ${e.message}" }
-                    // Intentar recrear la base de datos si hay problemas
-                    recoverDatabase()
-                }
-            }
-        }
-    }
 
     private suspend fun recoverDatabase() {
         try {
@@ -512,7 +501,7 @@ class DatabaseManager private constructor() {
                 // Cerrar la base de datos
                 database.close()
 
-                synchronized(LOCK) {
+                synchronized(LOCK ) {
                     INSTANCE = null
                     isInitialized = false
                 }

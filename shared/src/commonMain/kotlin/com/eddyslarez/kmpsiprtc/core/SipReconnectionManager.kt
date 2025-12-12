@@ -20,12 +20,12 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
-import kotlinx.datetime.Clock
 import kotlin.math.min
 import kotlin.random.Random
 import kotlin.text.get
 import kotlin.text.set
 import kotlin.time.Duration.Companion.seconds
+import kotlin.time.ExperimentalTime
 
 class SipReconnectionManager(
     private val messageHandler: SipMessageHandler,
@@ -100,13 +100,14 @@ class SipReconnectionManager(
             "reconnectionInProgress" to (reconnectionJob?.isActive == true),
             "networkStabilityJobActive" to (networkStabilityJob?.isActive == true),
             "reconnectionAttempts" to reconnectionAttemptsCopy,
-            "cachedAccountsCount" to cachedAccounts.size(), // suspend
-            "accountRecoveryAttempts" to accountRecoveryAttempts.get(), // suspend
+            "cachedAccountsCount" to cachedAccounts.size(),
+            "accountRecoveryAttempts" to accountRecoveryAttempts.get(),
             "lastAccountSync" to lastAccountSync,
             "cachedAccountsKeys" to cachedKeys
         )
     }
 
+    @OptIn(ExperimentalTime::class)
     private suspend fun syncAccountsFromCoreManager() {
         try {
             val activeAccounts = sipCoreManager.activeAccounts
@@ -114,7 +115,7 @@ class SipReconnectionManager(
             for ((key, value) in activeAccounts) {
                 cachedAccounts.put(key, value)
             }
-            lastAccountSync = Clock.System.now().toEpochMilliseconds()
+            lastAccountSync = kotlin.time.Clock.System.now().toEpochMilliseconds()
             log.d(tag = TAG) { "Synced ${cachedAccounts} accounts from SipCoreManager" }
         } catch (e: Exception) {
             log.e(tag = TAG) { "Error syncing accounts from SipCoreManager: ${e.message}" }
@@ -269,45 +270,40 @@ class SipReconnectionManager(
     suspend fun reconnectAccountWithRetry(accountInfo: AccountInfo): Boolean {
         val accountKey = "${accountInfo.username}@${accountInfo.domain}"
         if (!networkManager.isNetworkAvailable()) return false
+
         var attempts = reconnectionAttempts[accountKey] ?: 0
 
-        while (attempts < MAX_RECONNECTION_ATTEMPTS && !accountInfo.isRegistered.value && networkManager.isNetworkAvailable()) {
+        while (attempts < MAX_RECONNECTION_ATTEMPTS && !accountInfo.isRegistered.value) {
             attempts++
             reconnectionAttempts[accountKey] = attempts
+
             try {
-                sipCoreManager.updateRegistrationState(accountKey, RegistrationState.IN_PROGRESS)
-                cleanupExistingConnection(accountInfo)
-                val success = reconnectionListener?.onReconnectAccount(accountInfo) ?: false
-                if (success) {
-                    if (waitForReconnectionResult(accountInfo, 15_000L)) {
-                        cachedAccounts.put(accountKey, accountInfo)
-                        reconnectionAttempts.remove(accountKey)
-                        return true
-                    }
+                val success = sipCoreManager.sharedWebSocketManager.registerAccount(
+                    accountInfo,
+                    sipCoreManager.isAppInBackground
+                )
+
+                if (success && waitForReconnectionResult(accountInfo, 15_000L)) {
+                    reconnectionAttempts.remove(accountKey)
+                    return true
                 }
+
                 delay(calculateReconnectionDelay(attempts))
-            } catch (_: Exception) {
+
+            } catch (e: Exception) {
                 delay(calculateReconnectionDelay(attempts))
             }
         }
-        reconnectionAttempts.remove(accountKey)
-        sipCoreManager.updateRegistrationState(accountKey, RegistrationState.FAILED)
+
         return false
     }
 
-    private suspend fun cleanupExistingConnection(accountInfo: AccountInfo) {
-        accountInfo.webSocketClient.value?.let { ws ->
-            if (ws.isConnected()) {
-                ws.close()
-                delay(1500)
-            }
-        }
-    }
 
+    @OptIn(ExperimentalTime::class)
     private suspend fun waitForReconnectionResult(accountInfo: AccountInfo, timeoutMs: Long): Boolean {
-        val start = Clock.System.now().toEpochMilliseconds()
+        val start = kotlin.time.Clock.System.now().toEpochMilliseconds()
         val checkInterval = 250L
-        while (Clock.System.now().toEpochMilliseconds() - start < timeoutMs) {
+        while (kotlin.time.Clock.System.now().toEpochMilliseconds() - start < timeoutMs) {
             if (accountInfo.isRegistered.value) return true
             if (!networkManager.isNetworkAvailable()) return false
             delay(checkInterval)

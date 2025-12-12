@@ -23,6 +23,18 @@ object SipMessageParser {
         return statusLine?.substringAfter(" ", "")?.substringAfter(" ", "")?.trim() ?: "Unknown error"
     }
 
+    /**
+     * Extrae el Call-ID de un mensaje SIP
+     */
+    fun extractCallId(message: String): String {
+        return try {
+            val regex = Regex("""Call-ID:\s*(.+)""", RegexOption.IGNORE_CASE)
+            val match = regex.find(message)
+            match?.groups?.get(1)?.value?.trim() ?: ""
+        } catch (e: Exception) {
+            ""
+        }
+    }
 
     fun parseRetryAfter(response: String): Int? {
         val regex = Regex("(?i)Retry-After:\\s*(\\d+)")

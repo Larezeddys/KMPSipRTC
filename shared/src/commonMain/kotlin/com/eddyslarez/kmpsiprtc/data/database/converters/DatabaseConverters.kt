@@ -7,9 +7,7 @@ class DatabaseConverters {
 
     // CallState converters
     @TypeConverter
-    fun fromCallState(value: CallState): String {
-        return value.name
-    }
+    fun fromCallState(value: CallState): String = value.name
 
     @TypeConverter
     fun toCallState(value: String): CallState {
@@ -22,9 +20,7 @@ class DatabaseConverters {
 
     // CallDirections converters
     @TypeConverter
-    fun fromCallDirection(value: CallDirections): String {
-        return value.name
-    }
+    fun fromCallDirection(value: CallDirections): String = value.name
 
     @TypeConverter
     fun toCallDirection(value: String): CallDirections {
@@ -37,9 +33,7 @@ class DatabaseConverters {
 
     // CallTypes converters
     @TypeConverter
-    fun fromCallType(value: CallTypes): String {
-        return value.name
-    }
+    fun fromCallType(value: CallTypes): String = value.name
 
     @TypeConverter
     fun toCallType(value: String): CallTypes {
@@ -52,9 +46,7 @@ class DatabaseConverters {
 
     // RegistrationState converters
     @TypeConverter
-    fun fromRegistrationState(value: RegistrationState): String {
-        return value.name
-    }
+    fun fromRegistrationState(value: RegistrationState): String = value.name
 
     @TypeConverter
     fun toRegistrationState(value: String): RegistrationState {
@@ -67,9 +59,7 @@ class DatabaseConverters {
 
     // CallErrorReason converters
     @TypeConverter
-    fun fromCallErrorReason(value: CallErrorReason): String {
-        return value.name
-    }
+    fun fromCallErrorReason(value: CallErrorReason): String = value.name
 
     @TypeConverter
     fun toCallErrorReason(value: String): CallErrorReason {

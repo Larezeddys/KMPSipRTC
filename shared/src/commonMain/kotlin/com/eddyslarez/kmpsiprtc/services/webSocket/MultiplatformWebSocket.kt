@@ -32,4 +32,4 @@ interface MultiplatformWebSocket {
     }
 }
 
-expect fun createWebSocket(url: String): MultiplatformWebSocket
+expect fun createWebSocket(url: String, headers: Map<String, String>): MultiplatformWebSocket

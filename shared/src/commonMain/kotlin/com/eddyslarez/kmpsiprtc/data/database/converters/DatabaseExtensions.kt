@@ -8,6 +8,7 @@ import kotlinx.datetime.Instant
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
 import kotlin.jvm.JvmName
+import kotlin.time.ExperimentalTime
 
 /**
  * Convierte CallLogEntity a CallLog (modelo de la librería)
@@ -68,6 +69,7 @@ fun List<CallLogEntity>.toCallLogs(): List<CallLog> {
     return this.map { it.toCallLog() }
 }
 
+@OptIn(ExperimentalTime::class)
 private fun formatStartDate(timestamp: Long): String {
     val instant = Instant.fromEpochMilliseconds(timestamp)
     val localDateTime = instant.toLocalDateTime(TimeZone.currentSystemDefault())

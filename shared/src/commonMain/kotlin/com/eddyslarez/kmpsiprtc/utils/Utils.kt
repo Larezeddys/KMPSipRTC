@@ -2,17 +2,33 @@ package com.eddyslarez.kmpsiprtc.utils
 
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.datetime.Clock
 import okio.ByteString.Companion.encodeUtf8
 import kotlin.random.Random
+import kotlin.time.ExperimentalTime
 
+@OptIn(ExperimentalTime::class)
 fun generateId(): String {
-    return "${Clock.System.now().toEpochMilliseconds()}-${Random.nextInt(100000)}"
+    return "${kotlin.time.Clock.System.now().toEpochMilliseconds()}-${Random.nextInt(100000)}"
 }
 
+@OptIn(ExperimentalTime::class)
 fun generateSipTag(): String {
-    return Clock.System.now().toEpochMilliseconds().toString() + "-" + (1000..9999).random()
+    return kotlin.time.Clock.System.now().toEpochMilliseconds().toString() + "-" + (1000..9999).random()
 }
+
+fun formatTime(minutes: Long, seconds: Long): String {
+    val formattedMinutes = minutes.twoDigits()
+    val formattedSeconds = seconds.twoDigits()
+    return "$formattedMinutes:$formattedSeconds"
+}
+
+fun formatTimeWithHours(hours: Long, minutes: Long, seconds: Long): String {
+    val formattedHours = hours.twoDigits()
+    val formattedMinutes = minutes.twoDigits()
+    val formattedSeconds = seconds.twoDigits()
+    return "$formattedHours:$formattedMinutes:$formattedSeconds"
+}
+
 fun formatDuration(duration: Int): String {
     val hours = duration / 3600
     val minutes = (duration % 3600) / 60
@@ -32,8 +48,8 @@ fun md5(input: String): String {
     // Real implementation would use platform-specific crypto libraries
     return input.encodeUtf8().md5().hex()
 }
+private fun Long.twoDigits(): String = if (this < 10) "0$this" else "$this"
 private fun Int.twoDigits(): String = if (this < 10) "0$this" else "$this"
-
 class ConcurrentMap<K, V> {
     private val mutex = Mutex()
     private val map = mutableMapOf<K, V>()

@@ -1,53 +1,11 @@
 package com.eddyslarez.kmpsiprtc.services.webrtc
 
-import com.eddyslarez.kmpsiprtc.data.models.AccountInfo
 import com.eddyslarez.kmpsiprtc.data.models.AudioDevice
 import com.eddyslarez.kmpsiprtc.data.models.AudioUnit
 import com.eddyslarez.kmpsiprtc.data.models.AudioUnitTypes
+import com.eddyslarez.kmpsiprtc.data.models.RecordingResult
 import com.eddyslarez.kmpsiprtc.data.models.SdpType
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
-import kotlinx.coroutines.flow.StateFlow
-
-//interface WebRtcManager {
-//
-//    val isInitialized: Boolean
-//    val availableAudioDevices: StateFlow<Set<AudioDevice>>
-//    val currentAudioDevice: StateFlow<AudioDevice?>
-//
-//    fun initialize()
-//    fun dispose()
-//
-//    // Audio Management
-//    fun prepareAudioForCall()
-//    fun onBluetoothConnectionChanged(isConnected: Boolean)
-//    fun refreshAudioDevicesWithBluetoothPriority()
-//    fun applyAudioRouteChange(audioUnitType: AudioUnitTypes): Boolean
-//    fun getAvailableAudioUnits(): Set<AudioUnit>
-//    fun getCurrentActiveAudioUnit(): AudioUnit?
-//
-//    // WebRTC Core
-//    fun createOffer(onSuccess: (String) -> Unit, onError: (String) -> Unit)
-//    fun createAnswer(remoteSdp: String, onSuccess: (String) -> Unit, onError: (String) -> Unit)
-//    fun setRemoteDescription(
-//        sdp: String,
-//        type: String,
-//        onSuccess: () -> Unit,
-//        onError: (String) -> Unit
-//    )
-//
-//    fun addIceCandidate(candidate: String, sdpMid: String, sdpMLineIndex: Int)
-//    fun closePeerConnection()
-//
-//    fun setListener(listener: WebRtcEventListener)
-//
-//
-//    interface WebRtcEventListener {
-//        fun onIceCandidate(candidate: String, sdpMid: String, sdpMLineIndex: Int)
-//        fun onConnectionStateChange(state: WebRtcConnectionState)
-//        fun onRemoteAudioTrack()
-//        fun onAudioDeviceChanged(device: AudioDevice?)
-//    }
-//}
 
 interface WebRtcManager {
     /**
@@ -71,8 +29,9 @@ interface WebRtcManager {
     fun getActiveAudioRoute(): AudioUnitTypes?
 
     fun getAvailableAudioRoutes(): Set<AudioUnitTypes>
-
-
+    fun startCallRecording(callId: String)
+    suspend fun stopCallRecording(): RecordingResult?
+    fun isRecordingCall(): Boolean
     /**
      * Create an SDP answer in response to an offer
      * @param accountInfo The current account information

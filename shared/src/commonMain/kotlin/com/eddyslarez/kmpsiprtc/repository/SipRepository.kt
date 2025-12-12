@@ -17,7 +17,7 @@ import com.eddyslarez.kmpsiprtc.utils.generateId
 import kotlinx.coroutines.flow.map
 import com.eddyslarez.kmpsiprtc.data.database.SipDatabase
 import kotlinx.coroutines.flow.Flow
-import kotlinx.datetime.Clock
+import kotlin.time.ExperimentalTime
 
 class SipRepository(private val database: SipDatabase) {
 
@@ -38,6 +38,7 @@ class SipRepository(private val database: SipDatabase) {
         return appConfigDao.getConfigFlow()
     }
 
+    @OptIn(ExperimentalTime::class)
     suspend fun createOrUpdateAppConfig(
         incomingRingtoneUri: String? = null,
         outgoingRingtoneUri: String? = null,
@@ -60,7 +61,7 @@ class SipRepository(private val database: SipDatabase) {
                 enableLogs = enableLogs ?: existingConfig.enableLogs,
                 enableAutoReconnect = enableAutoReconnect ?: existingConfig.enableAutoReconnect,
                 pingIntervalMs = pingIntervalMs ?: existingConfig.pingIntervalMs,
-                updatedAt = Clock.System.now().toEpochMilliseconds()
+                updatedAt = kotlin.time.Clock.System.now().toEpochMilliseconds()
             )
         } else {
             AppConfigEntity(
@@ -87,12 +88,13 @@ class SipRepository(private val database: SipDatabase) {
         appConfigDao.updateOutgoingRingtoneUri(uri)
     }
 
+    @OptIn(ExperimentalTime::class)
     suspend fun updateRingtoneUris(incomingUri: String?, outgoingUri: String?) {
         val existingConfig = appConfigDao.getConfig() ?: AppConfigEntity()
         val updatedConfig = existingConfig.copy(
             incomingRingtoneUri = incomingUri,
             outgoingRingtoneUri = outgoingUri,
-            updatedAt = Clock.System.now().toEpochMilliseconds()
+            updatedAt = kotlin.time.Clock.System.now().toEpochMilliseconds()
         )
         appConfigDao.insertConfig(updatedConfig)
     }
@@ -111,6 +113,7 @@ class SipRepository(private val database: SipDatabase) {
         return sipAccountDao.getAccountByCredentials(username, domain)
     }
 
+    @OptIn(ExperimentalTime::class)
     suspend fun createOrUpdateAccount(
         username: String,
         password: String,
@@ -127,7 +130,7 @@ class SipRepository(private val database: SipDatabase) {
                 displayName = displayName ?: existingAccount.displayName,
                 pushToken = pushToken ?: existingAccount.pushToken,
                 pushProvider = pushProvider ?: existingAccount.pushProvider,
-                updatedAt = Clock.System.now().toEpochMilliseconds()
+                updatedAt = kotlin.time.Clock.System.now().toEpochMilliseconds()
             )
         } else {
             SipAccountEntity(
@@ -244,7 +247,8 @@ class SipRepository(private val database: SipDatabase) {
     }
 
     suspend fun clearCallLogs() {
-        callLogDao.deleteAllCallLogs()
+
+//        callLogDao.deleteAllCallLogs()
     }
 
     // === OPERACIONES DE DATOS DE LLAMADAS ===
@@ -286,6 +290,7 @@ class SipRepository(private val database: SipDatabase) {
         return callDataEntity
     }
 
+    @OptIn(ExperimentalTime::class)
     suspend fun updateCallState(
         callId: String,
         newState: CallState,
@@ -303,7 +308,7 @@ class SipRepository(private val database: SipDatabase) {
             callId = callId,
             state = newState,
             previousState = previousState,
-            timestamp = Clock.System.now().toEpochMilliseconds(),
+            timestamp = kotlin.time.Clock.System.now().toEpochMilliseconds(),
             errorReason = errorReason,
             sipCode = sipCode,
             sipReason = sipReason,
@@ -313,7 +318,8 @@ class SipRepository(private val database: SipDatabase) {
         callStateHistoryDao.insertStateHistory(stateHistory)
     }
 
-    suspend fun endCall(callId: String, endTime: Long = Clock.System.now().toEpochMilliseconds()) {
+    @OptIn(ExperimentalTime::class)
+    suspend fun endCall(callId: String, endTime: Long = kotlin.time.Clock.System.now().toEpochMilliseconds()) {
         callDataDao.endCall(callId, endTime)
         updateCallState(callId, CallState.ENDED)
     }
@@ -328,6 +334,7 @@ class SipRepository(private val database: SipDatabase) {
         return contactDao.searchContacts(query)
     }
 
+    @OptIn(ExperimentalTime::class)
     suspend fun createOrUpdateContact(
         phoneNumber: String,
         displayName: String,
@@ -345,7 +352,7 @@ class SipRepository(private val database: SipDatabase) {
                 lastName = lastName ?: existingContact.lastName,
                 email = email ?: existingContact.email,
                 company = company ?: existingContact.company,
-                updatedAt = Clock.System.now().toEpochMilliseconds()
+                updatedAt = kotlin.time.Clock.System.now().toEpochMilliseconds()
             )
         } else {
             ContactEntity(
@@ -393,8 +400,9 @@ class SipRepository(private val database: SipDatabase) {
 
     // === LIMPIEZA ===
 
+    @OptIn(ExperimentalTime::class)
     suspend fun cleanupOldData(daysToKeep: Int = 30) {
-        val threshold = Clock.System.now().toEpochMilliseconds() - (daysToKeep * 24 * 60 * 60 * 1000L)
+        val threshold = kotlin.time.Clock.System.now().toEpochMilliseconds() - (daysToKeep * 24 * 60 * 60 * 1000L)
         callLogDao.deleteCallLogsOlderThan(threshold)
         callStateHistoryDao.deleteStateHistoryOlderThan(threshold)
         callDataDao.deleteInactiveCallsOlderThan(threshold)

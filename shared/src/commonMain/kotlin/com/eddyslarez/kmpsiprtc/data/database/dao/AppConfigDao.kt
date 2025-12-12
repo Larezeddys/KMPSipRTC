@@ -8,7 +8,7 @@ import androidx.room.Update
 import com.eddyslarez.kmpsiprtc.data.database.entities.AppConfigEntity
 
 import kotlinx.coroutines.flow.Flow
-import kotlinx.datetime.Clock
+import kotlin.time.ExperimentalTime
 
 @Dao
 interface AppConfigDao {
@@ -25,59 +25,67 @@ interface AppConfigDao {
     @Update
     suspend fun updateConfig(config: AppConfigEntity)
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE app_configuration SET incomingRingtoneUri = :uri, updatedAt = :timestamp WHERE id = :configId")
     suspend fun updateIncomingRingtoneUri(
         uri: String?,
-        timestamp: Long = Clock.System.now().toEpochMilliseconds(),
+        timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
         configId: String = "default_config"
     )
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE app_configuration SET outgoingRingtoneUri = :uri, updatedAt = :timestamp WHERE id = :configId")
     suspend fun updateOutgoingRingtoneUri(
         uri: String?,
-        timestamp: Long = Clock.System.now().toEpochMilliseconds(),
+        timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
         configId: String = "default_config"
     )
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE app_configuration SET defaultDomain = :domain, updatedAt = :timestamp WHERE id = :configId")
     suspend fun updateDefaultDomain(
         domain: String,
-        timestamp: Long = Clock.System.now().toEpochMilliseconds(),
+        timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
         configId: String = "default_config"
     )
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE app_configuration SET webSocketUrl = :url, updatedAt = :timestamp WHERE id = :configId")
     suspend fun updateWebSocketUrl(
         url: String,
-        timestamp: Long = Clock.System.now().toEpochMilliseconds(),
+        timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
         configId: String = "default_config"
     )
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE app_configuration SET userAgent = :userAgent, updatedAt = :timestamp WHERE id = :configId")
     suspend fun updateUserAgent(
         userAgent: String,
-        timestamp: Long = Clock.System.now().toEpochMilliseconds(),
+        timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
         configId: String = "default_config"
     )
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE app_configuration SET enableLogs = :enable, updatedAt = :timestamp WHERE id = :configId")
     suspend fun updateEnableLogs(
         enable: Boolean,
-        timestamp: Long = Clock.System.now().toEpochMilliseconds(),
+        timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
         configId: String = "default_config"
     )
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE app_configuration SET enableAutoReconnect = :enable, updatedAt = :timestamp WHERE id = :configId")
     suspend fun updateEnableAutoReconnect(
         enable: Boolean,
-        timestamp: Long = Clock.System.now().toEpochMilliseconds(),
+        timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
         configId: String = "default_config"
     )
 
+    @OptIn(ExperimentalTime::class)
     @Query("UPDATE app_configuration SET pingIntervalMs = :interval, updatedAt = :timestamp WHERE id = :configId")
     suspend fun updatePingInterval(
         interval: Long,
-        timestamp: Long = Clock.System.now().toEpochMilliseconds(),
+        timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
         configId: String = "default_config"
     )
 

@@ -1,7 +1,7 @@
 package com.eddyslarez.kmpsiprtc.data.models
 
-import kotlinx.datetime.Clock
 import kotlinx.serialization.Serializable
+import kotlin.time.ExperimentalTime
 
 @Serializable
 enum class CallState {
@@ -45,15 +45,16 @@ enum class CallErrorReason {
     NETWORK_ERROR,
     AUTHENTICATION_FAILED,
     SERVER_ERROR,
+    MEDIA_ERROR,
     UNKNOWN
 }
 
 @Serializable
-data class CallStateInfo(
+data class CallStateInfo @OptIn(ExperimentalTime::class) constructor(
     val state: CallState,
     val previousState: CallState? = null,
     val errorReason: CallErrorReason = CallErrorReason.NONE,
-    val timestamp: Long = Clock.System.now().toEpochMilliseconds(),
+    val timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
     val sipCode: Int? = null,
     val sipReason: String? = null,
     val callId: String = "",
@@ -100,6 +101,7 @@ object SipErrorMapper {
             CallErrorReason.AUTHENTICATION_FAILED -> "Error de autenticación"
             CallErrorReason.SERVER_ERROR -> "Error del servidor"
             CallErrorReason.UNKNOWN -> "Error desconocido"
+            CallErrorReason.MEDIA_ERROR -> "Error de medios"
         }
     }
 }

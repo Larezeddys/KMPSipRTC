@@ -1,40 +1,97 @@
 package com.eddyslarez.kmpsiprtc.services.webSocket
 
+import com.eddyslarez.kmpsiprtc.platform.log
 import okhttp3.*
 import okio.ByteString
 import java.util.*
+import java.util.concurrent.TimeUnit
 import kotlin.collections.iterator
 import kotlin.concurrent.timer
 
-actual fun createWebSocket(url: String): MultiplatformWebSocket = AndroidWebSocket(url)
+actual fun createWebSocket(url: String, headers: Map<String, String>): MultiplatformWebSocket = AndroidWebSocket(url,headers)
 
-class AndroidWebSocket(private val url: String) : MultiplatformWebSocket {
+class AndroidWebSocket(private val url: String, private val headers: Map<String, String>) : MultiplatformWebSocket {
     private var listener: MultiplatformWebSocket.Listener? = null
     private var webSocket: WebSocket? = null
     private var pingTimer: Timer? = null
     private var renewalTimer: Timer? = null
     private var expirationMap = mutableMapOf<String, Long>()
+    private var isConnecting = false
+    private var client: OkHttpClient? = null
 
     override fun connect() {
-        val client = OkHttpClient()
-        val request = Request.Builder().url(url).build()
-        webSocket = client.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(ws: WebSocket, response: Response) {
-                listener?.onOpen()
+        if (isConnecting) {
+            log.w(tag = "AndroidWebSocket") { "Already connecting, ignoring duplicate request" }
+            return
+        }
+
+        isConnecting = true
+
+        try {
+            // Crear cliente OkHttp con configuración robusta
+            client = OkHttpClient.Builder()
+                .readTimeout(30, TimeUnit.SECONDS)
+                .writeTimeout(30, TimeUnit.SECONDS)
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .pingInterval(20, TimeUnit.SECONDS)
+                .retryOnConnectionFailure(true)
+                .build()
+
+            // Construir petición con headers
+            val requestBuilder = Request.Builder().url(url)
+
+            // Agregar headers
+            headers.forEach { (key, value) ->
+                requestBuilder.addHeader(key, value)
+                log.d(tag = "AndroidWebSocket") { "Adding header: $key = $value" }
             }
 
-            override fun onMessage(ws: WebSocket, text: String) {
-                listener?.onMessage(text)
-            }
+            val request = requestBuilder.build()
 
-            override fun onClosed(ws: WebSocket, code: Int, reason: String) {
-                listener?.onClose(code, reason)
-            }
+            log.d(tag = "AndroidWebSocket") { "Connecting to: $url" }
 
-            override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                listener?.onError(Exception(t))
-            }
-        })
+            // Crear WebSocket
+            webSocket = client?.newWebSocket(request, object : WebSocketListener() {
+                override fun onOpen(ws: WebSocket, response: Response) {
+                    isConnecting = false
+                    log.d(tag = "AndroidWebSocket") {
+                        "✅ WebSocket opened. Protocol: ${response.protocol}"
+                    }
+                    listener?.onOpen()
+                }
+
+                override fun onMessage(ws: WebSocket, text: String) {
+                    log.d(tag = "AndroidWebSocket") {
+                        "✅ WebSocket onMessage. : ${ws} , mensaje {$text}"
+                    }
+                    listener?.onMessage(text)
+                }
+
+                override fun onMessage(ws: WebSocket, bytes: ByteString) {
+                    // Respuesta a PONG
+                    listener?.onPong(System.currentTimeMillis())
+                }
+
+                override fun onClosed(ws: WebSocket, code: Int, reason: String) {
+                    isConnecting = false
+                    log.d(tag = "AndroidWebSocket") { "WebSocket closed: $code - $reason" }
+                    listener?.onClose(code, reason)
+                }
+
+                override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
+                    isConnecting = false
+                    log.e(tag = "AndroidWebSocket") {
+                        "❌ WebSocket failure: ${t.message}. Response: ${response?.code}"
+                    }
+                    listener?.onError(Exception(t))
+                }
+            })
+
+        } catch (e: Exception) {
+            isConnecting = false
+            log.e(tag = "AndroidWebSocket") { "❌ Error creating WebSocket: ${e.message}" }
+            listener?.onError(e)
+        }
     }
 
     override fun send(message: String) {
@@ -42,9 +99,21 @@ class AndroidWebSocket(private val url: String) : MultiplatformWebSocket {
     }
 
     override fun close(code: Int, reason: String) {
-        webSocket?.close(code, reason)
-        stopPingTimer()
-        stopRegistrationRenewalTimer()
+        try {
+            isConnecting = false
+            stopPingTimer()
+            stopRegistrationRenewalTimer()
+
+            webSocket?.close(code, reason)
+            webSocket = null
+
+            // Cerrar el cliente OkHttp
+            client?.dispatcher?.executorService?.shutdown()
+            client = null
+
+        } catch (e: Exception) {
+            log.e(tag = "AndroidWebSocket") { "Error closing WebSocket: ${e.message}" }
+        }
     }
 
     override fun isConnected(): Boolean = webSocket != null

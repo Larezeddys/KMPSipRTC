@@ -6,26 +6,17 @@ import androidx.room.Index
 import androidx.room.PrimaryKey
 import com.eddyslarez.kmpsiprtc.data.models.CallDirections
 import com.eddyslarez.kmpsiprtc.data.models.CallState
-import kotlinx.datetime.Clock
+import kotlin.time.ExperimentalTime
 
 @Entity(
     tableName = "call_data",
-    foreignKeys = [
-        ForeignKey(
-            entity = SipAccountEntity::class,
-            parentColumns = ["id"],
-            childColumns = ["accountId"],
-            onDelete = ForeignKey.CASCADE
-        )
-    ],
     indices = [
-        Index(value = ["accountId"]),
         Index(value = ["callId"], unique = true),
-        Index(value = ["currentState"]),
+        Index(value = ["accountId"]),
         Index(value = ["isActive"])
     ]
 )
-data class CallDataEntity(
+data class CallDataEntity @OptIn(ExperimentalTime::class) constructor(
     @PrimaryKey
     val callId: String,
     val accountId: String,
@@ -81,34 +72,6 @@ data class CallDataEntity(
     // Metadatos
     val md5Hash: String = "",
     val sipName: String = "",
-    val createdAt: Long = Clock.System.now().toEpochMilliseconds(),
-    val updatedAt: Long = Clock.System.now().toEpochMilliseconds()
-) {
-    fun getDuration(): Long {
-        return if (endTime != null && connectTime != null) {
-            endTime - connectTime
-        } else if (connectTime != null) {
-            Clock.System.now().toEpochMilliseconds() - connectTime
-        } else {
-            0L
-        }
-    }
-
-    fun getRemoteParty(): String {
-        return when (direction) {
-            CallDirections.OUTGOING -> toNumber
-            CallDirections.INCOMING -> fromNumber
-        }
-    }
-
-    fun getLocalParty(): String {
-        return when (direction) {
-            CallDirections.OUTGOING -> fromNumber
-            CallDirections.INCOMING -> toNumber
-        }
-    }
-
-    fun isConnected(): Boolean {
-        return currentState == CallState.CONNECTED || currentState == CallState.STREAMS_RUNNING
-    }
-}
+    val createdAt: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
+    val updatedAt: Long = kotlin.time.Clock.System.now().toEpochMilliseconds()
+)

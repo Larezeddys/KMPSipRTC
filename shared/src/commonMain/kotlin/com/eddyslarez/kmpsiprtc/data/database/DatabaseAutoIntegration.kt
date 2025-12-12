@@ -14,8 +14,6 @@ import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.repository.GeneralStatistics
 import com.eddyslarez.kmpsiprtc.services.calls.CallStateManager
 import com.eddyslarez.kmpsiprtc.services.calls.MultiCallManager
-import kotlinx.atomicfu.locks.SynchronizedObject
-import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
@@ -26,8 +24,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.datetime.Clock
 import kotlin.concurrent.Volatile
+import kotlin.time.ExperimentalTime
+import com.eddyslarez.kmpsiprtc.utils.Lock
+import com.eddyslarez.kmpsiprtc.utils.synchronized
 
 class DatabaseAutoIntegration private constructor(
     private val sipCoreManager: SipCoreManager
@@ -41,7 +41,7 @@ class DatabaseAutoIntegration private constructor(
     companion object {
         @Volatile
         private var INSTANCE: DatabaseAutoIntegration? = null
-        private val LOCK = SynchronizedObject()
+        private val LOCK = Lock()
 
         fun getInstance(
             sipCoreManager: SipCoreManager
@@ -81,6 +81,7 @@ class DatabaseAutoIntegration private constructor(
         }
     }
 
+    @OptIn(ExperimentalTime::class)
     private suspend fun syncRegistrationState(accountKey: String, state: RegistrationState) {
         try {
             val parts = accountKey.split("@")
@@ -107,7 +108,7 @@ class DatabaseAutoIntegration private constructor(
                     accountId = acc.id,
                     state = state,
                     expiry = if (state == RegistrationState.OK)
-                       Clock.System.now().toEpochMilliseconds()+ (3600 * 1000) // 1 hora
+                       kotlin.time.Clock.System.now().toEpochMilliseconds()+ (3600 * 1000) // 1 hora
                     else null
                 )
 
@@ -231,6 +232,7 @@ class DatabaseAutoIntegration private constructor(
         }
     }
 
+    @OptIn(ExperimentalTime::class)
     private suspend fun createCallHistory(
         account: SipAccountEntity,
         callData: CallData,
@@ -238,7 +240,7 @@ class DatabaseAutoIntegration private constructor(
     ) {
         try {
             val callType = determineCallType(callData, stateInfo)
-            val endTime = Clock.System.now().toEpochMilliseconds()
+            val endTime = kotlin.time.Clock.System.now().toEpochMilliseconds()
 
             databaseManager.createCallLog(
                 accountId = account.id,
@@ -259,6 +261,7 @@ class DatabaseAutoIntegration private constructor(
         }
     }
 
+    @OptIn(ExperimentalTime::class)
     private suspend fun handleCallError(
         account: SipAccountEntity,
         callData: CallData,
@@ -285,7 +288,7 @@ class DatabaseAutoIntegration private constructor(
                 accountId = account.id,
                 callData = callData,
                 callType = callType,
-                endTime = Clock.System.now().toEpochMilliseconds(),
+                endTime = kotlin.time.Clock.System.now().toEpochMilliseconds(),
                 sipCode = stateInfo.sipCode,
                 sipReason = stateInfo.sipReason
             )
