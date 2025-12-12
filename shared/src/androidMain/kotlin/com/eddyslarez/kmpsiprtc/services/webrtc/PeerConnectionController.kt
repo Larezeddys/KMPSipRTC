@@ -5,7 +5,9 @@ import android.os.Handler
 import android.os.Looper
 import com.eddyslarez.kmpsiprtc.data.models.*
 import com.eddyslarez.kmpsiprtc.platform.log
-import com.eddyslarez.kmpsiprtc.services.audio.AudioTrackRecorder
+import com.eddyslarez.kmpsiprtc.services.audio.AudioCaptureCallback
+import com.eddyslarez.kmpsiprtc.services.audio.AudioTrackCapture
+import com.eddyslarez.kmpsiprtc.services.audio.createRemoteAudioCapture
 import com.eddyslarez.kmpsiprtc.services.recording.CallRecorder
 import com.eddyslarez.kmpsiprtc.services.recording.createCallRecorder
 import kotlinx.coroutines.*
@@ -34,10 +36,11 @@ class PeerConnectionController(
     private var audioDeviceModule: AudioDeviceModule? = null
     private var isMuted = false
     private var currentConnectionState = WebRtcConnectionState.DISCONNECTED
+    private var remoteAudioCapture: AudioTrackCapture? = null
 
     private val eglBase = EglBase.create()
-    private var localAudioRecorder: AudioTrackRecorder? = null
-    private var remoteAudioRecorder: AudioTrackRecorder? = null
+//    private var localAudioRecorder: AudioTrackRecorder? = null
+//    private var remoteAudioRecorder: AudioTrackRecorder? = null
 
     private val iceServers = listOf(
         PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
@@ -208,7 +211,7 @@ class PeerConnectionController(
             try {
                 it.setEnabled(false)
                 // Detener captura anterior
-                localAudioRecorder?.stopCapture()
+                remoteAudioCapture?.stopCapture()
             } catch (e: Exception) {
                 log.w(TAG) { "Error disabling track: ${e.message}" }
             }
@@ -265,18 +268,38 @@ class PeerConnectionController(
      */
     private fun setupRemoteAudioCapture(track: AudioTrack) {
         try {
-            remoteAudioRecorder?.stopCapture()
+            remoteAudioCapture?.stopCapture()
 
-            remoteAudioRecorder =
-                AudioTrackRecorder(track) { audioData, bitsPerSample, sampleRate, channels, frames, timestampMs ->
-                    callRecorder?.captureRemoteAudio(audioData)
-                    log.d(TAG) { "🔊 Remote audio frame: ${audioData.size} bytes, $sampleRate Hz, $channels ch, $bitsPerSample bits, ts=$timestampMs" }
+            remoteAudioCapture = createRemoteAudioCapture(
+                remoteTrack = track,
+                callback = object : AudioCaptureCallback {
+                    override fun onAudioData(
+                        data: ByteArray,
+                        bitsPerSample: Int,
+                        sampleRate: Int,
+                        channels: Int,
+                        frames: Int,
+                        timestampMs: Long
+                    ) {
+                        // Enviar al recorder si está grabando
+                        if (callRecorder.isRecording()) {
+                            callRecorder.captureRemoteAudio(data)
+                        }
+
+                        log.d(TAG) {
+                            "🔊 Remote audio: ${data.size} bytes, " +
+                                    "$sampleRate Hz, $channels ch, $bitsPerSample bits"
+                        }
+                    }
                 }
+            )
 
-            if (callRecorder?.isRecording() == true) {
-                remoteAudioRecorder?.startCapture()
+            // Iniciar captura si ya estamos grabando
+            if (callRecorder.isRecording()) {
+                remoteAudioCapture?.startCapture()
                 log.d(TAG) { "✅ Remote audio capture started" }
             }
+
         } catch (e: Exception) {
             log.e(TAG) { "Error setting up remote audio capture: ${e.message}" }
         }
@@ -289,11 +312,10 @@ class PeerConnectionController(
     fun startRecording(callId: String) {
         log.d(TAG) { "🎙️ Starting call recording" }
 
-        callRecorder?.startRecording(callId)
+        callRecorder.startRecording(callId)
 
-        // Iniciar captura de ambos streams
-        localAudioRecorder?.startCapture()
-        remoteAudioRecorder?.startCapture()
+        // Iniciar captura de audio remoto
+        remoteAudioCapture?.startCapture()
 
         log.d(TAG) { "✅ Recording started for call: $callId" }
     }
@@ -305,11 +327,10 @@ class PeerConnectionController(
         log.d(TAG) { "🛑 Stopping call recording" }
 
         // Detener captura
-        localAudioRecorder?.stopCapture()
-        remoteAudioRecorder?.stopCapture()
+        remoteAudioCapture?.stopCapture()
 
         // Guardar archivos
-        val result = callRecorder?.stopRecording()
+        val result = callRecorder.stopRecording()
 
         log.d(TAG) { "✅ Recording stopped" }
         return result
@@ -571,8 +592,7 @@ class PeerConnectionController(
 
         try {
             localAudioTrack?.setEnabled(false)
-            localAudioRecorder?.stopCapture()
-            remoteAudioRecorder?.stopCapture()
+            remoteAudioCapture?.stopCapture()
         } catch (e: Exception) {
             log.w(TAG) { "Error disabling track: ${e.message}" }
         }
@@ -593,10 +613,7 @@ class PeerConnectionController(
         log.d(TAG) { "Disposing PeerConnectionController" }
 
         // 1️⃣ Detener grabación si está activa
-        localAudioRecorder?.stopCapture()
-        remoteAudioRecorder?.stopCapture()
-        localAudioRecorder = null
-        remoteAudioRecorder = null
+        remoteAudioCapture?.stopCapture()
 
         // 2️⃣ Deshabilitar tracks
         try {

@@ -200,9 +200,8 @@ class SharedWebSocketManager(
                 log.d(tag = TAG) { "🔓 Shared WebSocket opened" }
                 reconnectAttempts = 0
 
-                // Re-registrar todas las cuentas que estaban registradas
                 CoroutineScope(Dispatchers.IO).launch {
-                    reregisterAllAccounts()
+                    reregisterOnlyFailedAccounts()
                 }
             }
 
@@ -263,6 +262,48 @@ class SharedWebSocketManager(
             }
         })
     }
+
+    private suspend fun reregisterOnlyFailedAccounts() {
+        log.d(tag = TAG) { "🔄 Re-registering ONLY failed accounts" }
+
+        val accountsToRegister = registeredAccounts.toList().filter { accountKey ->
+            val account = sipCoreManager.activeAccounts[accountKey]
+
+            if (account != null) {
+                val state = sipCoreManager.getRegistrationState(accountKey)
+                val needsRegistration = !account.isRegistered.value ||
+                        state == RegistrationState.FAILED ||
+                        state == RegistrationState.NONE
+
+                if (needsRegistration) {
+                    log.d(tag = TAG) { "📝 Account $accountKey needs re-registration (state: $state)" }
+                    true
+                } else {
+                    log.d(tag = TAG) { "✅ Account $accountKey already OK, skipping" }
+                    false
+                }
+            } else {
+                false
+            }
+        }
+
+        if (accountsToRegister.isEmpty()) {
+            log.d(tag = TAG) { "✅ All accounts already registered, no action needed" }
+            return
+        }
+
+        log.d(tag = TAG) { "🔄 Re-registering ${accountsToRegister.size} accounts" }
+
+        accountsToRegister.forEach { accountKey ->
+            val account = sipCoreManager.activeAccounts[accountKey]
+            if (account != null) {
+                delay(500) // Pequeño delay entre registros
+                registerAccount(account, sipCoreManager.isAppInBackground)
+            }
+        }
+    }
+
+
     /**
      * Determinar a qué cuenta pertenece un mensaje SIP
      */
@@ -325,22 +366,7 @@ class SharedWebSocketManager(
         return regex.find(line)?.groupValues?.get(1)
     }
 
-    /**
-     * Re-registrar todas las cuentas después de reconexión
-     */
-    private suspend fun reregisterAllAccounts() {
-        log.d(tag = TAG) { "🔄 Re-registering ${registeredAccounts.size} accounts" }
 
-        val accountsToRegister = registeredAccounts.toList()
-
-        accountsToRegister.forEach { accountKey ->
-            val account = sipCoreManager.activeAccounts[accountKey]
-            if (account != null) {
-                delay(500) // Pequeño delay entre registros
-                registerAccount(account, sipCoreManager.isAppInBackground)
-            }
-        }
-    }
 
     /**
      * Programar reconexión automática

@@ -268,31 +268,44 @@ class CallManager(
     }
 
     fun acceptCall(callId: String? = null, recordCall: Boolean = true) {
+        println("[ACCEPT_CALL] Starting acceptCall()")
+
         val accountInfo = sipCoreManager.currentAccountInfo ?: run {
+            println("[ACCEPT_CALL] ❌ No current account")
             log.e(tag = TAG) { "❌ No current account" }
             return
         }
 
         val targetCallData = accountInfo.currentCallData.value ?: run {
+            println("[ACCEPT_CALL] ❌ No call data in AccountInfo")
             log.e(tag = TAG) { "❌ No call data in AccountInfo" }
             return
         }
 
+        println("[ACCEPT_CALL] Call direction = ${targetCallData.direction}")
+
         if (targetCallData.direction != CallDirections.INCOMING) {
+            println("[ACCEPT_CALL] ❌ Cannot accept - not incoming")
             log.w(tag = TAG) { "❌ Cannot accept - not incoming" }
             return
         }
 
         val callState = CallStateManager.getCurrentState()
+        println("[ACCEPT_CALL] Current call state = ${callState.state}")
+
         if (callState.state != CallState.INCOMING_RECEIVED) {
+            println("[ACCEPT_CALL] ❌ Cannot accept - invalid state: ${callState.state}")
             log.w(tag = TAG) { "❌ Cannot accept - invalid state: ${callState.state}" }
             return
         }
 
         val remoteSdp = targetCallData.remoteSdp
+        println("[ACCEPT_CALL] remoteSdp length = ${remoteSdp.length}")
 
         if (remoteSdp.isBlank()) {
+            println("[ACCEPT_CALL] ❌ FATAL: remoteSdp is blank!")
             log.e(tag = TAG) { "❌ FATAL: remoteSdp is blank!" }
+
             CallStateManager.callError(
                 targetCallData.callId,
                 errorReason = CallErrorReason.MEDIA_ERROR
@@ -302,49 +315,54 @@ class CallManager(
             return
         }
 
+        println("[ACCEPT_CALL] Accepting call = ${targetCallData.callId}")
         log.d(tag = TAG) { "Accepting call: ${targetCallData.callId}" }
+
         audioManager.stopAllRingtones()
+        println("[ACCEPT_CALL] 🔕 Ringtone stopped")
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                log.d(tag = TAG) { "🎤 Preparing audio..." }
+                println("[ACCEPT_CALL] 🎤 Preparing audio...")
 
-                // ✅ CRÍTICO: Asegurar que WebRTC está inicializado
                 if (!webRtcManager.isInitialized()) {
-                    log.d(tag = TAG) { "⚠️ WebRTC not initialized, initializing now..." }
+                    println("[ACCEPT_CALL] ⚠️ WebRTC not initialized, initializing...")
                     webRtcManager.initialize()
-                    delay(500) // Dar tiempo para inicialización
+                    delay(500)
                 }
 
                 audioManager.prepareAudioForIncomingCall()
+                println("[ACCEPT_CALL] 🔧 Audio prepared")
 
-                log.d(tag = TAG) { "📞 Creating answer with remote SDP (${remoteSdp.length} chars)" }
-
-                // ✅ CAMBIO: createAnswer ahora maneja el remote SDP internamente
+                println("[ACCEPT_CALL] Creating answer from remote SDP (${remoteSdp.length} chars)")
                 val answerSdp = audioManager.createAnswer(remoteSdp)
 
-                log.d(tag = TAG) { "✅ Answer created: ${answerSdp.length} chars" }
+                println("[ACCEPT_CALL] ✅ Answer SDP created (${answerSdp.length} chars)")
                 targetCallData.localSdp = answerSdp
 
                 if (recordCall) {
+                    println("[ACCEPT_CALL] 🎙️ Starting call recording...")
                     webRtcManager.startCallRecording(targetCallData.callId)
-                    log.d(TAG) { "🎙️ Recording started for incoming call ${targetCallData.callId}" }
                 }
 
-                log.d(tag = TAG) { "📤 Sending 200 OK..." }
+                println("[ACCEPT_CALL] 📤 Sending 200 OK...")
                 messageHandler.sendInviteOkResponse(accountInfo, targetCallData)
 
+                println("[ACCEPT_CALL] 🔄 Updating call state to CONNECTED")
                 CallStateManager.callConnected(targetCallData.callId, 200)
                 sipCoreManager.notifyCallStateChanged(CallState.CONNECTED)
 
                 delay(500)
 
-                log.d(tag = TAG) { "🔊 Enabling audio..." }
+                println("[ACCEPT_CALL] 🔊 Enabling audio...")
                 audioManager.setAudioEnabled(true)
 
-                log.d(tag = TAG) { "✅ Call accepted successfully" }
+                println("[ACCEPT_CALL] ✅ Call accepted successfully")
 
             } catch (e: Exception) {
+                println("[ACCEPT_CALL] 💥 ERROR: ${e.message}")
+                println(e.stackTraceToString())
+
                 log.e(tag = TAG) { "💥 Error accepting call: ${e.message}" }
                 log.e(tag = TAG) { e.stackTraceToString() }
 
@@ -357,13 +375,16 @@ class CallManager(
                 sipCoreManager.sipCallbacks?.onCallFailed("Failed to accept: ${e.message}")
 
                 try {
+                    println("[ACCEPT_CALL] Attempting to decline after failure...")
                     declineCall(callId)
                 } catch (declineError: Exception) {
+                    println("[ACCEPT_CALL] ⚠️ Error declining: ${declineError.message}")
                     log.e(tag = TAG) { "Error declining after failure: ${declineError.message}" }
                 }
             }
         }
     }
+
 //    fun acceptCall(callId: String? = null, recordCall: Boolean = true) {
 //        val accountInfo = sipCoreManager.currentAccountInfo ?: run {
 //            log.e(tag = TAG) { "❌ No current account" }

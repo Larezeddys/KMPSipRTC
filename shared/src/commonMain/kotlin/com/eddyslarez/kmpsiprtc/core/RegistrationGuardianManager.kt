@@ -19,6 +19,7 @@ import kotlin.collections.set
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.text.get
 import kotlin.text.set
+import kotlin.time.Clock
 import kotlin.time.ExperimentalTime
 
 class RegistrationGuardianManager(
@@ -27,48 +28,32 @@ class RegistrationGuardianManager(
 ) {
     companion object {
         private const val TAG = "RegistrationGuardian"
-
-        // Intervalos de verificación
-        private const val HEALTH_CHECK_INTERVAL = 60_000L // 30 segundos
-        private const val QUICK_RETRY_DELAY = 3_000L // 3 segundos
-        private const val NORMAL_RETRY_DELAY = 10_000L // 10 segundos
-        private const val MAX_RETRY_DELAY = 60_000L // 1 minuto
-
-        // Timeouts
-        private const val REGISTRATION_TIMEOUT = 15_000L // 15 segundos
-        private const val WEBSOCKET_CONNECT_TIMEOUT = 10_000L // 10 segundos
+        private const val HEALTH_CHECK_INTERVAL = 60_000L
+        private const val QUICK_RETRY_DELAY = 3_000L
+        private const val NORMAL_RETRY_DELAY = 10_000L
+        private const val MAX_RETRY_DELAY = 60_000L
+        private const val REGISTRATION_TIMEOUT = 15_000L
     }
-   private val networkManager = createNetworkManager()
-    // Jobs de monitoreo
+
+    private val networkManager = createNetworkManager()
     private var healthCheckJob: Job? = null
     private val accountMonitorJobs = ConcurrentMap<String, Job>()
     private val retryCounters = ConcurrentMap<String, Int>()
     private val lastRetryTimestamp = ConcurrentMap<String, Long>()
     private val registrationInProgress = ConcurrentMap<String, Boolean>()
-
-    // Estado del guardian
     private var isActive = false
 
-    /**
-     * Inicializar el guardián
-     */
     fun initialize() {
         log.d(tag = TAG) { "🛡️ Initializing Registration Guardian" }
-
-        // ✅ INICIALIZAR EL NETWORK MANAGER
         networkManager.initialize()
-
         isActive = true
         startHealthCheckMonitor()
         startAccountRecoveryFromDatabase()
     }
-    /**
-     * Monitor de salud continuo - El corazón del sistema
-     */
+
     private fun startHealthCheckMonitor() {
         healthCheckJob = CoroutineScope(Dispatchers.IO).launch {
             log.d(tag = TAG) { "🔍 Health check monitor started" }
-
             while (isActive) {
                 try {
                     delay(HEALTH_CHECK_INTERVAL)
@@ -83,9 +68,6 @@ class RegistrationGuardianManager(
         }
     }
 
-    /**
-     * Verificación de salud completa
-     */
     private suspend fun performHealthCheck() {
         if (!networkManager.isNetworkAvailable()) {
             log.w(tag = TAG) { "⚠️ Network unavailable, skipping health check" }
@@ -93,7 +75,6 @@ class RegistrationGuardianManager(
         }
 
         log.d(tag = TAG) { "🏥 Performing health check..." }
-
         val allAccounts = getAllAccountsFromAllSources()
         log.d(tag = TAG) { "Found ${allAccounts.size} accounts to check" }
 
@@ -102,26 +83,18 @@ class RegistrationGuardianManager(
         }
     }
 
-    /**
-     * Obtener cuentas desde TODAS las fuentes
-     */
     private suspend fun getAllAccountsFromAllSources(): Map<String, AccountInfo> {
         val accounts = mutableMapOf<String, AccountInfo>()
 
-        // 1. Cuentas en memoria (SipCoreManager)
         sipCoreManager.activeAccounts.forEach { (key, info) ->
             accounts[key] = info
         }
 
-        // 2. Cuentas en BD que no están en memoria
         try {
             val dbAccounts = databaseManager.getRegisteredSipAccounts().first()
-
             dbAccounts.forEach { dbAccount ->
                 val accountKey = "${dbAccount.username}@${dbAccount.domain}"
-
                 if (!accounts.containsKey(accountKey)) {
-                    // Crear AccountInfo desde BD
                     val accountInfo = AccountInfo(
                         username = dbAccount.username,
                         password = dbAccount.password,
@@ -132,12 +105,8 @@ class RegistrationGuardianManager(
                         userAgent.value = sipCoreManager.userAgent()
                         isRegistered.value = false
                     }
-
                     accounts[accountKey] = accountInfo
-
-                    // Agregar a SipCoreManager también
                     sipCoreManager.activeAccounts[accountKey] = accountInfo
-
                     log.d(tag = TAG) { "📥 Recovered account from DB: $accountKey" }
                 }
             }
@@ -148,9 +117,6 @@ class RegistrationGuardianManager(
         return accounts
     }
 
-    /**
-     * Verificar y corregir salud de una cuenta
-     */
     private fun checkAndFixAccountHealth(accountKey: String, accountInfo: AccountInfo) {
         val currentState = sipCoreManager.getRegistrationState(accountKey)
         val isWebSocketHealthy = sipCoreManager.sharedWebSocketManager.isWebSocketHealthy()
@@ -165,63 +131,34 @@ class RegistrationGuardianManager(
             return
         }
 
-        // Detectar problemas
         val needsAction = when {
-            // Caso 1: Estado FAILED - SIEMPRE reintenta
             currentState == RegistrationState.FAILED -> {
                 log.w(tag = TAG) { "❌ Account $accountKey is FAILED - needs recovery" }
                 true
             }
-
-            // Caso 2: Estado NONE - debe registrarse
             currentState == RegistrationState.NONE -> {
                 log.w(tag = TAG) { "⚪ Account $accountKey is NONE - needs registration" }
                 true
             }
-
-            // Caso 3: Estado OK pero WebSocket no saludable
-            currentState == RegistrationState.OK && !isWebSocketHealthy -> {
-                log.w(tag = TAG) { "⚠️ Account $accountKey is OK but WebSocket unhealthy" }
-                true
-            }
-
-            // Caso 4: Estado IN_PROGRESS por demasiado tiempo
             currentState == RegistrationState.IN_PROGRESS && isStuckInProgress(accountKey) -> {
                 log.w(tag = TAG) { "⏳ Account $accountKey stuck IN_PROGRESS" }
                 true
             }
-
-            // ❌ REMOVER ESTE CASO - Es el que causa el problema
-            // Caso 5: Marcado como registrado pero estado no es OK
-            // accountInfo.isRegistered.value && currentState != RegistrationState.OK -> {
-            //     log.w(tag = TAG) { "🔀 Account $accountKey has inconsistent state" }
-            //     true
-            // }
-
             else -> false
         }
 
         if (needsAction) {
-            // Iniciar proceso de recuperación
             startAccountRecovery(accountKey, accountInfo)
         }
     }
 
-    /**
-     * Verificar si una cuenta está atorada en IN_PROGRESS
-     */
     @OptIn(ExperimentalTime::class)
     private fun isStuckInProgress(accountKey: String): Boolean {
         val lastRetry = runBlocking { lastRetryTimestamp.get(accountKey) } ?: 0L
         val timeSinceLastRetry = kotlin.time.Clock.System.now().toEpochMilliseconds() - lastRetry
-
-        // Si lleva más de 30 segundos en IN_PROGRESS, está atorado
         return timeSinceLastRetry > 30_000L
     }
 
-    /**
-     * Iniciar recuperación de una cuenta
-     */
     private fun startAccountRecovery(accountKey: String, accountInfo: AccountInfo) {
         CoroutineScope(Dispatchers.IO).launch {
             if (registrationInProgress.get(accountKey) == true) {
@@ -245,17 +182,17 @@ class RegistrationGuardianManager(
         }
     }
 
-    /**
-     * NÚCLEO: Recuperación con reintentos infinitos
-     */
     @OptIn(ExperimentalTime::class)
-    private suspend fun recoverAccountWithInfiniteRetries(accountKey: String, accountInfo: AccountInfo) {
+    private suspend fun recoverAccountWithInfiniteRetries(
+        accountKey: String,
+        accountInfo: AccountInfo
+    ) {
         var attemptNumber = retryCounters.get(accountKey) ?: 0
 
         while (isActive && !accountInfo.isRegistered.value) {
             attemptNumber++
             retryCounters.put(accountKey, attemptNumber)
-            lastRetryTimestamp.put(accountKey, kotlin.time.Clock.System.now().toEpochMilliseconds())
+            lastRetryTimestamp.put(accountKey, Clock.System.now().toEpochMilliseconds())
 
             if (!networkManager.isNetworkAvailable()) {
                 delay(NORMAL_RETRY_DELAY)
@@ -263,121 +200,182 @@ class RegistrationGuardianManager(
             }
 
             try {
-                cleanupAccountState(accountInfo)
+                // ✅ NO limpiar estado - mantener sesión SIP
+                // cleanupAccountStateOnly(accountInfo) // ❌ REMOVER ESTO
+
+                // ✅ SOLO actualizar estado de registro
+                accountInfo.isRegistered.value = false
+
+                // ⏱️ Pequeño delay para estabilidad
                 delay(1000)
 
-                sipCoreManager.updateRegistrationState(accountKey, RegistrationState.IN_PROGRESS)
-                val success = attemptSafeRegistration(accountInfo)
+                sipCoreManager.updateRegistrationState(
+                    accountKey,
+                    RegistrationState.IN_PROGRESS
+                )
+
+                // ✅ Re-registrar manteniendo el mismo diálogo SIP
+                // El CSeq se incrementará automáticamente
+                val success = attemptSingleAccountRegistration(accountInfo)
 
                 if (success) {
                     val confirmed = waitForRegistrationConfirmation(accountInfo)
                     if (confirmed) {
-                        sipCoreManager.updateRegistrationState(accountKey, RegistrationState.OK)
+                        log.d(tag = TAG) {
+                            "✅ Account $accountKey recovered successfully"
+                        }
+                        sipCoreManager.updateRegistrationState(
+                            accountKey,
+                            RegistrationState.OK
+                        )
                         retryCounters.remove(accountKey)
                         return
                     } else {
-                        sipCoreManager.updateRegistrationState(accountKey, RegistrationState.FAILED)
+                        sipCoreManager.updateRegistrationState(
+                            accountKey,
+                            RegistrationState.FAILED
+                        )
                     }
                 } else {
-                    sipCoreManager.updateRegistrationState(accountKey, RegistrationState.FAILED)
+                    sipCoreManager.updateRegistrationState(
+                        accountKey,
+                        RegistrationState.FAILED
+                    )
                 }
             } catch (e: Exception) {
-                log.e(tag = TAG) { "💥 Error in recovery attempt for $accountKey: ${e.message}" }
-                sipCoreManager.updateRegistrationState(accountKey, RegistrationState.FAILED)
+                log.e(tag = TAG) {
+                    "💥 Error in recovery attempt for $accountKey: ${e.message}"
+                }
+                sipCoreManager.updateRegistrationState(
+                    accountKey,
+                    RegistrationState.FAILED
+                )
             }
 
             delay(calculateRetryDelay(attemptNumber))
         }
     }
+//    @OptIn(ExperimentalTime::class)
+//    private suspend fun recoverAccountWithInfiniteRetries(accountKey: String, accountInfo: AccountInfo) {
+//        var attemptNumber = retryCounters.get(accountKey) ?: 0
+//
+//        while (isActive && !accountInfo.isRegistered.value) {
+//            attemptNumber++
+//            retryCounters.put(accountKey, attemptNumber)
+//            lastRetryTimestamp.put(accountKey, kotlin.time.Clock.System.now().toEpochMilliseconds())
+//
+//            if (!networkManager.isNetworkAvailable()) {
+//                delay(NORMAL_RETRY_DELAY)
+//                continue
+//            }
+//
+//            try {
+//                // ✅ FIX: NO desconectar WebSocket compartido
+//                // Solo limpiar estado de ESTA cuenta
+//                cleanupAccountStateOnly(accountInfo)
+//                delay(1000)
+//
+//                sipCoreManager.updateRegistrationState(accountKey, RegistrationState.IN_PROGRESS)
+//
+//                // ✅ FIX: Usar método que NO cierra WebSocket de otras cuentas
+//                val success = attemptSingleAccountRegistration(accountInfo)
+//
+//                if (success) {
+//                    val confirmed = waitForRegistrationConfirmation(accountInfo)
+//                    if (confirmed) {
+//                        log.d(tag = TAG) { "✅ Account $accountKey recovered successfully" }
+//                        sipCoreManager.updateRegistrationState(accountKey, RegistrationState.OK)
+//                        retryCounters.remove(accountKey)
+//                        return
+//                    } else {
+//                        sipCoreManager.updateRegistrationState(accountKey, RegistrationState.FAILED)
+//                    }
+//                } else {
+//                    sipCoreManager.updateRegistrationState(accountKey, RegistrationState.FAILED)
+//                }
+//            } catch (e: Exception) {
+//                log.e(tag = TAG) { "💥 Error in recovery attempt for $accountKey: ${e.message}" }
+//                sipCoreManager.updateRegistrationState(accountKey, RegistrationState.FAILED)
+//            }
+//
+//            delay(calculateRetryDelay(attemptNumber))
+//        }
+//    }
 
-    /**
-     * Limpiar estado previo de la cuenta
-     */
-    private suspend fun cleanupAccountState(accountInfo: AccountInfo) {
+    private suspend fun cleanupAccountStateOnly(accountInfo: AccountInfo) {
         try {
-
-            sipCoreManager.sharedWebSocketManager.disconnect()
             accountInfo.isRegistered.value = false
 
-            log.d(tag = TAG) { "🧹 Cleaned up state for ${accountInfo.username}@${accountInfo.domain}" }
+            log.d(tag = TAG) {
+                "🧹 Cleaned up state for ${accountInfo.username}@${accountInfo.domain}" +
+                        " (keeping SIP session data intact)"
+            }
         } catch (e: Exception) {
             log.w(tag = TAG) { "Error cleaning up state: ${e.message}" }
         }
     }
 
-    /**
-     * Intento seguro de registro
-     */
-    private suspend fun attemptSafeRegistration(accountInfo: AccountInfo): Boolean {
+    // ✅ FIX: NUEVO método que registra sin afectar otras cuentas
+    private suspend fun attemptSingleAccountRegistration(accountInfo: AccountInfo): Boolean {
         return withTimeoutOrNull(REGISTRATION_TIMEOUT) {
             try {
-                // Usar el método seguro del SipCoreManager
-                sipCoreManager.safeRegister(accountInfo, sipCoreManager.isAppInBackground)
+                // ✅ Verificar que WebSocket esté conectado
+                if (!sipCoreManager.sharedWebSocketManager.isConnected()) {
+                    log.d(tag = TAG) { "🔌 WebSocket not connected, attempting connection..." }
+                    sipCoreManager.sharedWebSocketManager.connect()
+                    delay(2000) // Esperar conexión
+                }
+
+                // ✅ Registrar SOLO esta cuenta sin afectar otras
+                sipCoreManager.sharedWebSocketManager.registerAccount(
+                    accountInfo,
+                    sipCoreManager.isAppInBackground
+                )
             } catch (e: Exception) {
-                log.e(tag = TAG) { "Error in safe register: ${e.message}" }
+                log.e(tag = TAG) { "Error in registration: ${e.message}" }
                 false
             }
         } ?: false
     }
 
-    /**
-     * Esperar confirmación de registro
-     */
     @OptIn(ExperimentalTime::class)
     private suspend fun waitForRegistrationConfirmation(accountInfo: AccountInfo): Boolean {
         val startTime = kotlin.time.Clock.System.now().toEpochMilliseconds()
         val checkInterval = 500L
 
         while (kotlin.time.Clock.System.now().toEpochMilliseconds() - startTime < REGISTRATION_TIMEOUT) {
-            // Verificar si ya está registrado
             if (accountInfo.isRegistered.value) {
                 return true
             }
-
-            // Verificar si perdimos red
             if (!networkManager.isNetworkAvailable()) {
                 return false
             }
-
             delay(checkInterval)
         }
-
         return false
     }
 
-    /**
-     * Calcular delay para siguiente intento (backoff exponencial con límite)
-     */
     private fun calculateRetryDelay(attemptNumber: Int): Long {
         return when {
-            attemptNumber <= 3 -> QUICK_RETRY_DELAY // Primeros 3 intentos: rápido
-            attemptNumber <= 10 -> NORMAL_RETRY_DELAY // Siguientes 7: normal
+            attemptNumber <= 3 -> QUICK_RETRY_DELAY
+            attemptNumber <= 10 -> NORMAL_RETRY_DELAY
             else -> {
-                // Después del intento 10: exponencial con límite
                 val exponential = NORMAL_RETRY_DELAY * (1 shl minOf(attemptNumber - 10, 5))
                 minOf(exponential, MAX_RETRY_DELAY)
             }
         }
     }
 
-    /**
-     * Recuperación inicial desde BD al arrancar
-     */
     private fun startAccountRecoveryFromDatabase() {
         CoroutineScope(Dispatchers.IO).launch {
-            delay(5000) // Esperar inicialización completa
-
+            delay(5000)
             try {
                 log.d(tag = TAG) { "🔍 Starting initial account recovery from database..." }
-
                 val dbAccounts = databaseManager.getRegisteredSipAccounts().first()
-
                 log.d(tag = TAG) { "Found ${dbAccounts.size} accounts in database" }
 
                 dbAccounts.forEach { dbAccount ->
                     val accountKey = "${dbAccount.username}@${dbAccount.domain}"
-
-                    // Si no está en memoria, crear
                     if (!sipCoreManager.activeAccounts.containsKey(accountKey)) {
                         val accountInfo = AccountInfo(
                             username = dbAccount.username,
@@ -389,44 +387,34 @@ class RegistrationGuardianManager(
                             userAgent.value = "${sipCoreManager.userAgent()} Push"
                             isRegistered.value = false
                         }
-
                         sipCoreManager.activeAccounts[accountKey] = accountInfo
                         log.d(tag = TAG) { "📥 Added account from DB: $accountKey" }
                     }
 
-                    // Iniciar recuperación para todas las cuentas
                     val accountInfo = sipCoreManager.activeAccounts[accountKey]
                     if (accountInfo != null && !accountInfo.isRegistered.value) {
                         startAccountRecovery(accountKey, accountInfo)
                     }
                 }
-
             } catch (e: Exception) {
                 log.e(tag = TAG) { "Error in initial recovery: ${e.message}" }
             }
         }
     }
 
-    /**
-     * Forzar recuperación inmediata de todas las cuentas
-     */
     suspend fun forceRecoverAllAccounts(): String {
         log.d(tag = TAG) { "🔧 FORCING IMMEDIATE RECOVERY OF ALL ACCOUNTS" }
-
         val report = StringBuilder()
         report.appendLine("=== FORCED RECOVERY REPORT ===")
 
-        // Cancelar todos los jobs existentes
         accountMonitorJobs.values().forEach { it.cancel() }
         accountMonitorJobs.clear()
         registrationInProgress.clear()
         retryCounters.clear()
 
-        // Obtener todas las cuentas
         val allAccounts = getAllAccountsFromAllSources()
         report.appendLine("Total accounts: ${allAccounts.size}")
 
-        // Iniciar recuperación para cada una
         allAccounts.forEach { (accountKey, accountInfo) ->
             report.appendLine("\nStarting recovery for: $accountKey")
             startAccountRecovery(accountKey, accountInfo)
@@ -435,10 +423,6 @@ class RegistrationGuardianManager(
         report.appendLine("\n✅ Recovery processes initiated for all accounts")
         return report.toString()
     }
-
-    /**
-     * Obtener estado de diagnóstico
-     */
 
     @OptIn(ExperimentalTime::class)
     suspend fun getDiagnosticInfo(): String {
@@ -463,16 +447,12 @@ class RegistrationGuardianManager(
             appendLine("\n--- Account States ---")
             activeAccounts.forEach { (accountKey, accountInfo) ->
                 val state = sipCoreManager.getRegistrationState(accountKey)
-                val wsHealthy = !sipCoreManager.sharedWebSocketManager.isWebSocketHealthy()
-                appendLine("$accountKey: state=$state, registered=${accountInfo.isRegistered}, wsHealthy=$wsHealthy")
+                val wsHealthy = sipCoreManager.sharedWebSocketManager.isWebSocketHealthy()
+                appendLine("$accountKey: state=$state, registered=${accountInfo.isRegistered.value}, wsHealthy=$wsHealthy")
             }
         }
     }
 
-
-    /**
-     * Detener el guardián
-     */
     fun dispose() {
         log.d(tag = TAG) { "🛡️ Disposing Registration Guardian" }
         isActive = false
@@ -486,7 +466,6 @@ class RegistrationGuardianManager(
             lastRetryTimestamp.clear()
         }
 
-        // ✅ LIMPIAR EL NETWORK MANAGER
         networkManager.dispose()
     }
 }
