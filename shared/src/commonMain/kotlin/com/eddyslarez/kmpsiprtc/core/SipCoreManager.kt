@@ -1375,6 +1375,14 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
 
     accountInfo.isRegistered.value = true
 
+    // ✅ CONFIRMAR INMEDIATAMENTE AL GUARDIAN
+    try {
+        registrationGuardian.confirmRegistration(accountKey, true)
+        log.d(tag = TAG) { "✅ [$accountKey] Guardian confirmation sent" }
+    } catch (e: Exception) {
+        log.w(tag = TAG) { "⚠️ [$accountKey] Could not confirm to guardian: ${e.message}" }
+    }
+
     log.d(tag = TAG) { "📝 Setting registration state to OK for $accountKey" }
     updateRegistrationState(accountKey, RegistrationState.OK)
 
@@ -1390,10 +1398,6 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
             accountInfo.domain,
             RegistrationState.OK
         )
-
-        // ✅ VERIFICAR QUE SE GUARDÓ EN BD
-        delay(500)
-        verifyDatabaseState(accountKey)
     }
 }
     /**

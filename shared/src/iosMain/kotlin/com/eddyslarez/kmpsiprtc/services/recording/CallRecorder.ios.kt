@@ -10,10 +10,18 @@ import platform.AVFAudio.*
 import platform.Foundation.*
 import platform.darwin.NSObject
 import kotlin.concurrent.Volatile
+import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import platform.AVFAudio.*
+import platform.Foundation.*
+import kotlin.experimental.ExperimentalNativeApi
+import kotlin.native.concurrent.freeze
 
 /**
  * Implementación de CallRecorder para iOS
  */
+@OptIn(ExperimentalForeignApi::class)
 class IosCallRecorder : CallRecorder {
     private val TAG = "IosCallRecorder"
 
@@ -22,9 +30,13 @@ class IosCallRecorder : CallRecorder {
     private val CHANNELS = 1 // Mono
     private val BIT_DEPTH = 16
 
-    // Buffers de audio
+    // Buffers de audio con protección thread-safe
     private val localAudioBuffer = mutableListOf<ByteArray>()
     private val remoteAudioBuffer = mutableListOf<ByteArray>()
+
+    // ✅ Mutexes para sincronización thread-safe
+    private val localBufferMutex = Mutex()
+    private val remoteBufferMutex = Mutex()
 
     // Control de grabación
     @Volatile
@@ -37,7 +49,6 @@ class IosCallRecorder : CallRecorder {
     private var currentCallId: String? = null
 
     // Directorio de salida
-    @OptIn(ExperimentalForeignApi::class)
     private val outputDir: String by lazy {
         val documentsPath = NSSearchPathForDirectoriesInDomains(
             NSDocumentDirectory,
@@ -70,9 +81,11 @@ class IosCallRecorder : CallRecorder {
         currentCallId = callId
         isRecording = true
 
-        // Limpiar buffers anteriores
-        localAudioBuffer.clear()
-        remoteAudioBuffer.clear()
+        // Limpiar buffers anteriores (no necesita mutex aquí porque isRecording es false)
+        runBlocking {
+            localBufferMutex.withLock { localAudioBuffer.clear() }
+            remoteBufferMutex.withLock { remoteAudioBuffer.clear() }
+        }
 
         // Iniciar captura del micrófono
         startMicrophoneCapture()
@@ -80,7 +93,6 @@ class IosCallRecorder : CallRecorder {
         log.d(TAG) { "✅ Recording started" }
     }
 
-    @OptIn(ExperimentalForeignApi::class)
     private fun startMicrophoneCapture() {
         recordingJob = recordingScope.launch {
             try {
@@ -103,7 +115,12 @@ class IosCallRecorder : CallRecorder {
                     bufferSize = 1024u,
                     format = format
                 ) { buffer, _ ->
-                    buffer?.let { captureAudioBuffer(it) }
+                    buffer?.let {
+                        // ✅ Capturar en coroutine para poder usar suspend
+                        recordingScope.launch {
+                            captureAudioBuffer(it)
+                        }
+                    }
                 }
 
                 audioEngine?.prepare()
@@ -113,30 +130,39 @@ class IosCallRecorder : CallRecorder {
 
             } catch (e: Exception) {
                 log.e(TAG) { "❌ Error capturing microphone: ${e.message}" }
+                e.printStackTrace()
             }
         }
     }
 
-    @OptIn(ExperimentalForeignApi::class, InternalCoroutinesApi::class)
-    private fun captureAudioBuffer(buffer: AVAudioPCMBuffer) {
+    // ✅ Ahora es suspend para poder usar mutex
+    private suspend fun captureAudioBuffer(buffer: AVAudioPCMBuffer) {
         if (!isRecording) return
 
-        val frameLength = buffer.frameLength.toInt()
-        if (frameLength == 0) return
+        try {
+            val frameLength = buffer.frameLength.toInt()
+            if (frameLength == 0) return
 
-        val channelData = buffer.floatChannelData ?: return
-        val data = channelData[0] ?: return
+            val channelData = buffer.floatChannelData ?: return
+            val data = channelData[0] ?: return
 
-        // Convertir float samples a PCM 16-bit
-        val byteArray = ByteArray(frameLength * 2)
-        for (i in 0 until frameLength) {
-            val sample = (data[i] * 32767.0f).toInt().coerceIn(-32768, 32767).toShort()
-            byteArray[i * 2] = (sample.toInt() and 0xFF).toByte()
-            byteArray[i * 2 + 1] = ((sample.toInt() shr 8) and 0xFF).toByte()
-        }
+            // Convertir float samples a PCM 16-bit
+            val byteArray = ByteArray(frameLength * 2)
+            for (i in 0 until frameLength) {
+                val sample = (data[i] * 32767.0f).toInt().coerceIn(-32768, 32767).toShort()
+                byteArray[i * 2] = (sample.toInt() and 0xFF).toByte()
+                byteArray[i * 2 + 1] = ((sample.toInt() shr 8) and 0xFF).toByte()
+            }
 
-        synchronized(localAudioBuffer as Lock) {
-            localAudioBuffer.add(byteArray)
+            // ✅ Acceso thread-safe usando mutex
+            localBufferMutex.withLock {
+                if (isRecording) { // Double-check dentro del lock
+                    localAudioBuffer.add(byteArray)
+                }
+            }
+        } catch (e: Exception) {
+            log.e(TAG) { "❌ Error processing audio buffer: ${e.message}" }
+            e.printStackTrace()
         }
     }
 
@@ -160,14 +186,18 @@ class IosCallRecorder : CallRecorder {
         val callId = currentCallId ?: "unknown"
         val timestamp = NSDate().timeIntervalSince1970.toLong() * 1000
 
+        // Copiar buffers de forma segura antes de guardar
+        val localCopy = localBufferMutex.withLock { localAudioBuffer.toList() }
+        val remoteCopy = remoteBufferMutex.withLock { remoteAudioBuffer.toList() }
+
         // Guardar archivos
-        val localFile = saveAudioToFile(localAudioBuffer, "${callId}_local_${timestamp}.wav")
-        val remoteFile = saveAudioToFile(remoteAudioBuffer, "${callId}_remote_${timestamp}.wav")
-        val mixedFile = mixAndSaveAudio(localAudioBuffer, remoteAudioBuffer, "${callId}_mixed_${timestamp}.wav")
+        val localFile = saveAudioToFile(localCopy, "${callId}_local_${timestamp}.wav")
+        val remoteFile = saveAudioToFile(remoteCopy, "${callId}_remote_${timestamp}.wav")
+        val mixedFile = mixAndSaveAudio(localCopy, remoteCopy, "${callId}_mixed_${timestamp}.wav")
 
         // Limpiar buffers
-        localAudioBuffer.clear()
-        remoteAudioBuffer.clear()
+        localBufferMutex.withLock { localAudioBuffer.clear() }
+        remoteBufferMutex.withLock { remoteAudioBuffer.clear() }
         currentCallId = null
 
         log.d(TAG) { "✅ Recording stopped and saved" }
@@ -178,12 +208,17 @@ class IosCallRecorder : CallRecorder {
         RecordingResult(localFile, remoteFile, mixedFile)
     }
 
-    @OptIn(InternalCoroutinesApi::class)
+    // ✅ Cambiar a función regular (no suspend) para compatibilidad
     override fun captureRemoteAudio(audioData: ByteArray) {
         if (!isRecording) return
 
-        synchronized(remoteAudioBuffer as  Lock) {
-            remoteAudioBuffer.add(audioData.copyOf())
+        // ✅ Lanzar coroutine para usar mutex
+        recordingScope.launch {
+            remoteBufferMutex.withLock {
+                if (isRecording) {
+                    remoteAudioBuffer.add(audioData.copyOf())
+                }
+            }
         }
     }
 
@@ -193,7 +228,6 @@ class IosCallRecorder : CallRecorder {
 
     override fun getRecordingsDirectory(): String = outputDir
 
-    @OptIn(ExperimentalForeignApi::class)
     override fun getAllRecordings(): List<RecordingFileInfo> {
         val fileManager = NSFileManager.defaultManager
         val files = fileManager.contentsOfDirectoryAtPath(outputDir, error = null) as? List<*>
@@ -225,7 +259,6 @@ class IosCallRecorder : CallRecorder {
         } ?: emptyList()
     }
 
-    @OptIn(ExperimentalForeignApi::class)
     override fun deleteRecording(filePath: String): Boolean {
         return try {
             val fileManager = NSFileManager.defaultManager
@@ -236,7 +269,6 @@ class IosCallRecorder : CallRecorder {
         }
     }
 
-    @OptIn(ExperimentalForeignApi::class)
     override fun deleteAllRecordings(): Boolean {
         return try {
             val fileManager = NSFileManager.defaultManager
@@ -259,13 +291,15 @@ class IosCallRecorder : CallRecorder {
         audioEngine = null
         recordingJob?.cancel()
         recordingScope.cancel()
-        localAudioBuffer.clear()
-        remoteAudioBuffer.clear()
+
+        runBlocking {
+            localBufferMutex.withLock { localAudioBuffer.clear() }
+            remoteBufferMutex.withLock { remoteAudioBuffer.clear() }
+        }
     }
 
     // ==================== GUARDADO DE ARCHIVOS ====================
 
-    @OptIn(ExperimentalForeignApi::class)
     private fun saveAudioToFile(audioBuffer: List<ByteArray>, fileName: String): String? {
         if (audioBuffer.isEmpty()) {
             log.w(TAG) { "⚠️ Empty audio buffer for $fileName" }
@@ -294,11 +328,11 @@ class IosCallRecorder : CallRecorder {
             filePath
         } catch (e: Exception) {
             log.e(TAG) { "❌ Error saving audio: ${e.message}" }
+            e.printStackTrace()
             null
         }
     }
 
-    @OptIn(ExperimentalForeignApi::class)
     private fun mixAndSaveAudio(
         localBuffer: List<ByteArray>,
         remoteBuffer: List<ByteArray>,
@@ -339,6 +373,7 @@ class IosCallRecorder : CallRecorder {
             filePath
         } catch (e: Exception) {
             log.e(TAG) { "❌ Error mixing audio: ${e.message}" }
+            e.printStackTrace()
             null
         }
     }

@@ -4,6 +4,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import okio.ByteString.Companion.encodeUtf8
 import kotlin.random.Random
+import kotlin.time.Clock
 import kotlin.time.ExperimentalTime
 
 @OptIn(ExperimentalTime::class)
@@ -111,4 +112,36 @@ class AccountRecoveryCounter {
     }
 
     suspend fun get(): Int = mutex.withLock { attempts }
+}
+/**
+ * Genera un nuevo Call-ID único (KMP compatible - sin UUID API)
+ */
+@OptIn(ExperimentalTime::class)
+ fun generateNewCallId(): String {
+    val timestamp = Clock.System.now().toEpochMilliseconds()
+    val random1 = kotlin.random.Random.nextInt(100000, 999999)
+    val random2 = kotlin.random.Random.nextInt(100000, 999999)
+    val deviceId = getDeviceIdentifier()
+    return "$timestamp-$random1-$random2@$deviceId"
+}
+
+
+/**
+ * Genera un nuevo From-Tag único (KMP compatible - sin UUID API)
+ */
+@OptIn(ExperimentalTime::class)
+ fun generateNewFromTag(): String {
+    val timestamp = Clock.System.now().toEpochMilliseconds()
+    val random = kotlin.random.Random.nextInt(10000000, 99999999)
+    return "${timestamp.toString().takeLast(10)}${random}".take(16)
+}
+
+/**
+ * Obtiene un identificador del dispositivo (KMP compatible)
+ */
+@OptIn(ExperimentalTime::class)
+ fun getDeviceIdentifier(): String {
+    val timestamp = Clock.System.now().toEpochMilliseconds()
+    val random = kotlin.random.Random.nextInt(10000, 99999)
+    return "kmp-${timestamp.hashCode().toString().takeLast(8)}-$random"
 }

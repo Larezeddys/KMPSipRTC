@@ -126,8 +126,34 @@ class CallManager(
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
+                // ✅ CRÍTICO: Asegurar que WebRTC está inicializado ANTES de continuar
+                if (!webRtcManager.isInitialized()) {
+                    log.d(TAG) { "🔧 WebRTC not initialized, initializing now..." }
+                    webRtcManager.initialize()
+
+                    // Esperar confirmación de inicialización
+                    var attempts = 0
+                    while (!webRtcManager.isInitialized() && attempts < 20) {
+                        delay(250)
+                        attempts++
+                    }
+
+                    if (!webRtcManager.isInitialized()) {
+                        throw Exception("WebRTC initialization timeout")
+                    }
+
+                    log.d(TAG) { "✅ WebRTC initialized successfully" }
+                }
+
+                // ✅ Preparar audio DESPUÉS de confirmar inicialización
                 audioManager.prepareAudioForOutgoingCall()
+
+                // ✅ Pequeño delay adicional para estabilidad en iOS
+                delay(500)
+
+                log.d(TAG) { "📞 Creating SDP offer..." }
                 val sdp = audioManager.createOffer()
+                log.d(TAG) { "✅ SDP offer created (${sdp.length} chars)" }
 
                 val callId = accountInfo.generateCallId()
                 val md5Hash = calculateMD5(callId)
@@ -162,7 +188,6 @@ class CallManager(
                         callData.callId,
                         errorReason = CallErrorReason.NETWORK_ERROR
                     )
-                    // ✅ Registrar llamada fallida
                     registerCallInHistory(callData, CallState.ERROR)
                 }
                 audioManager.stopOutgoingRingtone()
@@ -266,7 +291,6 @@ class CallManager(
             log.e(TAG) { "Error saving metadata: ${e.message}" }
         }
     }
-
     fun acceptCall(callId: String? = null, recordCall: Boolean = true) {
         println("[ACCEPT_CALL] Starting acceptCall()")
 
@@ -323,39 +347,76 @@ class CallManager(
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                println("[ACCEPT_CALL] 🎤 Preparing audio...")
+                println("[ACCEPT_CALL] 🎤 Starting WebRTC initialization...")
 
+                // ✅ PASO 1: Inicializar WebRTC PRIMERO
                 if (!webRtcManager.isInitialized()) {
                     println("[ACCEPT_CALL] ⚠️ WebRTC not initialized, initializing...")
                     webRtcManager.initialize()
-                    delay(500)
+
+                    // Esperar inicialización con timeout
+                    var attempts = 0
+                    while (!webRtcManager.isInitialized() && attempts < 40) {
+                        delay(250)
+                        attempts++
+                        if (attempts % 4 == 0) {
+                            println("[ACCEPT_CALL] Still waiting for WebRTC... (${attempts * 250}ms)")
+                        }
+                    }
+
+                    if (!webRtcManager.isInitialized()) {
+                        throw Exception("WebRTC initialization timeout after ${attempts * 250}ms")
+                    }
+
+                    println("[ACCEPT_CALL] ✅ WebRTC initialized after ${attempts * 250}ms")
                 }
 
+                // ✅ PASO 2: Preparar Audio Session (iOS CallKit)
+                println("[ACCEPT_CALL] 🔧 Preparing audio session...")
                 audioManager.prepareAudioForIncomingCall()
-                println("[ACCEPT_CALL] 🔧 Audio prepared")
 
-                println("[ACCEPT_CALL] Creating answer from remote SDP (${remoteSdp.length} chars)")
+                // Delay para que audio session se estabilice
+                delay(500)
+                println("[ACCEPT_CALL] ✅ Audio session prepared")
+
+                // ✅ PASO 3: Crear Answer SDP
+                println("[ACCEPT_CALL] 📝 Creating answer from remote SDP (${remoteSdp.length} chars)")
                 val answerSdp = audioManager.createAnswer(remoteSdp)
-
                 println("[ACCEPT_CALL] ✅ Answer SDP created (${answerSdp.length} chars)")
+
                 targetCallData.localSdp = answerSdp
 
+                // ✅ PASO 4: Iniciar grabación ANTES de conectar audio
                 if (recordCall) {
                     println("[ACCEPT_CALL] 🎙️ Starting call recording...")
                     webRtcManager.startCallRecording(targetCallData.callId)
+                    delay(300) // Dar tiempo al recorder para iniciar
                 }
 
+                // ✅ PASO 5: Enviar 200 OK
                 println("[ACCEPT_CALL] 📤 Sending 200 OK...")
                 messageHandler.sendInviteOkResponse(accountInfo, targetCallData)
 
+                // ✅ PASO 6: Actualizar estado a CONNECTED
                 println("[ACCEPT_CALL] 🔄 Updating call state to CONNECTED")
                 CallStateManager.callConnected(targetCallData.callId, 200)
                 sipCoreManager.notifyCallStateChanged(CallState.CONNECTED)
 
-                delay(500)
+                // ✅ PASO 7: Esperar ACK antes de activar audio
+                delay(1000)
 
+                // ✅ PASO 8: Habilitar audio DESPUÉS de todo lo demás
                 println("[ACCEPT_CALL] 🔊 Enabling audio...")
                 audioManager.setAudioEnabled(true)
+
+                // ✅ PASO 9: Verificar que el audio está funcionando
+                delay(500)
+                println("[ACCEPT_CALL] 🎤 Verifying audio state...")
+
+                if (audioManager.isMuted()) {
+                    println("[ACCEPT_CALL] ⚠️ Audio was muted, unmuting...")
+                    audioManager.toggleMute()
+                }
 
                 println("[ACCEPT_CALL] ✅ Call accepted successfully")
 
@@ -384,75 +445,102 @@ class CallManager(
             }
         }
     }
-
 //    fun acceptCall(callId: String? = null, recordCall: Boolean = true) {
+//        println("[ACCEPT_CALL] Starting acceptCall()")
+//
 //        val accountInfo = sipCoreManager.currentAccountInfo ?: run {
+//            println("[ACCEPT_CALL] ❌ No current account")
 //            log.e(tag = TAG) { "❌ No current account" }
 //            return
 //        }
 //
 //        val targetCallData = accountInfo.currentCallData.value ?: run {
+//            println("[ACCEPT_CALL] ❌ No call data in AccountInfo")
 //            log.e(tag = TAG) { "❌ No call data in AccountInfo" }
 //            return
 //        }
 //
+//        println("[ACCEPT_CALL] Call direction = ${targetCallData.direction}")
+//
 //        if (targetCallData.direction != CallDirections.INCOMING) {
+//            println("[ACCEPT_CALL] ❌ Cannot accept - not incoming")
 //            log.w(tag = TAG) { "❌ Cannot accept - not incoming" }
 //            return
 //        }
 //
 //        val callState = CallStateManager.getCurrentState()
+//        println("[ACCEPT_CALL] Current call state = ${callState.state}")
+//
 //        if (callState.state != CallState.INCOMING_RECEIVED) {
+//            println("[ACCEPT_CALL] ❌ Cannot accept - invalid state: ${callState.state}")
 //            log.w(tag = TAG) { "❌ Cannot accept - invalid state: ${callState.state}" }
 //            return
 //        }
 //
 //        val remoteSdp = targetCallData.remoteSdp
+//        println("[ACCEPT_CALL] remoteSdp length = ${remoteSdp.length}")
 //
 //        if (remoteSdp.isBlank()) {
+//            println("[ACCEPT_CALL] ❌ FATAL: remoteSdp is blank!")
 //            log.e(tag = TAG) { "❌ FATAL: remoteSdp is blank!" }
+//
 //            CallStateManager.callError(
 //                targetCallData.callId,
 //                errorReason = CallErrorReason.MEDIA_ERROR
 //            )
-//            // ✅ Registrar error
 //            registerCallInHistory(targetCallData, CallState.ERROR)
 //            sipCoreManager.sipCallbacks?.onCallFailed("Remote SDP not available")
 //            return
 //        }
 //
+//        println("[ACCEPT_CALL] Accepting call = ${targetCallData.callId}")
 //        log.d(tag = TAG) { "Accepting call: ${targetCallData.callId}" }
+//
 //        audioManager.stopAllRingtones()
+//        println("[ACCEPT_CALL] 🔕 Ringtone stopped")
 //
 //        CoroutineScope(Dispatchers.IO).launch {
 //            try {
-//                log.d(tag = TAG) { "🎤 Preparing audio..." }
+//                println("[ACCEPT_CALL] 🎤 Preparing audio...")
+//
+//                if (!webRtcManager.isInitialized()) {
+//                    println("[ACCEPT_CALL] ⚠️ WebRTC not initialized, initializing...")
+//                    webRtcManager.initialize()
+//                    delay(500)
+//                }
+//
 //                audioManager.prepareAudioForIncomingCall()
-//                log.d(tag = TAG) { "📞 Creating answer with remote SDP" }
+//                println("[ACCEPT_CALL] 🔧 Audio prepared")
+//
+//                println("[ACCEPT_CALL] Creating answer from remote SDP (${remoteSdp.length} chars)")
 //                val answerSdp = audioManager.createAnswer(remoteSdp)
 //
-//                log.d(tag = TAG) { "✅ Answer created: ${answerSdp.length} chars" }
+//                println("[ACCEPT_CALL] ✅ Answer SDP created (${answerSdp.length} chars)")
 //                targetCallData.localSdp = answerSdp
 //
 //                if (recordCall) {
+//                    println("[ACCEPT_CALL] 🎙️ Starting call recording...")
 //                    webRtcManager.startCallRecording(targetCallData.callId)
-//                    log.d(TAG) { "🎙️ Recording started for incoming call ${targetCallData.callId}" }
 //                }
 //
-//                log.d(tag = TAG) { "📤 Sending 200 OK..." }
+//                println("[ACCEPT_CALL] 📤 Sending 200 OK...")
 //                messageHandler.sendInviteOkResponse(accountInfo, targetCallData)
 //
+//                println("[ACCEPT_CALL] 🔄 Updating call state to CONNECTED")
 //                CallStateManager.callConnected(targetCallData.callId, 200)
 //                sipCoreManager.notifyCallStateChanged(CallState.CONNECTED)
 //
 //                delay(500)
 //
-//                log.d(tag = TAG) { "🔊 Enabling audio..." }
+//                println("[ACCEPT_CALL] 🔊 Enabling audio...")
 //                audioManager.setAudioEnabled(true)
 //
-//                log.d(tag = TAG) { "✅ Call accepted successfully" }
+//                println("[ACCEPT_CALL] ✅ Call accepted successfully")
 //
 //            } catch (e: Exception) {
+//                println("[ACCEPT_CALL] 💥 ERROR: ${e.message}")
+//                println(e.stackTraceToString())
+//
 //                log.e(tag = TAG) { "💥 Error accepting call: ${e.message}" }
 //                log.e(tag = TAG) { e.stackTraceToString() }
 //
@@ -461,19 +549,20 @@ class CallManager(
 //                    errorReason = CallErrorReason.MEDIA_ERROR
 //                )
 //
-//                // ✅ Registrar error en aceptación
 //                registerCallInHistory(targetCallData, CallState.ERROR)
-//
 //                sipCoreManager.sipCallbacks?.onCallFailed("Failed to accept: ${e.message}")
 //
 //                try {
+//                    println("[ACCEPT_CALL] Attempting to decline after failure...")
 //                    declineCall(callId)
 //                } catch (declineError: Exception) {
+//                    println("[ACCEPT_CALL] ⚠️ Error declining: ${declineError.message}")
 //                    log.e(tag = TAG) { "Error declining after failure: ${declineError.message}" }
 //                }
 //            }
 //        }
 //    }
+
 
     /**
      * ✅ MEJORADO: declineCall con registro en historial

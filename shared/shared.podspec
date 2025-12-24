@@ -17,7 +17,7 @@ Pod::Spec.new do |spec|
         Kotlin framework 'shared' doesn't exist yet, so a proper Xcode project can't be generated.
         'pod install' should be executed after running ':generateDummyFramework' Gradle task:
 
-            ./gradlew :KMPSipRTCNew:shared:generateDummyFramework
+            ./gradlew :KMPSipRTC:shared:generateDummyFramework
 
         Alternatively, proper pod installation is performed during Gradle sync in the IDE (if Podfile location is set)"
     end
@@ -27,7 +27,7 @@ Pod::Spec.new do |spec|
     }
                 
     spec.pod_target_xcconfig = {
-        'KOTLIN_PROJECT_PATH' => ':KMPSipRTCNew:shared',
+        'KOTLIN_PROJECT_PATH' => ':KMPSipRTC:shared',
         'PRODUCT_MODULE_NAME' => 'shared',
     }
                 

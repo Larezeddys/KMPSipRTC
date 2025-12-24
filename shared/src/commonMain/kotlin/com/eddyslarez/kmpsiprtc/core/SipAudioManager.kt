@@ -65,23 +65,41 @@ class SipAudioManager(
      */
     suspend fun prepareAudioForIncomingCall() {
         try {
+            println("[AUDIO_MANAGER] 🎤 Preparing audio for incoming call...")
+
             if (!webRtcManager.isInitialized()) {
-                log.d(tag = TAG) { "🔧 Initializing WebRTC for incoming call..." }
+                println("[AUDIO_MANAGER] ⚠️ WebRTC not initialized, initializing...")
                 webRtcManager.initialize()
-                delay(1000) // Dar más tiempo para inicialización completa
+
+                // Esperar con timeout más largo
+                var attempts = 0
+                while (!webRtcManager.isInitialized() && attempts < 40) {
+                    delay(250)
+                    attempts++
+                }
+
+                if (!webRtcManager.isInitialized()) {
+                    throw Exception("WebRTC failed to initialize within timeout")
+                }
+
+                println("[AUDIO_MANAGER] ✅ WebRTC initialized")
             }
 
-            log.d(tag = TAG) { "🎤 Preparing audio for incoming call..." }
+            // ✅ CRÍTICO: Llamar a prepareAudioForIncomingCall en el manager
             webRtcManager.prepareAudioForIncomingCall()
 
-            // ✅ NUEVO: Verificar que el audio está listo
+            // Dar tiempo extra para que audio capture se configure
+            delay(500)
+
+            // ✅ Verificar que audio está listo
             if (!webRtcManager.isInitialized()) {
-                throw Exception("WebRTC failed to initialize properly")
+                throw Exception("WebRTC lost initialization during audio preparation")
             }
 
-            log.d(tag = TAG) { "✅ Audio prepared successfully" }
+            println("[AUDIO_MANAGER] ✅ Audio prepared and verified")
 
         } catch (e: Exception) {
+            println("[AUDIO_MANAGER] ❌ Error preparing audio: ${e.message}")
             log.e(tag = TAG) { "❌ Error preparing audio: ${e.message}" }
             throw e
         }

@@ -1162,7 +1162,7 @@ class KmpSipRtc private constructor() {
         password: String,
         domain: String,
         pushToken: String? = null,
-        pushProvider: String = "fcm",
+        pushProvider: String? = null,
         forcePushMode: Boolean = false,
         onComplete: ((Result<Unit>) -> Unit)? = null
     ) {
@@ -1175,7 +1175,7 @@ class KmpSipRtc private constructor() {
                     username = username,
                     password = password,
                     domain = domain,
-                    provider = pushProvider,
+                    provider = pushProvider ?: "",
                     token = pushToken ?: "",
                     forcePushMode = forcePushMode
                 )

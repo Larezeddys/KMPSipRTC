@@ -25,9 +25,9 @@ class AccountInfo(
 
     // 🔁 Reemplazo de atomic por MutableStateFlow
     val reconnectCount = MutableStateFlow(0)
-    val callId = MutableStateFlow<String?>(null)
-    val fromTag = MutableStateFlow<String?>(null)
-    val toTag = MutableStateFlow<String?>(null)
+    var callId = MutableStateFlow<String?>(null)
+    var fromTag = MutableStateFlow<String?>(null)
+    var toTag = MutableStateFlow<String?>(null)
     private val _cseq = MutableStateFlow(1)
     fun canRegister(): Boolean = username.isNotEmpty() && password.isNotEmpty() && domain.isNotEmpty()
 
@@ -76,7 +76,8 @@ class AccountInfo(
         private const val CSEQ_RESET_THRESHOLD = MAX_CSEQ_VALUE - 1000
     }
 
-    val cseq: Int get() = _cseq.value
+    val cseq: Int
+        get() = _cseq.value
 
     @OptIn(ExperimentalTime::class)
     suspend fun incrementCSeq(): Int = cseqMutex.withLock {
