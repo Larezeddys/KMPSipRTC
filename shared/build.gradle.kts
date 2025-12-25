@@ -25,7 +25,7 @@ kotlin {
         compilations.all {
             compileTaskProvider.configure {
                 compilerOptions {
-                    jvmTarget.set(JvmTarget.JVM_1_8)
+                    jvmTarget.set(JvmTarget.JVM_11)
                 }
             }
         }
@@ -41,7 +41,7 @@ kotlin {
         compilations.all {
             compileTaskProvider.configure {
                 compilerOptions {
-                    jvmTarget.set(JvmTarget.JVM_1_8)
+                    jvmTarget.set(JvmTarget.JVM_11)
                 }
             }
         }
@@ -67,8 +67,6 @@ kotlin {
         // Common
         val commonMain by getting {
             dependencies {
-
-
                 implementation("org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
                 implementation("org.jetbrains.kotlinx:kotlinx-datetime:0.7.1")
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
@@ -152,8 +150,8 @@ android {
     sourceSets["main"].manifest.srcFile("src/androidMain/AndroidManifest.xml")
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
     }
 }
 
@@ -162,7 +160,7 @@ room {
     schemaDirectory("$projectDir/schemas")
 }
 
-// KSP para todos los targets
+// ✅ CAMBIO: De "kspDesktop" a "kspJvm" estándar
 dependencies {
     add("kspAndroid", "androidx.room:room-compiler:2.8.2")
     add("kspIosSimulatorArm64", "androidx.room:room-compiler:2.8.2")
@@ -170,7 +168,6 @@ dependencies {
     add("kspIosArm64", "androidx.room:room-compiler:2.8.2")
     add("kspDesktop", "androidx.room:room-compiler:2.8.2")
 }
-
 // CONFIGURACIÓN PARA JITPACK
 // JitPack automáticamente publica todos los targets de KMP
 // No necesitas configurar publishing manualmente
