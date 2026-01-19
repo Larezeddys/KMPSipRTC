@@ -19,6 +19,9 @@ plugins {
 group = "com.github.larezeddys"
 version = "1.0.0"
 
+// Versión de Trixnity
+val trixnityVersion = "4.22.7" // Última versión disponible
+
 kotlin {
     androidTarget {
         publishLibraryVariants("release", "debug")
@@ -82,6 +85,16 @@ kotlin {
                 // Room
                 implementation("androidx.room:room-runtime:2.8.2")
                 implementation("androidx.sqlite:sqlite-bundled:2.6.1")
+
+                // Trixnity - Usando el groupId correcto: net.folivo
+                implementation("net.folivo:trixnity-client:$trixnityVersion")
+                // Agrega otros módulos según necesites:
+                 implementation("net.folivo:trixnity-clientserverapi-client:$trixnityVersion")
+                 implementation("net.folivo:trixnity-olm:$trixnityVersion")
+                 implementation("net.folivo:trixnity-crypto-core:$trixnityVersion")
+
+                implementation("net.folivo:trixnity-client-media-okio:${trixnityVersion}")
+                implementation("net.folivo:trixnity-client-repository-room:${trixnityVersion}")
             }
         }
 
@@ -100,6 +113,9 @@ kotlin {
                 implementation("io.insert-koin:koin-android:4.1.1")
                 implementation("io.ktor:ktor-client-okhttp:3.3.1")
                 implementation("androidx.room:room-sqlite-wrapper:2.8.2")
+
+                // Motor Ktor para Android
+                // Ya lo tienes, pero asegúrate de que esté presente
             }
         }
 
@@ -112,6 +128,9 @@ kotlin {
             dependencies {
                 implementation("io.ktor:ktor-client-darwin:3.3.1")
                 implementation("com.shepeliev:webrtc-kmp:0.125.11")
+
+                // Motor Ktor para iOS
+                // Ya lo tienes con ktor-client-darwin
             }
         }
 
@@ -136,6 +155,9 @@ kotlin {
                     osName.contains("win") -> runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.10.0:windows-x86_64")
                     osName.contains("linux") -> runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.10.0:linux-x86_64")
                 }
+
+                // Motor Ktor para Desktop
+                // Ya lo tienes con ktor-client-okhttp
             }
         }
     }
@@ -160,7 +182,6 @@ room {
     schemaDirectory("$projectDir/schemas")
 }
 
-// ✅ CAMBIO: De "kspDesktop" a "kspJvm" estándar
 dependencies {
     add("kspAndroid", "androidx.room:room-compiler:2.8.2")
     add("kspIosSimulatorArm64", "androidx.room:room-compiler:2.8.2")
@@ -168,6 +189,3 @@ dependencies {
     add("kspIosArm64", "androidx.room:room-compiler:2.8.2")
     add("kspDesktop", "androidx.room:room-compiler:2.8.2")
 }
-// CONFIGURACIÓN PARA JITPACK
-// JitPack automáticamente publica todos los targets de KMP
-// No necesitas configurar publishing manualmente

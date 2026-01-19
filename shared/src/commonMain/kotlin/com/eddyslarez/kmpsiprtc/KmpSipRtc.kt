@@ -19,6 +19,12 @@ import com.eddyslarez.kmpsiprtc.core.SipCoreManager
 import com.eddyslarez.kmpsiprtc.data.database.DatabaseManager
 import com.eddyslarez.kmpsiprtc.services.calls.CallStateManager
 import com.eddyslarez.kmpsiprtc.services.calls.MultiCallManager
+import com.eddyslarez.kmpsiprtc.services.matrix.MatrixConfig
+import com.eddyslarez.kmpsiprtc.services.matrix.MatrixManager
+import com.eddyslarez.kmpsiprtc.services.matrix.MatrixMessage
+import com.eddyslarez.kmpsiprtc.services.matrix.MatrixRoom
+import com.eddyslarez.kmpsiprtc.services.unified.UnifiedCallInfo
+import com.eddyslarez.kmpsiprtc.services.unified.UnifiedCallRouter
 import kotlinx.datetime.Instant
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
@@ -58,6 +64,8 @@ class KmpSipRtc private constructor() {
     // === GESTIÓN DE ESTADOS DE NOTIFICACIÓN ===
     private val lastNotifiedRegistrationStates = mutableMapOf<String, RegistrationState>()
     private val lastNotifiedCallState = mutableStateOf<CallStateInfo?>(null)
+    private var matrixManager: MatrixManager? = null
+    private var unifiedCallRouter: UnifiedCallRouter? = null
 
     // === GESTIÓN DE CONCURRENCIA ===
     private val initMutex = Mutex()
@@ -227,8 +235,12 @@ class KmpSipRtc private constructor() {
      * @param onComplete Callback con resultado de la inicialización
      */
 
+    /**
+     * Inicializa la biblioteca SIP con soporte opcional para Matrix
+     */
     fun initialize(
         config: SipConfig = SipConfig(),
+        matrixConfig: MatrixConfig? = null,
         onComplete: ((Result<Unit>) -> Unit)? = null
     ) {
         if (isInitialized) {
@@ -245,11 +257,11 @@ class KmpSipRtc private constructor() {
                 }
 
                 try {
-                    log.d(tag = TAG) { "🚀 Initializing KmpSipRtc v1.0.0" }
+                    log.d(tag = TAG) { "🚀 Initializing KmpSipRtc v1.0.0${if (matrixConfig != null) " with Matrix support" else ""}" }
 
                     this@KmpSipRtc.config = config
 
-                    // Crear instancia del manager principal
+                    // 🔹 Crear instancia SIP Core
                     sipCoreManager = SipCoreManager.createInstance(
                         SipConfig(
                             defaultDomain = config.defaultDomain,
@@ -268,12 +280,12 @@ class KmpSipRtc private constructor() {
                     val manager = sipCoreManager
                         ?: throw SipLibraryException("Failed to create SipCoreManager")
 
-                    // ✅ MEJORA: Esperar inicialización de managers con timeout
+                    // 🔹 Esperar inicialización de managers SIP
                     var retries = 0
                     val maxRetries = 50
                     while (retries < maxRetries) {
                         if (manager.isSipCoreManagerHealthy()) {
-                            log.d(tag = TAG) { "✅ All managers initialized successfully" }
+                            log.d(tag = TAG) { "✅ SIP managers initialized successfully" }
                             break
                         }
                         delay(100)
@@ -281,22 +293,41 @@ class KmpSipRtc private constructor() {
                     }
 
                     if (retries >= maxRetries) {
-                        log.w(tag = TAG) { "⚠️ Initialization timeout - some managers may not be ready" }
+                        log.w(tag = TAG) { "⚠️ SIP initialization timeout - some managers may not be ready" }
                     }
 
-                    log.d(tag = TAG) { "✅ Preserving existing call history between initializations" }
+                    // 🔹 Inicialización opcional de Matrix
+                    if (matrixConfig != null) {
+                        val webRtcManager = manager.webRtcManager
+                            ?: throw SipLibraryException("WebRTC manager not available for Matrix")
 
+                        val callManager = manager.callManager
+                            ?: throw SipLibraryException("Call manager not available for Matrix")
+
+                        matrixManager = MatrixManager(matrixConfig, webRtcManager)
+                        matrixManager?.initialize()
+
+                        unifiedCallRouter = UnifiedCallRouter(
+                            sipCallManager = callManager,
+                            matrixManager = matrixManager!!
+                        )
+
+                        log.d(tag = TAG) { "✅ Matrix support initialized successfully" }
+                    }
+
+                    // 🔹 Setup general
                     setupInternalListeners()
 
-                    databaseManager = sipCoreManager!!.databaseManager
+                    databaseManager = manager.databaseManager
                     pushModeManager = PushModeManager(config.pushModeConfig)
                     setupPushModeManager()
 
-                    // ✅ SOLUCIÓN: Cargar historial existente en lugar de limpiar
                     loadExistingCallHistory()
 
                     isInitialized = true
-                    log.d(tag = TAG) { "✅ KmpSipRtc initialized successfully with preserved history" }
+                    log.d(tag = TAG) {
+                        "✅ KmpSipRtc initialized successfully${if (matrixConfig != null) " with Matrix support" else ""}"
+                    }
 
                     onComplete?.invoke(Result.success(Unit))
 
@@ -304,16 +335,14 @@ class KmpSipRtc private constructor() {
                     log.e(tag = TAG) { "❌ Error initializing library: ${e.message}" }
                     onComplete?.invoke(
                         Result.failure(
-                            SipLibraryException(
-                                "Failed to initialize library",
-                                e
-                            )
+                            SipLibraryException("Failed to initialize library", e)
                         )
                     )
                 }
             }
         }
     }
+
 
     // En KmpSipRtc.kt - AÑADIR este método
     fun verifyCallLogPersistence(onResult: (String) -> Unit) {
@@ -2004,6 +2033,102 @@ class KmpSipRtc private constructor() {
                 }
             }
         }
+    }
+
+
+    ////////MATRIX//////
+
+    /**
+     * Login a servidor Matrix
+     */
+    fun loginMatrix(userId: String, password: String, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run {
+            onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized")))
+            return
+        }
+
+        internalScope.launch {
+            val result = matrix.login(userId, password)
+            onComplete?.invoke(result)
+        }
+    }
+    /**
+     * Crear sala Matrix
+     */
+    fun createMatrixRoom(
+        name: String,
+        isDirect: Boolean = false,
+        inviteUserIds: List<String> = emptyList(),
+        onComplete: ((Result<String>) -> Unit)? = null
+    ) {
+        checkInitialized()
+        val matrix = matrixManager ?: run {
+            onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized")))
+            return
+        }
+
+        internalScope.launch {
+            val result = matrix.createRoom(name, isDirect, inviteUserIds)
+            onComplete?.invoke(result)
+        }
+    }
+
+    /**
+     * Enviar mensaje Matrix
+     */
+    fun sendMatrixMessage(
+        roomId: String,
+        message: String,
+        onComplete: ((Result<Unit>) -> Unit)? = null
+    ) {
+        checkInitialized()
+        val matrix = matrixManager ?: run {
+            onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized")))
+            return
+        }
+
+        internalScope.launch {
+            val result = matrix.sendTextMessage(roomId, message)
+            onComplete?.invoke(result)
+        }
+    }
+
+    /**
+     * Llamada unificada (auto-detecta SIP o Matrix)
+     */
+    fun makeUnifiedCall(
+        destination: String,
+        isVideo: Boolean = false,
+        onComplete: ((Result<UnifiedCallInfo>) -> Unit)? = null
+    ) {
+        checkInitialized()
+        val router = unifiedCallRouter ?: run {
+            onComplete?.invoke(Result.failure(SipLibraryException("Unified router not initialized")))
+            return
+        }
+
+        internalScope.launch {
+            val accountInfo = sipCoreManager?.currentAccountInfo
+            val result = router.makeCall(destination, isVideo, accountInfo)
+            onComplete?.invoke(result)
+        }
+    }
+
+    /**
+     * Obtener rooms Matrix
+     */
+    fun getMatrixRoomsFlow(): Flow<List<MatrixRoom>>? {
+        checkInitialized()
+        return matrixManager?.rooms
+    }
+
+    /**
+     * Obtener mensajes Matrix
+     */
+    fun getMatrixMessagesFlow(): Flow<Map<String, List<MatrixMessage>>>? {
+        checkInitialized()
+        return matrixManager?.messages
     }
 
     // === CLASES DE EXCEPCIÓN ===
