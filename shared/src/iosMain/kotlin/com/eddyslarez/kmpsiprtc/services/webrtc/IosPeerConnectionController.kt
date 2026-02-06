@@ -439,7 +439,9 @@ class IosPeerConnectionController(
 
         peerConnection?.close()
         peerConnection = null
+        localAudioTrack = null
         remoteAudioTrack = null
+        dtmfSender = null
     }
 
     fun dispose() {

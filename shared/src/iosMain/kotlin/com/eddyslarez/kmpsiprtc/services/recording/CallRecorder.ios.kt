@@ -315,11 +315,15 @@ class IosCallRecorder : CallRecorder {
 
             // Escribir encabezado WAV
             val header = createWavHeader(totalAudioLen.toLong(), totalDataLen.toLong())
-            data.appendBytes(header.refTo(0) as COpaquePointer?, header.size.toULong())
+            header.usePinned { pinned ->
+                data.appendBytes(pinned.addressOf(0), header.size.toULong())
+            }
 
             // Escribir datos de audio
             audioBuffer.forEach { chunk ->
-                data.appendBytes(chunk.refTo(0) as COpaquePointer?, chunk.size.toULong())
+                chunk.usePinned { pinned ->
+                    data.appendBytes(pinned.addressOf(0), chunk.size.toULong())
+                }
             }
 
             data.writeToFile(filePath, atomically = true)
@@ -365,8 +369,12 @@ class IosCallRecorder : CallRecorder {
 
             val data = NSMutableData()
             val header = createWavHeader(totalAudioLen.toLong(), totalDataLen.toLong())
-            data.appendBytes(header.refTo(0) as COpaquePointer?, header.size.toULong())
-            data.appendBytes(mixedBytes.refTo(0) as COpaquePointer?, mixedBytes.size.toULong())
+            header.usePinned { pinned ->
+                data.appendBytes(pinned.addressOf(0), header.size.toULong())
+            }
+            mixedBytes.usePinned { pinned ->
+                data.appendBytes(pinned.addressOf(0), mixedBytes.size.toULong())
+            }
             data.writeToFile(filePath, atomically = true)
 
             log.d(TAG) { "✅ Mixed audio saved: $filePath (${data.length / 1024u}KB)" }

@@ -69,8 +69,7 @@ class IosAudioController(
         savedAudioCategory = audioSession.category
 
         if (!configureAudioSession()) {
-            log.e(TAG) { "Failed to configure audio session" }
-            return
+            log.w(TAG) { "Failed to configure audio session (CallKit may activate it later)" }
         }
 
         scanDevices()
