@@ -50,6 +50,10 @@ class DesktopPeerConnectionController(
         }
     )
 
+    // ==================== AUDIO DEVICE MODULE ====================
+
+    fun getAudioDeviceModule(): AudioDeviceModule? = audioDeviceModule
+
     // ==================== INITIALIZATION ====================
 
     fun initialize() {

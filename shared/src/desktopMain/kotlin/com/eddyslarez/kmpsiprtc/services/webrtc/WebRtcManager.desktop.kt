@@ -70,6 +70,9 @@ class DesktopWebRtcManager : WebRtcManager {
             )
             audioController.initialize()
 
+            // Pasar el AudioDeviceModule real del PeerConnectionController al AudioController
+            audioController.updateAudioDeviceModule(peerConnectionController.getAudioDeviceModule())
+
             _isInitialized.value = true
             log.d(TAG) { "✅✅✅ WebRTC initialized successfully ✅✅✅" }
 
@@ -264,6 +267,32 @@ class DesktopWebRtcManager : WebRtcManager {
             audioController.getCurrentActiveAudioUnit()
         } else {
             null
+        }
+    }
+
+    override fun selectAudioInputDeviceByName(deviceName: String): Boolean {
+        if (!::audioController.isInitialized) return false
+        val (inputs, _) = audioController.getAllDevices()
+        val device = inputs.firstOrNull { it.name == deviceName }
+        return if (device != null) {
+            log.d(TAG) { "Selecting input device by name: $deviceName" }
+            audioController.changeInputDevice(device)
+        } else {
+            log.w(TAG) { "Input device not found by name: $deviceName" }
+            false
+        }
+    }
+
+    override fun selectAudioOutputDeviceByName(deviceName: String): Boolean {
+        if (!::audioController.isInitialized) return false
+        val (_, outputs) = audioController.getAllDevices()
+        val device = outputs.firstOrNull { it.name == deviceName }
+        return if (device != null) {
+            log.d(TAG) { "Selecting output device by name: $deviceName" }
+            audioController.changeOutputDevice(device)
+        } else {
+            log.w(TAG) { "Output device not found by name: $deviceName" }
+            false
         }
     }
 

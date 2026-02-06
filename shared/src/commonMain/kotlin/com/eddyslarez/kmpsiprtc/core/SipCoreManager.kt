@@ -283,6 +283,14 @@ class SipCoreManager private constructor(
         return webRtcManager.getCurrentActiveAudioUnit()
     }
 
+    fun selectAudioInputDeviceByName(deviceName: String): Boolean {
+        return webRtcManager.selectAudioInputDeviceByName(deviceName)
+    }
+
+    fun selectAudioOutputDeviceByName(deviceName: String): Boolean {
+        return webRtcManager.selectAudioOutputDeviceByName(deviceName)
+    }
+
     private fun initializeNetworkManager() {
         try {
             networkManager.initialize()

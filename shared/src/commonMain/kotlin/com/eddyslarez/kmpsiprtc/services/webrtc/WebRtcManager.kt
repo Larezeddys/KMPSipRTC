@@ -105,6 +105,20 @@ interface WebRtcManager {
      * @return true if successfully started sending tones, false otherwise
      */
     fun sendDtmfTones(tones: String, duration: Int = 100, gap: Int = 70): Boolean
+
+    /**
+     * Seleccionar dispositivo de entrada de audio por nombre (solo Desktop)
+     * @param deviceName Nombre del dispositivo de entrada
+     * @return true si se seleccionó correctamente
+     */
+    fun selectAudioInputDeviceByName(deviceName: String): Boolean
+
+    /**
+     * Seleccionar dispositivo de salida de audio por nombre (solo Desktop)
+     * @param deviceName Nombre del dispositivo de salida
+     * @return true si se seleccionó correctamente
+     */
+    fun selectAudioOutputDeviceByName(deviceName: String): Boolean
 }
 interface WebRtcEventListener {
     /**

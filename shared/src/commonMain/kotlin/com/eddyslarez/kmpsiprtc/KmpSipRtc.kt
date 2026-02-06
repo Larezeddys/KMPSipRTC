@@ -1615,6 +1615,20 @@ class KmpSipRtc private constructor() {
         return sipCoreManager?.getCurrentActiveAudioUnit()
     }
 
+    /**
+     * Seleccionar dispositivo de entrada de audio por nombre (solo Desktop)
+     */
+    fun selectAudioInputDeviceByName(deviceName: String): Boolean {
+        return sipCoreManager?.selectAudioInputDeviceByName(deviceName) ?: false
+    }
+
+    /**
+     * Seleccionar dispositivo de salida de audio por nombre (solo Desktop)
+     */
+    fun selectAudioOutputDeviceByName(deviceName: String): Boolean {
+        return sipCoreManager?.selectAudioOutputDeviceByName(deviceName) ?: false
+    }
+
     // === API PÚBLICA - TONOS DE LLAMADA ===
 
     /**

@@ -422,6 +422,11 @@ class AndroidWebRtcManager : WebRtcManager {
         }
     }
 
+    // ==================== DEVICE SELECTION BY NAME (no-op on Android) ====================
+
+    override fun selectAudioInputDeviceByName(deviceName: String): Boolean = false
+    override fun selectAudioOutputDeviceByName(deviceName: String): Boolean = false
+
     // ==================== LISTENER ====================
 
     override fun setListener(listener: WebRtcEventListener?) {
