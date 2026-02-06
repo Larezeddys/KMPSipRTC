@@ -10,6 +10,7 @@ import androidx.core.app.ActivityCompat
 import com.eddyslarez.kmpsiprtc.data.models.RecordingResult
 import com.eddyslarez.kmpsiprtc.platform.AndroidContext.getApplication
 import com.eddyslarez.kmpsiprtc.platform.log
+import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 import kotlinx.coroutines.*
 import java.io.File
 import java.io.FileOutputStream
@@ -54,8 +55,8 @@ class AndroidCallRecorder() : CallRecorder {
     private var outputDir: File? = null
     private var currentCallId: String? = null
 
-    // Callback para streaming
-    private var audioStreamCallback: AudioStreamCallback? = null
+    // Listener para streaming en tiempo real (PCM crudo)
+    private var audioStreamListener: AudioStreamListener? = null
 
     // Configuración de funcionalidades
     data class AudioConfig(
@@ -71,33 +72,8 @@ class AndroidCallRecorder() : CallRecorder {
         }
     }
 
-    /**
-     * Interface para recibir audio en tiempo real
-     */
-    interface AudioStreamCallback {
-        /**
-         * Llamado cuando hay nuevo audio local (micrófono) disponible
-         * @param audioData PCM16 mono a 24kHz en base64
-         */
-        fun onLocalAudioChunk(audioData: String)
-
-        /**
-         * Llamado cuando hay nuevo audio remoto disponible
-         * @param audioData PCM16 mono a 24kHz en base64
-         */
-        fun onRemoteAudioChunk(audioData: String)
-
-        /**
-         * Llamado cuando hay un error en el streaming
-         */
-        fun onStreamError(error: Exception)
-    }
-
-    /**
-     * Configura el callback para recibir audio en tiempo real
-     */
-    fun setAudioStreamCallback(callback: AudioStreamCallback?) {
-        audioStreamCallback = callback
+    override fun setAudioStreamListener(listener: AudioStreamListener?) {
+        audioStreamListener = listener
     }
 
     /**
@@ -115,8 +91,8 @@ class AndroidCallRecorder() : CallRecorder {
         log.d(TAG) { "   Recording: ${config.enableRecording}" }
         log.d(TAG) { "   Streaming: ${config.enableStreaming}" }
 
-        if (config.enableStreaming && audioStreamCallback == null) {
-            log.w(TAG) { "⚠️ Streaming enabled but no callback set!" }
+        if (config.enableStreaming && audioStreamListener == null) {
+            log.w(TAG) { "⚠️ Streaming enabled but no listener set!" }
         }
 
         currentCallId = callId
@@ -140,10 +116,7 @@ class AndroidCallRecorder() : CallRecorder {
         startAudioCapture(callId, AudioConfig(enableRecording = true, enableStreaming = false))
     }
 
-    /**
-     * Inicia solo streaming sin grabar
-     */
-    fun startStreaming(callId: String) {
+    override fun startStreaming(callId: String) {
         startAudioCapture(callId, AudioConfig(enableRecording = false, enableStreaming = true))
     }
 
@@ -198,8 +171,8 @@ class AndroidCallRecorder() : CallRecorder {
                             }
                         }
 
-                        // Enviar al callback (solo si está habilitado)
-                        if (currentConfig.enableStreaming && audioStreamCallback != null) {
+                        // Enviar al listener de streaming (solo si está habilitado)
+                        if (currentConfig.enableStreaming && audioStreamListener != null) {
                             accumulatedBuffer.addAll(chunk.toList())
 
                             // Enviar chunks completos
@@ -208,14 +181,12 @@ class AndroidCallRecorder() : CallRecorder {
                                 accumulatedBuffer.subList(0, CHUNK_SIZE_BYTES).clear()
 
                                 try {
-                                    val base64Audio = android.util.Base64.encodeToString(
-                                        chunkToSend,
-                                        android.util.Base64.NO_WRAP
+                                    audioStreamListener?.onLocalAudioData(
+                                        chunkToSend, SAMPLE_RATE, 1, 16
                                     )
-                                    audioStreamCallback?.onLocalAudioChunk(base64Audio)
                                 } catch (e: Exception) {
                                     log.e(TAG) { "Error sending local audio chunk: ${e.message}" }
-                                    audioStreamCallback?.onStreamError(e)
+                                    audioStreamListener?.onStreamError(e.message ?: "Error sending local audio")
                                 }
                             }
                         }
@@ -230,7 +201,7 @@ class AndroidCallRecorder() : CallRecorder {
 
             } catch (e: Exception) {
                 log.e(TAG) { "❌ Error capturing microphone: ${e.message}" }
-                audioStreamCallback?.onStreamError(e)
+                audioStreamListener?.onStreamError(e.message ?: "Error capturing microphone")
                 e.printStackTrace()
             }
         }
@@ -246,17 +217,15 @@ class AndroidCallRecorder() : CallRecorder {
             }
         }
 
-        // Enviar a OpenAI en tiempo real (solo si está habilitado)
-        if (currentConfig.enableStreaming && audioStreamCallback != null) {
+        // Enviar streaming en tiempo real (solo si está habilitado)
+        if (currentConfig.enableStreaming && audioStreamListener != null) {
             try {
-                val base64Audio = android.util.Base64.encodeToString(
-                    audioData,
-                    android.util.Base64.NO_WRAP
+                audioStreamListener?.onRemoteAudioData(
+                    audioData.copyOf(), SAMPLE_RATE, 1, 16
                 )
-                audioStreamCallback?.onRemoteAudioChunk(base64Audio)
             } catch (e: Exception) {
                 log.e(TAG) { "Error sending remote audio chunk: ${e.message}" }
-                audioStreamCallback?.onStreamError(e)
+                audioStreamListener?.onStreamError(e.message ?: "Error sending remote audio")
             }
         }
     }
@@ -307,7 +276,18 @@ class AndroidCallRecorder() : CallRecorder {
 
     override fun isRecording(): Boolean = isRecording
 
-    fun isStreaming(): Boolean = isStreaming
+    override fun isStreaming(): Boolean = isStreaming
+
+    override fun stopStreaming() {
+        if (!isStreaming) return
+        log.d(TAG) { "🛑 Stopping audio streaming..." }
+        isStreaming = false
+        // Si no está grabando tampoco, detener la captura del micrófono
+        if (!isRecording) {
+            recordingJob?.cancel()
+        }
+        log.d(TAG) { "✅ Audio streaming stopped" }
+    }
 
     fun isActive(): Boolean = isRecording || isStreaming
 
@@ -361,7 +341,7 @@ class AndroidCallRecorder() : CallRecorder {
         recordingScope.cancel()
         localAudioBuffer.clear()
         remoteAudioBuffer.clear()
-        audioStreamCallback = null
+        audioStreamListener = null
     }
 
     // ==================== GUARDADO DE ARCHIVOS ====================

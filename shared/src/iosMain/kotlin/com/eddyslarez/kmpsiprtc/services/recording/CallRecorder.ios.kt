@@ -2,6 +2,7 @@ package com.eddyslarez.kmpsiprtc.services.recording
 
 import com.eddyslarez.kmpsiprtc.data.models.RecordingResult
 import com.eddyslarez.kmpsiprtc.platform.log
+import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 import com.eddyslarez.kmpsiprtc.utils.Lock
 import kotlinx.cinterop.*
 import kotlinx.coroutines.*
@@ -38,9 +39,14 @@ class IosCallRecorder : CallRecorder {
     private val localBufferMutex = Mutex()
     private val remoteBufferMutex = Mutex()
 
-    // Control de grabación
+    // Listener para streaming en tiempo real
+    private var audioStreamListener: AudioStreamListener? = null
+
+    // Control de grabación y streaming
     @Volatile
     private var isRecording = false
+    @Volatile
+    private var isStreamingActive = false
     private var recordingJob: Job? = null
     private val recordingScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
@@ -135,9 +141,8 @@ class IosCallRecorder : CallRecorder {
         }
     }
 
-    // ✅ Ahora es suspend para poder usar mutex
     private suspend fun captureAudioBuffer(buffer: AVAudioPCMBuffer) {
-        if (!isRecording) return
+        if (!isRecording && !isStreamingActive) return
 
         try {
             val frameLength = buffer.frameLength.toInt()
@@ -154,10 +159,24 @@ class IosCallRecorder : CallRecorder {
                 byteArray[i * 2 + 1] = ((sample.toInt() shr 8) and 0xFF).toByte()
             }
 
-            // ✅ Acceso thread-safe usando mutex
-            localBufferMutex.withLock {
-                if (isRecording) { // Double-check dentro del lock
-                    localAudioBuffer.add(byteArray)
+            // Guardar en buffer si está grabando
+            if (isRecording) {
+                localBufferMutex.withLock {
+                    if (isRecording) {
+                        localAudioBuffer.add(byteArray)
+                    }
+                }
+            }
+
+            // Enviar al listener si está haciendo streaming
+            if (isStreamingActive && audioStreamListener != null) {
+                try {
+                    audioStreamListener?.onLocalAudioData(
+                        byteArray, SAMPLE_RATE.toInt(), CHANNELS, BIT_DEPTH
+                    )
+                } catch (e: Exception) {
+                    log.e(TAG) { "Error sending local audio stream: ${e.message}" }
+                    audioStreamListener?.onStreamError(e.message ?: "Error sending local audio")
                 }
             }
         } catch (e: Exception) {
@@ -208,21 +227,78 @@ class IosCallRecorder : CallRecorder {
         RecordingResult(localFile, remoteFile, mixedFile)
     }
 
-    // ✅ Cambiar a función regular (no suspend) para compatibilidad
     override fun captureRemoteAudio(audioData: ByteArray) {
-        if (!isRecording) return
+        if (!isRecording && !isStreamingActive) return
 
-        // ✅ Lanzar coroutine para usar mutex
-        recordingScope.launch {
-            remoteBufferMutex.withLock {
-                if (isRecording) {
-                    remoteAudioBuffer.add(audioData.copyOf())
+        val dataCopy = audioData.copyOf()
+
+        // Guardar en buffer si está grabando
+        if (isRecording) {
+            recordingScope.launch {
+                remoteBufferMutex.withLock {
+                    if (isRecording) {
+                        remoteAudioBuffer.add(dataCopy)
+                    }
                 }
+            }
+        }
+
+        // Enviar al listener si está haciendo streaming
+        if (isStreamingActive && audioStreamListener != null) {
+            try {
+                audioStreamListener?.onRemoteAudioData(
+                    dataCopy, SAMPLE_RATE.toInt(), CHANNELS, BIT_DEPTH
+                )
+            } catch (e: Exception) {
+                log.e(TAG) { "Error sending remote audio stream: ${e.message}" }
+                audioStreamListener?.onStreamError(e.message ?: "Error sending remote audio")
             }
         }
     }
 
     override fun isRecording(): Boolean = isRecording
+
+    // ==================== STREAMING EN TIEMPO REAL ====================
+
+    override fun setAudioStreamListener(listener: AudioStreamListener?) {
+        audioStreamListener = listener
+    }
+
+    override fun startStreaming(callId: String) {
+        if (isStreamingActive) {
+            log.w(TAG) { "⚠️ Streaming already in progress" }
+            return
+        }
+
+        log.d(TAG) { "🎙️ Starting audio streaming for: $callId" }
+        currentCallId = callId
+        isStreamingActive = true
+
+        // Iniciar captura del micrófono si no está ya capturando
+        if (!isRecording) {
+            startMicrophoneCapture()
+        }
+
+        log.d(TAG) { "✅ Audio streaming started" }
+    }
+
+    override fun stopStreaming() {
+        if (!isStreamingActive) return
+        log.d(TAG) { "🛑 Stopping audio streaming..." }
+        isStreamingActive = false
+
+        // Si no está grabando tampoco, detener la captura del micrófono
+        if (!isRecording) {
+            audioEngine?.inputNode?.removeTapOnBus(0u)
+            audioEngine?.stop()
+            audioEngine = null
+            recordingJob?.cancel()
+        }
+
+        log.d(TAG) { "✅ Audio streaming stopped" }
+    }
+
+    override fun isStreaming(): Boolean = isStreamingActive
 
     override fun getCurrentCallId(): String? = currentCallId
 
@@ -287,6 +363,8 @@ class IosCallRecorder : CallRecorder {
     override fun dispose() {
         log.d(TAG) { "Disposing CallRecorder" }
         isRecording = false
+        isStreamingActive = false
+        audioStreamListener = null
         audioEngine?.stop()
         audioEngine = null
         recordingJob?.cancel()

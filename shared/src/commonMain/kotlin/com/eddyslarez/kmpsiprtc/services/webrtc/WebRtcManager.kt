@@ -6,6 +6,7 @@ import com.eddyslarez.kmpsiprtc.data.models.AudioUnitTypes
 import com.eddyslarez.kmpsiprtc.data.models.RecordingResult
 import com.eddyslarez.kmpsiprtc.data.models.SdpType
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
+import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 
 interface WebRtcManager {
     /**
@@ -119,6 +120,30 @@ interface WebRtcManager {
      * @return true si se seleccionó correctamente
      */
     fun selectAudioOutputDeviceByName(deviceName: String): Boolean
+
+    // ==================== STREAMING EN TIEMPO REAL ====================
+
+    /**
+     * Configurar listener para recibir audio en tiempo real
+     * @param listener Listener que recibirá datos PCM crudos, o null para desregistrar
+     */
+    fun setAudioStreamListener(listener: AudioStreamListener?)
+
+    /**
+     * Iniciar streaming de audio en tiempo real (independiente de grabación)
+     * @param callId Identificador único de la llamada
+     */
+    fun startAudioStreaming(callId: String)
+
+    /**
+     * Detener streaming de audio en tiempo real
+     */
+    fun stopAudioStreaming()
+
+    /**
+     * Verificar si el streaming de audio está activo
+     */
+    fun isAudioStreaming(): Boolean
 }
 interface WebRtcEventListener {
     /**

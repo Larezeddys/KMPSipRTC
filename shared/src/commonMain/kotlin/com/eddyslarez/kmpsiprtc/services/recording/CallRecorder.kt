@@ -1,6 +1,7 @@
 package com.eddyslarez.kmpsiprtc.services.recording
 
 import com.eddyslarez.kmpsiprtc.data.models.RecordingResult
+import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 
 /**
  * Interface para grabación de llamadas multiplataforma
@@ -59,6 +60,30 @@ interface CallRecorder {
      * Liberar recursos
      */
     fun dispose()
+
+    // ==================== STREAMING EN TIEMPO REAL ====================
+
+    /**
+     * Configurar listener para recibir audio en tiempo real
+     * @param listener Listener que recibirá los datos PCM crudos, o null para desregistrar
+     */
+    fun setAudioStreamListener(listener: AudioStreamListener?)
+
+    /**
+     * Iniciar streaming de audio en tiempo real (independiente de grabación)
+     * @param callId Identificador único de la llamada
+     */
+    fun startStreaming(callId: String)
+
+    /**
+     * Detener streaming de audio en tiempo real
+     */
+    fun stopStreaming()
+
+    /**
+     * Verificar si el streaming está activo
+     */
+    fun isStreaming(): Boolean
 }
 
 /**

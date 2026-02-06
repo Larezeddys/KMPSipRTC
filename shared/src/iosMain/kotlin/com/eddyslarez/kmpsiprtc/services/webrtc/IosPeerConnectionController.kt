@@ -5,6 +5,7 @@ import com.eddyslarez.kmpsiprtc.data.models.SdpType
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.services.audio.AudioCaptureCallback
+import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 import com.eddyslarez.kmpsiprtc.services.audio.AudioTrackCapture
 import com.eddyslarez.kmpsiprtc.services.audio.createRemoteAudioCapture
 import com.eddyslarez.kmpsiprtc.services.recording.CallRecorder
@@ -370,14 +371,14 @@ class IosPeerConnectionController(
                         frames: Int,
                         timestampMs: Long
                     ) {
-                        if (callRecorder.isRecording()) {
+                        if (callRecorder.isRecording() || callRecorder.isStreaming()) {
                             callRecorder.captureRemoteAudio(data)
                         }
                     }
                 }
             )
 
-            if (callRecorder.isRecording()) {
+            if (callRecorder.isRecording() || callRecorder.isStreaming()) {
                 remoteAudioCapture?.startCapture()
             }
 
@@ -405,6 +406,30 @@ class IosPeerConnectionController(
     fun isRecording(): Boolean = callRecorder.isRecording()
 
     fun getRecorder(): CallRecorder = callRecorder
+
+    // ==================== STREAMING EN TIEMPO REAL ====================
+
+    fun setAudioStreamListener(listener: AudioStreamListener?) {
+        callRecorder.setAudioStreamListener(listener)
+    }
+
+    fun startStreaming(callId: String) {
+        log.d(TAG) { "🎙️ Starting audio streaming" }
+        callRecorder.startStreaming(callId)
+        remoteAudioCapture?.startCapture()
+        log.d(TAG) { "✅ Audio streaming started for call: $callId" }
+    }
+
+    fun stopStreaming() {
+        log.d(TAG) { "🛑 Stopping audio streaming" }
+        callRecorder.stopStreaming()
+        if (!callRecorder.isRecording()) {
+            remoteAudioCapture?.stopCapture()
+        }
+        log.d(TAG) { "✅ Audio streaming stopped" }
+    }
+
+    fun isStreaming(): Boolean = callRecorder.isStreaming()
 
     // ==================== STATE & CLEANUP ====================
 

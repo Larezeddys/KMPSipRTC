@@ -11,6 +11,7 @@ import com.eddyslarez.kmpsiprtc.data.models.SdpType
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.services.audio.AudioCaptureCallback
+import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 import com.eddyslarez.kmpsiprtc.services.audio.AudioTrackCapture
 import com.eddyslarez.kmpsiprtc.services.audio.IosAudioController
 import com.eddyslarez.kmpsiprtc.services.audio.createRemoteAudioCapture
@@ -315,6 +316,28 @@ class IosWebRtcManager : WebRtcManager {
     override fun isRecordingCall(): Boolean {
         if (!::peerConnectionController.isInitialized) return false
         return peerConnectionController.isRecording()
+    }
+
+    // ==================== STREAMING EN TIEMPO REAL ====================
+
+    override fun setAudioStreamListener(listener: AudioStreamListener?) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.setAudioStreamListener(listener)
+    }
+
+    override fun startAudioStreaming(callId: String) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.startStreaming(callId)
+    }
+
+    override fun stopAudioStreaming() {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.stopStreaming()
+    }
+
+    override fun isAudioStreaming(): Boolean {
+        if (!::peerConnectionController.isInitialized) return false
+        return peerConnectionController.isStreaming()
     }
 
     // ==================== DTMF & MEDIA DIRECTION ====================

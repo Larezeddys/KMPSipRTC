@@ -19,6 +19,7 @@ import com.eddyslarez.kmpsiprtc.platform.AndroidContext.getApplication
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.services.audio.AudioController
 import com.eddyslarez.kmpsiprtc.services.audio.BluetoothController
+import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 import com.eddyslarez.kmpsiprtc.services.recording.RecordingFileInfo
 import com.eddyslarez.kmpsiprtc.services.recording.RecordingType
 import kotlinx.coroutines.Dispatchers
@@ -565,6 +566,31 @@ class AndroidWebRtcManager : WebRtcManager {
      */
     fun deleteAllRecordings(): Boolean {
         return peerConnectionController.getRecorder()?.deleteAllRecordings() ?: false
+    }
+
+    // ==================== STREAMING EN TIEMPO REAL ====================
+
+    override fun setAudioStreamListener(listener: AudioStreamListener?) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.setAudioStreamListener(listener)
+    }
+
+    override fun startAudioStreaming(callId: String) {
+        if (!::peerConnectionController.isInitialized) {
+            log.e(TAG) { "❌ Cannot start streaming - controller not initialized" }
+            return
+        }
+        peerConnectionController.startStreaming(callId)
+    }
+
+    override fun stopAudioStreaming() {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.stopStreaming()
+    }
+
+    override fun isAudioStreaming(): Boolean {
+        if (!::peerConnectionController.isInitialized) return false
+        return peerConnectionController.isStreaming()
     }
 
     /**

@@ -8,6 +8,7 @@ import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.services.audio.AudioCaptureCallback
 import com.eddyslarez.kmpsiprtc.services.audio.AudioTrackCapture
 import com.eddyslarez.kmpsiprtc.services.audio.createRemoteAudioCapture
+import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 import com.eddyslarez.kmpsiprtc.services.recording.CallRecorder
 import com.eddyslarez.kmpsiprtc.services.recording.createCallRecorder
 import kotlinx.coroutines.*
@@ -281,21 +282,16 @@ class PeerConnectionController(
                         frames: Int,
                         timestampMs: Long
                     ) {
-                        // Enviar al recorder si está grabando
-                        if (callRecorder.isRecording()) {
+                        // Enviar al recorder si está grabando o haciendo streaming
+                        if (callRecorder.isRecording() || callRecorder.isStreaming()) {
                             callRecorder.captureRemoteAudio(data)
-                        }
-
-                        log.d(TAG) {
-                            "🔊 Remote audio: ${data.size} bytes, " +
-                                    "$sampleRate Hz, $channels ch, $bitsPerSample bits"
                         }
                     }
                 }
             )
 
-            // Iniciar captura si ya estamos grabando
-            if (callRecorder.isRecording()) {
+            // Iniciar captura si ya estamos grabando o haciendo streaming
+            if (callRecorder.isRecording() || callRecorder.isStreaming()) {
                 remoteAudioCapture?.startCapture()
                 log.d(TAG) { "✅ Remote audio capture started" }
             }
@@ -345,6 +341,30 @@ class PeerConnectionController(
      * Obtener el recorder para acceso directo
      */
     fun getRecorder(): CallRecorder? = callRecorder
+
+    // ==================== STREAMING EN TIEMPO REAL ====================
+
+    fun setAudioStreamListener(listener: AudioStreamListener?) {
+        callRecorder.setAudioStreamListener(listener)
+    }
+
+    fun startStreaming(callId: String) {
+        log.d(TAG) { "🎙️ Starting audio streaming" }
+        callRecorder.startStreaming(callId)
+        remoteAudioCapture?.startCapture()
+        log.d(TAG) { "✅ Audio streaming started for call: $callId" }
+    }
+
+    fun stopStreaming() {
+        log.d(TAG) { "🛑 Stopping audio streaming" }
+        callRecorder.stopStreaming()
+        if (!callRecorder.isRecording()) {
+            remoteAudioCapture?.stopCapture()
+        }
+        log.d(TAG) { "✅ Audio streaming stopped" }
+    }
+
+    fun isStreaming(): Boolean = callRecorder.isStreaming()
 
     // ==================== SDP OPERATIONS (sin cambios) ====================
 

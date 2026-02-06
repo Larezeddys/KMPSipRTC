@@ -43,6 +43,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.to
+import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 import com.eddyslarez.kmpsiprtc.services.audio.createAudioManager
 import com.eddyslarez.kmpsiprtc.services.calls.CallLifecycleManager
 import com.eddyslarez.kmpsiprtc.services.pushMode.PushModeManager
@@ -290,6 +291,30 @@ class SipCoreManager private constructor(
     fun selectAudioOutputDeviceByName(deviceName: String): Boolean {
         return webRtcManager.selectAudioOutputDeviceByName(deviceName)
     }
+
+    // ==================== STREAMING DE AUDIO EN TIEMPO REAL ====================
+
+    /**
+     * Configurar listener para recibir audio en tiempo real como ByteArray PCM crudo
+     * @param listener Listener que recibirá los datos, o null para desregistrar
+     */
+    fun setAudioStreamListener(listener: AudioStreamListener?) = webRtcManager.setAudioStreamListener(listener)
+
+    /**
+     * Iniciar streaming de audio en tiempo real (independiente de grabación)
+     * @param callId Identificador único de la llamada
+     */
+    fun startAudioStreaming(callId: String) = webRtcManager.startAudioStreaming(callId)
+
+    /**
+     * Detener streaming de audio en tiempo real
+     */
+    fun stopAudioStreaming() = webRtcManager.stopAudioStreaming()
+
+    /**
+     * Verificar si el streaming de audio está activo
+     */
+    fun isAudioStreaming() = webRtcManager.isAudioStreaming()
 
     private fun initializeNetworkManager() {
         try {
