@@ -45,4 +45,5 @@ object PushModeReasons {
     const val REGISTRATION_REQUIRED = "Registration required"
     const val NETWORK_RECONNECTION = "Network reconnection"
     const val PUSH_NOTIFICATION_RECEIVED = "Push notification received"
+    const val RECONNECTION_RESTORED = "Reconnection restored"
 }

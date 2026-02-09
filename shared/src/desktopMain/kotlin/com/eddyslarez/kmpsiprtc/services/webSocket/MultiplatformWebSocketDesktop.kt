@@ -4,6 +4,7 @@ import com.eddyslarez.kmpsiprtc.platform.log
 import okhttp3.*
 import okio.ByteString
 import java.util.*
+import java.util.concurrent.TimeUnit
 import kotlin.collections.iterator
 import kotlin.concurrent.timer
 
@@ -21,43 +22,68 @@ class DesktopWebSocket(private val url: String, private val headers: Map<String,
     private var isConnecting = false
 
     override fun connect() {
-        log.i(tag = "DesktopWebSocket") { "Connecting to $url" }
-        log.i(tag = "DesktopWebSocket") { "Headers: $headers" }
-
-        client = OkHttpClient()
-
-        // Construir el request con los headers
-        val requestBuilder = Request.Builder().url(url)
-
-        // Añadir todos los headers recibidos
-        headers.forEach { (key, value) ->
-            requestBuilder.addHeader(key, value)
-            log.i(tag = "DesktopWebSocket") { "Added header $key = $value" }
+        if (isConnecting) {
+            log.w(tag = "DesktopWebSocket") { "Already connecting, ignoring duplicate request" }
+            return
         }
 
-        val request = requestBuilder.build()
+        isConnecting = true
+        log.i(tag = "DesktopWebSocket") { "Connecting to $url" }
 
-        webSocket = client!!.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(ws: WebSocket, response: Response) {
-                log.i(tag = "DesktopWebSocket") { "WebSocket connection opened with protocol: ${response.protocol}" }
-                listener?.onOpen()
+        try {
+            // Crear cliente OkHttp con timeouts explicitos - igualar a Android
+            client = OkHttpClient.Builder()
+                .readTimeout(30, TimeUnit.SECONDS)
+                .writeTimeout(30, TimeUnit.SECONDS)
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .pingInterval(20, TimeUnit.SECONDS)
+                .retryOnConnectionFailure(true)
+                .build()
+
+            // Construir el request con los headers
+            val requestBuilder = Request.Builder().url(url)
+
+            // Anadir todos los headers recibidos
+            headers.forEach { (key, value) ->
+                requestBuilder.addHeader(key, value)
+                log.d(tag = "DesktopWebSocket") { "Added header $key = $value" }
             }
 
-            override fun onMessage(ws: WebSocket, text: String) {
-                listener?.onMessage(text)
-            }
+            val request = requestBuilder.build()
 
-            override fun onClosed(ws: WebSocket, code: Int, reason: String) {
-                log.i(tag = "DesktopWebSocket") { "WebSocket closed with code: $code, reason: $reason" }
-                listener?.onClose(code, reason)
-            }
+            webSocket = client!!.newWebSocket(request, object : WebSocketListener() {
+                override fun onOpen(ws: WebSocket, response: Response) {
+                    isConnecting = false
+                    log.i(tag = "DesktopWebSocket") { "WebSocket connection opened with protocol: ${response.protocol}" }
+                    listener?.onOpen()
+                }
 
-            override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                log.e(tag = "DesktopWebSocket") { "WebSocket error: ${t.message}" }
-                log.e(tag = "DesktopWebSocket") { "Response: ${response?.code} - ${response?.message}" }
-                listener?.onError(Exception(t))
-            }
-        })
+                override fun onMessage(ws: WebSocket, text: String) {
+                    listener?.onMessage(text)
+                }
+
+                override fun onMessage(ws: WebSocket, bytes: ByteString) {
+                    // Respuesta a PONG
+                    listener?.onPong(System.currentTimeMillis())
+                }
+
+                override fun onClosed(ws: WebSocket, code: Int, reason: String) {
+                    isConnecting = false
+                    log.i(tag = "DesktopWebSocket") { "WebSocket closed with code: $code, reason: $reason" }
+                    listener?.onClose(code, reason)
+                }
+
+                override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
+                    isConnecting = false
+                    log.e(tag = "DesktopWebSocket") { "WebSocket error: ${t.message}. Response: ${response?.code}" }
+                    listener?.onError(Exception(t))
+                }
+            })
+        } catch (e: Exception) {
+            isConnecting = false
+            log.e(tag = "DesktopWebSocket") { "Error creating WebSocket: ${e.message}" }
+            listener?.onError(e)
+        }
     }
 
     override fun send(message: String) {

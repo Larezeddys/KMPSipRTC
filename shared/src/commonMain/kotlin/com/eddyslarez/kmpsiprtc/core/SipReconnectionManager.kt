@@ -50,6 +50,18 @@ class SipReconnectionManager(
     private var lastAccountSync = 0L
     private var reconnectionListener: ReconnectionListener? = null
 
+    // Callback para notificar reconexion exitosa al PushModeManager
+    private var onReconnectionSuccessCallback: (() -> Unit)? = null
+    private var onDisconnectedCallback: (() -> Unit)? = null
+
+    fun setPushModeCallbacks(
+        onReconnectionSuccess: (() -> Unit)? = null,
+        onDisconnected: (() -> Unit)? = null
+    ) {
+        this.onReconnectionSuccessCallback = onReconnectionSuccess
+        this.onDisconnectedCallback = onDisconnected
+    }
+
     suspend fun initialize() {
         log.d(tag = TAG) { "Initializing SipReconnectionManager" }
         setupNetworkListener()
@@ -193,6 +205,7 @@ class SipReconnectionManager(
         }
 
         reconnectionListener?.onNetworkLost()
+        onDisconnectedCallback?.invoke()
     }
 
     private fun handleNetworkRestored() {
@@ -265,6 +278,7 @@ class SipReconnectionManager(
         }
         jobs.awaitAll()
         reconnectionListener?.onReconnectionCompleted(true)
+        onReconnectionSuccessCallback?.invoke()
     }
 
     suspend fun reconnectAccountWithRetry(accountInfo: AccountInfo): Boolean {

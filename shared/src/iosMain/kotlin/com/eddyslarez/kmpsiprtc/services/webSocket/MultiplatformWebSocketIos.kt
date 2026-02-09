@@ -130,11 +130,14 @@ class IOSWebSocket(
                 // Handle error based on domain and code
                 val nsError = error as NSError
                 if (nsError.domain == "NSPOSIXErrorDomain" && nsError.code == 57L) {
-                    // Socket is not connected
+                    // Socket is not connected - señalar reconexion inmediata via onClose
+                    println("IOSWebSocket: POSIX 57 detected - socket not connected, signaling for reconnection")
                     dispatch_async(dispatch_get_main_queue()) {
                         isConnectedFlag = false
                         isReceivingMessages = false
-                        listener?.onError(Exception("Socket is not connected: ${error.localizedDescription}"))
+                        stopPingTimer()
+                        // Usar onClose con codigo especial para que SharedWebSocketManager haga reconexion
+                        listener?.onClose(1006, "POSIX 57: Socket not connected")
                     }
                     return@receiveMessageWithCompletionHandler
                 }

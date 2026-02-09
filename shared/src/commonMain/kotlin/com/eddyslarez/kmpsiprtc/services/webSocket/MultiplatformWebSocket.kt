@@ -29,6 +29,11 @@ interface MultiplatformWebSocket {
         fun onError(error: Exception)
         fun onPong(timeMs: Long)
         fun onRegistrationRenewalRequired(accountKey: String)
+
+        /** Conexion degradada despues de multiples intentos fallidos */
+        fun onConnectionDegraded(attemptCount: Int, lastError: Exception?) {}
+        /** Conexion restaurada despues de un periodo de desconexion */
+        fun onConnectionRestored(downTimeMs: Long) {}
     }
 }
 

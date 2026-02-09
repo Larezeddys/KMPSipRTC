@@ -12,10 +12,26 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlin.math.min
+import kotlin.random.Random
 import kotlin.time.ExperimentalTime
+
+/**
+ * Estado de la conexion WebSocket visible para la app
+ */
+enum class WebSocketConnectionState {
+    CONNECTED,
+    CONNECTING,
+    RECONNECTING,
+    DEGRADED,
+    DISCONNECTED
+}
 
 class SharedWebSocketManager(
     private val config: SipConfig,
@@ -25,36 +41,64 @@ class SharedWebSocketManager(
     companion object {
         private const val TAG = "SharedWebSocketManager"
         private const val WEBSOCKET_PROTOCOL = "sip"
-        private const val RECONNECT_DELAY = 3000L
-        private const val MAX_RECONNECT_ATTEMPTS = 5
+
+        // Reconexion robusta con backoff exponencial
+        private const val RECONNECT_BASE_DELAY = 2000L    // 2s inicial
+        private const val RECONNECT_MAX_DELAY = 30000L     // 30s cap
+        private const val RECONNECT_DEGRADED_DELAY = 60000L // 60s despues de degradado
+        private const val RECONNECT_JITTER_FACTOR = 0.1    // 10% jitter
+        private const val DEGRADED_THRESHOLD = 10           // Intentos antes de notificar degradado
     }
+
     private var lastPongTimestamp = 0L
     private var webSocketClient: MultiplatformWebSocket? = null
     private var isConnecting = false
     private var reconnectAttempts = 0
     private var reconnectJob: Job? = null
     private val connectionMutex = Mutex()
+    private var lastError: Exception? = null
+    private var disconnectedSince = 0L  // Timestamp cuando se perdio conexion
 
-    // Mantener track de qué cuentas están usando esta conexión
+    // Estado de conexion observable
+    private val _connectionState = MutableStateFlow(WebSocketConnectionState.DISCONNECTED)
+    val connectionState: StateFlow<WebSocketConnectionState> = _connectionState.asStateFlow()
+
+    // Listener externo para eventos de conexion
+    private var connectionEventListener: ConnectionEventListener? = null
+
+    // Mantener track de que cuentas estan usando esta conexion
     private val registeredAccounts = mutableSetOf<String>()
+
+    /**
+     * Listener para eventos de estado de conexion - propaga a la app
+     */
+    interface ConnectionEventListener {
+        fun onConnectionDegraded(attemptCount: Int, lastError: Exception?)
+        fun onConnectionRestored(downTimeMs: Long)
+    }
+
+    fun setConnectionEventListener(listener: ConnectionEventListener?) {
+        connectionEventListener = listener
+    }
 
     /**
      * Conectar el WebSocket compartido
      */
     suspend fun connect(): Boolean = connectionMutex.withLock {
         if (webSocketClient?.isConnected() == true) {
-            log.d(tag = TAG) { "✅ WebSocket already connected" }
+            log.d(tag = TAG) { "WebSocket already connected" }
             return true
         }
 
         if (isConnecting) {
-            log.d(tag = TAG) { "⏳ Connection already in progress" }
+            log.d(tag = TAG) { "Connection already in progress" }
             return false
         }
 
         try {
             isConnecting = true
-            log.d(tag = TAG) { "🔌 Connecting shared WebSocket to: ${config.webSocketUrl}" }
+            _connectionState.value = WebSocketConnectionState.CONNECTING
+            log.d(tag = TAG) { "Connecting shared WebSocket to: ${config.webSocketUrl}" }
 
             val headers = createHeaders()
             webSocketClient = createWebSocket(config.webSocketUrl, headers)
@@ -63,7 +107,7 @@ class SharedWebSocketManager(
             webSocketClient?.connect()
             webSocketClient?.startPingTimer(config.pingIntervalMs)
 
-            // Esperar confirmación de conexión
+            // Esperar confirmacion de conexion
             var waitTime = 0L
             val maxWait = 10000L
             while (waitTime < maxWait && webSocketClient?.isConnected() != true) {
@@ -73,16 +117,19 @@ class SharedWebSocketManager(
 
             val connected = webSocketClient?.isConnected() == true
             if (connected) {
-                log.d(tag = TAG) { "✅ Shared WebSocket connected successfully" }
-                reconnectAttempts = 0
+                log.d(tag = TAG) { "Shared WebSocket connected successfully" }
+                onConnectionSuccess()
             } else {
-                log.e(tag = TAG) { "❌ WebSocket connection timeout" }
+                log.e(tag = TAG) { "WebSocket connection timeout" }
+                _connectionState.value = WebSocketConnectionState.DISCONNECTED
             }
 
             return connected
 
         } catch (e: Exception) {
-            log.e(tag = TAG) { "❌ Error connecting WebSocket: ${e.message}" }
+            log.e(tag = TAG) { "Error connecting WebSocket: ${e.message}" }
+            lastError = e
+            _connectionState.value = WebSocketConnectionState.DISCONNECTED
             return false
         } finally {
             isConnecting = false
@@ -90,18 +137,50 @@ class SharedWebSocketManager(
     }
 
     /**
+     * Llamado cuando la conexion se establece exitosamente
+     */
+    @OptIn(ExperimentalTime::class)
+    private fun onConnectionSuccess() {
+        val previousAttempts = reconnectAttempts
+        val wasDisconnectedSince = disconnectedSince
+
+        reconnectAttempts = 0
+        lastError = null
+        _connectionState.value = WebSocketConnectionState.CONNECTED
+
+        // Notificar restauracion si estaba desconectado
+        if (wasDisconnectedSince > 0L) {
+            val downTimeMs = kotlin.time.Clock.System.now().toEpochMilliseconds() - wasDisconnectedSince
+            disconnectedSince = 0L
+            log.d(tag = TAG) { "Connection restored after ${downTimeMs}ms (was $previousAttempts attempts)" }
+            connectionEventListener?.onConnectionRestored(downTimeMs)
+        }
+    }
+
+    /**
      * Registrar una cuenta usando el WebSocket compartido
      */
     suspend fun registerAccount(accountInfo: AccountInfo, isBackground: Boolean = false): Boolean {
-        // Asegurar que el WebSocket está conectado
+        // Verificar salud del WebSocket antes de registrar
+        if (!isWebSocketHealthy()) {
+            log.w(tag = TAG) { "WebSocket not healthy, forcing reconnection before register" }
+            forceReconnect()
+            // Esperar un poco para que se establezca la conexion
+            delay(2000)
+            if (!isWebSocketHealthy()) {
+                log.e(tag = TAG) { "Cannot register account - WebSocket still not healthy after reconnect" }
+                return false
+            }
+        }
+
         if (!ensureConnected()) {
-            log.e(tag = TAG) { "❌ Cannot register account - WebSocket not connected" }
+            log.e(tag = TAG) { "Cannot register account - WebSocket not connected" }
             return false
         }
 
         return try {
             val accountKey = "${accountInfo.username}@${accountInfo.domain}"
-            log.d(tag = TAG) { "📝 Registering account via shared WebSocket: $accountKey" }
+            log.d(tag = TAG) { "Registering account via shared WebSocket: $accountKey" }
 
             // Enviar REGISTER
             messageHandler.sendRegister(accountInfo, isBackground)
@@ -109,29 +188,52 @@ class SharedWebSocketManager(
             // Agregar a cuentas registradas
             registeredAccounts.add(accountKey)
 
-            log.d(tag = TAG) { "✅ Register message sent for: $accountKey" }
+            log.d(tag = TAG) { "Register message sent for: $accountKey" }
             true
 
         } catch (e: Exception) {
-            log.e(tag = TAG) { "❌ Error registering account: ${e.message}" }
+            log.e(tag = TAG) { "Error registering account: ${e.message}" }
             false
         }
     }
 
+    /**
+     * Verificar salud del WebSocket basado en conexion + ultimo pong
+     */
     @OptIn(ExperimentalTime::class)
     fun isWebSocketHealthy(): Boolean {
-        // Si no hay cliente o no está conectado, ya está mal
+        // Si no hay cliente o no esta conectado
         val socketConnected = webSocketClient?.isConnected() == true
         if (!socketConnected) return false
 
-        // Si nunca se recibió pong, asumimos que está bien si recién se conectó
+        // Si esta en proceso de conexion, no es saludable aun
+        if (isConnecting) return false
+
+        // Si nunca se recibio pong, asumimos que esta bien si recien se conecto
         if (lastPongTimestamp == 0L) return true
 
-        // Cuánto tiempo pasó desde el último pong
+        // Cuanto tiempo paso desde el ultimo pong
         val elapsed = kotlin.time.Clock.System.now().toEpochMilliseconds() - lastPongTimestamp
 
-        // Considerar no saludable si pasó más de 2 intervalos de ping
+        // Considerar no saludable si paso mas de 2 intervalos de ping
         return elapsed < (config.pingIntervalMs * 2)
+    }
+
+    /**
+     * Forzar reconexion cerrando la conexion actual
+     */
+    fun forceReconnect() {
+        log.d(tag = TAG) { "Forcing WebSocket reconnection" }
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                webSocketClient?.stopPingTimer()
+                webSocketClient?.close(1000, "Force reconnect")
+                webSocketClient = null
+                connect()
+            } catch (e: Exception) {
+                log.e(tag = TAG) { "Error during force reconnect: ${e.message}" }
+            }
+        }
     }
 
     /**
@@ -139,22 +241,22 @@ class SharedWebSocketManager(
      */
     suspend fun unregisterAccount(accountInfo: AccountInfo): Boolean {
         if (!isConnected()) {
-            log.w(tag = TAG) { "⚠️ Cannot unregister - WebSocket not connected" }
+            log.w(tag = TAG) { "Cannot unregister - WebSocket not connected" }
             return false
         }
 
         return try {
             val accountKey = "${accountInfo.username}@${accountInfo.domain}"
-            log.d(tag = TAG) { "📝 Unregistering account: $accountKey" }
+            log.d(tag = TAG) { "Unregistering account: $accountKey" }
 
             messageHandler.sendUnregister(accountInfo)
             registeredAccounts.remove(accountKey)
 
-            log.d(tag = TAG) { "✅ Unregister message sent for: $accountKey" }
+            log.d(tag = TAG) { "Unregister message sent for: $accountKey" }
             true
 
         } catch (e: Exception) {
-            log.e(tag = TAG) { "❌ Error unregistering account: ${e.message}" }
+            log.e(tag = TAG) { "Error unregistering account: ${e.message}" }
             false
         }
     }
@@ -164,7 +266,7 @@ class SharedWebSocketManager(
      */
     suspend fun sendMessage(message: String): Boolean {
         if (!ensureConnected()) {
-            log.e(tag = TAG) { "❌ Cannot send message - WebSocket not connected" }
+            log.e(tag = TAG) { "Cannot send message - WebSocket not connected" }
             return false
         }
 
@@ -172,18 +274,18 @@ class SharedWebSocketManager(
             webSocketClient?.send(message)
             true
         } catch (e: Exception) {
-            log.e(tag = TAG) { "❌ Error sending message: ${e.message}" }
+            log.e(tag = TAG) { "Error sending message: ${e.message}" }
             false
         }
     }
 
     /**
-     * Verificar si está conectado
+     * Verificar si esta conectado
      */
     fun isConnected(): Boolean = webSocketClient?.isConnected() == true
 
     /**
-     * Asegurar que hay conexión activa
+     * Asegurar que hay conexion activa
      */
     private suspend fun ensureConnected(): Boolean {
         if (isConnected()) return true
@@ -197,8 +299,8 @@ class SharedWebSocketManager(
     private fun setupWebSocketListeners() {
         webSocketClient?.setListener(object : MultiplatformWebSocket.Listener {
             override fun onOpen() {
-                log.d(tag = TAG) { "🔓 Shared WebSocket opened" }
-                reconnectAttempts = 0
+                log.d(tag = TAG) { "Shared WebSocket opened" }
+                onConnectionSuccess()
 
                 CoroutineScope(Dispatchers.IO).launch {
                     reregisterOnlyFailedAccounts()
@@ -207,13 +309,13 @@ class SharedWebSocketManager(
 
             override fun onMessage(message: String) {
                 CoroutineScope(Dispatchers.IO).launch {
-                    // Determinar a qué cuenta pertenece el mensaje
+                    // Determinar a que cuenta pertenece el mensaje
                     val accountInfo = determineAccountFromMessage(message)
 
                     if (accountInfo != null) {
                         messageHandler.handleSipMessage(message, accountInfo)
                     } else {
-                        log.w(tag = TAG) { "⚠️ Could not determine account for message" }
+                        log.w(tag = TAG) { "Could not determine account for message" }
                         // Procesar con primera cuenta disponible como fallback
                         sipCoreManager.activeAccounts.values.firstOrNull()?.let { account ->
                             messageHandler.handleSipMessage(message, account)
@@ -223,21 +325,34 @@ class SharedWebSocketManager(
             }
 
             override fun onClose(code: Int, reason: String) {
-                log.w(tag = TAG) { "🔒 Shared WebSocket closed: $code - $reason" }
+                log.w(tag = TAG) { "Shared WebSocket closed: $code - $reason" }
+
+                // Registrar timestamp de desconexion
+                if (disconnectedSince == 0L) {
+                    disconnectedSince = kotlin.time.Clock.System.now().toEpochMilliseconds()
+                }
 
                 // Marcar todas las cuentas como no registradas
                 registeredAccounts.forEach { accountKey ->
                     sipCoreManager.updateRegistrationState(accountKey, RegistrationState.NONE)
                 }
 
-                // Intentar reconexión si no fue cierre normal
+                // Intentar reconexion si no fue cierre normal
                 if (code != 1000 && !sipCoreManager.isShuttingDown) {
                     scheduleReconnect()
+                } else {
+                    _connectionState.value = WebSocketConnectionState.DISCONNECTED
                 }
             }
 
             override fun onError(error: Exception) {
-                log.e(tag = TAG) { "💥 WebSocket error: ${error.message}" }
+                log.e(tag = TAG) { "WebSocket error: ${error.message}" }
+                lastError = error
+
+                // Registrar timestamp de desconexion
+                if (disconnectedSince == 0L) {
+                    disconnectedSince = kotlin.time.Clock.System.now().toEpochMilliseconds()
+                }
 
                 // Marcar cuentas como fallidas
                 registeredAccounts.forEach { accountKey ->
@@ -247,24 +362,31 @@ class SharedWebSocketManager(
 
             override fun onPong(timeMs: Long) {
                 lastPongTimestamp = kotlin.time.Clock.System.now().toEpochMilliseconds()
-                log.d(tag = TAG) { "🏓 Pong received: ${timeMs}ms" }
+                log.d(tag = TAG) { "Pong received: ${timeMs}ms RTT" }
             }
-
 
             override fun onRegistrationRenewalRequired(accountKey: String) {
                 CoroutineScope(Dispatchers.IO).launch {
                     val account = sipCoreManager.activeAccounts[accountKey]
                     if (account != null && isConnected()) {
-                        log.d(tag = TAG) { "🔄 Renewing registration for: $accountKey" }
+                        log.d(tag = TAG) { "Renewing registration for: $accountKey" }
                         registerAccount(account, sipCoreManager.isAppInBackground)
                     }
                 }
+            }
+
+            override fun onConnectionDegraded(attemptCount: Int, lastError: Exception?) {
+                log.w(tag = TAG) { "Connection degraded notification from platform (attempts: $attemptCount)" }
+            }
+
+            override fun onConnectionRestored(downTimeMs: Long) {
+                log.d(tag = TAG) { "Connection restored notification from platform (downtime: ${downTimeMs}ms)" }
             }
         })
     }
 
     private suspend fun reregisterOnlyFailedAccounts() {
-        log.d(tag = TAG) { "🔄 Re-registering ONLY failed accounts" }
+        log.d(tag = TAG) { "Re-registering ONLY failed accounts" }
 
         val accountsToRegister = registeredAccounts.toList().filter { accountKey ->
             val account = sipCoreManager.activeAccounts[accountKey]
@@ -276,10 +398,10 @@ class SharedWebSocketManager(
                         state == RegistrationState.NONE
 
                 if (needsRegistration) {
-                    log.d(tag = TAG) { "📝 Account $accountKey needs re-registration (state: $state)" }
+                    log.d(tag = TAG) { "Account $accountKey needs re-registration (state: $state)" }
                     true
                 } else {
-                    log.d(tag = TAG) { "✅ Account $accountKey already OK, skipping" }
+                    log.d(tag = TAG) { "Account $accountKey already OK, skipping" }
                     false
                 }
             } else {
@@ -288,16 +410,16 @@ class SharedWebSocketManager(
         }
 
         if (accountsToRegister.isEmpty()) {
-            log.d(tag = TAG) { "✅ All accounts already registered, no action needed" }
+            log.d(tag = TAG) { "All accounts already registered, no action needed" }
             return
         }
 
-        log.d(tag = TAG) { "🔄 Re-registering ${accountsToRegister.size} accounts" }
+        log.d(tag = TAG) { "Re-registering ${accountsToRegister.size} accounts" }
 
         accountsToRegister.forEach { accountKey ->
             val account = sipCoreManager.activeAccounts[accountKey]
             if (account != null) {
-                delay(500) // Pequeño delay entre registros
+                delay(500) // Pequeno delay entre registros
                 registerAccount(account, sipCoreManager.isAppInBackground)
             }
         }
@@ -305,7 +427,7 @@ class SharedWebSocketManager(
 
 
     /**
-     * Determinar a qué cuenta pertenece un mensaje SIP
+     * Determinar a que cuenta pertenece un mensaje SIP
      */
     private fun determineAccountFromMessage(message: String): AccountInfo? {
         return try {
@@ -367,41 +489,63 @@ class SharedWebSocketManager(
     }
 
 
-
     /**
-     * Programar reconexión automática
+     * Programar reconexion con backoff exponencial hibrido:
+     * - Intentos 1-10: backoff exponencial 2s->30s + jitter 10%
+     * - Despues de 10: emitir onConnectionDegraded y seguir con 60s interval
      */
+    @OptIn(ExperimentalTime::class)
     private fun scheduleReconnect() {
         reconnectJob?.cancel()
-
-        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-            log.e(tag = TAG) { "❌ Max reconnection attempts reached" }
-            return
-        }
-
         reconnectAttempts++
 
-        reconnectJob = CoroutineScope(Dispatchers.IO).launch {
-            val delay = RECONNECT_DELAY * reconnectAttempts
-            log.d(tag = TAG) { "⏰ Scheduling reconnect attempt $reconnectAttempts in ${delay}ms" }
+        // Determinar delay segun fase
+        val delayMs: Long
+        if (reconnectAttempts <= DEGRADED_THRESHOLD) {
+            // Fase 1: Backoff exponencial 2s -> 4s -> 8s -> 16s -> 30s (cap) + jitter
+            val exponentialDelay = RECONNECT_BASE_DELAY * (1L shl min(reconnectAttempts - 1, 4))
+            val capped = min(exponentialDelay, RECONNECT_MAX_DELAY)
+            val jitter = (capped * RECONNECT_JITTER_FACTOR * Random.nextDouble()).toLong()
+            delayMs = capped + jitter
+            _connectionState.value = WebSocketConnectionState.RECONNECTING
+        } else {
+            // Fase 2: Degradado - intervalo fijo de 60s, seguir intentando
+            delayMs = RECONNECT_DEGRADED_DELAY
+            _connectionState.value = WebSocketConnectionState.DEGRADED
+        }
 
-            delay(delay)
+        // Notificar degradado al alcanzar el umbral
+        if (reconnectAttempts == DEGRADED_THRESHOLD) {
+            log.w(tag = TAG) { "Connection DEGRADED after $reconnectAttempts attempts" }
+            connectionEventListener?.onConnectionDegraded(reconnectAttempts, lastError)
+        }
+
+        log.d(tag = TAG) { "Scheduling reconnect attempt $reconnectAttempts in ${delayMs}ms" }
+
+        reconnectJob = CoroutineScope(Dispatchers.IO).launch {
+            delay(delayMs)
 
             if (sipCoreManager.networkManager.isNetworkAvailable()) {
-                log.d(tag = TAG) { "🔄 Attempting reconnection..." }
-                connect()
+                log.d(tag = TAG) { "Attempting reconnection #$reconnectAttempts..." }
+                val success = connect()
+                if (!success) {
+                    // Seguir intentando - no hay limite
+                    scheduleReconnect()
+                }
             } else {
-                log.w(tag = TAG) { "⚠️ Network not available for reconnection" }
+                log.w(tag = TAG) { "Network not available for reconnection, will retry" }
+                // Reintentar en el proximo ciclo
+                scheduleReconnect()
             }
         }
     }
 
     /**
-     * Cerrar conexión
+     * Cerrar conexion
      */
     suspend fun disconnect() = connectionMutex.withLock {
         try {
-            log.d(tag = TAG) { "🔌 Disconnecting shared WebSocket" }
+            log.d(tag = TAG) { "Disconnecting shared WebSocket" }
 
             reconnectJob?.cancel()
 
@@ -412,26 +556,32 @@ class SharedWebSocketManager(
 
             registeredAccounts.clear()
             reconnectAttempts = 0
+            disconnectedSince = 0L
+            _connectionState.value = WebSocketConnectionState.DISCONNECTED
 
-            log.d(tag = TAG) { "✅ Shared WebSocket disconnected" }
+            log.d(tag = TAG) { "Shared WebSocket disconnected" }
 
         } catch (e: Exception) {
-            log.e(tag = TAG) { "❌ Error disconnecting: ${e.message}" }
+            log.e(tag = TAG) { "Error disconnecting: ${e.message}" }
         }
     }
-    fun setRegistrationExpiration(accountKey: String, expirationTimeMs: Long){
-        webSocketClient?.setRegistrationExpiration(accountKey,expirationTimeMs)
+
+    fun setRegistrationExpiration(accountKey: String, expirationTimeMs: Long) {
+        webSocketClient?.setRegistrationExpiration(accountKey, expirationTimeMs)
     }
 
     /**
-     * Obtener información de estado
+     * Obtener informacion de estado
      */
     fun getStatus(): Map<String, Any> = mapOf(
         "connected" to isConnected(),
         "connecting" to isConnecting,
+        "healthy" to isWebSocketHealthy(),
+        "connectionState" to _connectionState.value.name,
         "reconnectAttempts" to reconnectAttempts,
         "registeredAccountsCount" to registeredAccounts.size,
-        "registeredAccounts" to registeredAccounts.toList()
+        "registeredAccounts" to registeredAccounts.toList(),
+        "lastPongTimestamp" to lastPongTimestamp
     )
 
     private fun createHeaders(): HashMap<String, String> = hashMapOf(

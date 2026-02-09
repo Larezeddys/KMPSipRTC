@@ -16,8 +16,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.ExperimentalTime
+import com.eddyslarez.kmpsiprtc.utils.Lock
+import com.eddyslarez.kmpsiprtc.utils.synchronized
 
 
 class PushModeManager(
@@ -31,6 +35,10 @@ class PushModeManager(
     private val TAG = "PushModeManager"
     private val TAG1 = "ProcesoPush"
 
+    // Mutex para proteger operaciones criticas de estado
+    private val callEndMutex = Mutex()
+    private val transitionMutex = Mutex()
+
     // Estados
     @OptIn(ExperimentalTime::class)
     private val _pushModeStateFlow = MutableStateFlow(
@@ -43,18 +51,25 @@ class PushModeManager(
     )
     val pushModeStateFlow: StateFlow<PushModeState> = _pushModeStateFlow.asStateFlow()
 
+    // Flag para track de modo push antes de desconexion
+    private var wasInPushBeforeDisconnect = false
 
-    // Jobs para transiciones automáticas - POR CUENTA ESPECÍFICA
+    // Jobs para transiciones automaticas - POR CUENTA ESPECIFICA
     private var transitionJob: Job? = null
-    private val callEndTransitionJobs = mutableMapOf<String, Job>() // CAMBIO: Map por cuenta
+    private val callEndTransitionJobs = mutableMapOf<String, Job>()
 
-    // Control de estado por cuenta específica
-    private val accountPushStates = mutableMapOf<String, Boolean>() // wasInPushBeforeCall por cuenta
-    private val pendingReturns = mutableSetOf<String>() // Cuentas con retorno pendiente
+    // Control de estado por cuenta especifica - protegidos por Lock
+    private val accountPushStatesLock = Lock()
+    private val accountPushStates = mutableMapOf<String, Boolean>()
+    private val pendingReturns = mutableSetOf<String>()
 
     // Callbacks
     private var onModeChangeCallback: ((PushModeState) -> Unit)? = null
     private var onRegistrationRequiredCallback: ((Set<String>, PushMode) -> Unit)? = null
+
+    // Callback para verificar salud de WebSocket antes de transiciones
+    private var isWebSocketHealthyCallback: (() -> Boolean)? = null
+    private var forceReconnectCallback: (() -> Unit)? = null
 
     // Estado interno
     private var isCallActive = false
@@ -70,8 +85,42 @@ class PushModeManager(
         this.onModeChangeCallback = onModeChange
         this.onRegistrationRequiredCallback = onRegistrationRequired
     }
+
     /**
-     * Notifica que la aplicación pasó a segundo plano
+     * Configura callbacks para verificar WebSocket
+     */
+    fun setWebSocketCallbacks(
+        isHealthy: (() -> Boolean)? = null,
+        forceReconnect: (() -> Unit)? = null
+    ) {
+        this.isWebSocketHealthyCallback = isHealthy
+        this.forceReconnectCallback = forceReconnect
+    }
+
+    /**
+     * Notificar reconexion exitosa - verificar y restaurar modo push si corresponde
+     */
+    fun onReconnectionSuccessful(registeredAccounts: Set<String>) {
+        log.d(tag = TAG1) { "Reconnection successful, wasInPushBeforeDisconnect: $wasInPushBeforeDisconnect" }
+
+        if (wasInPushBeforeDisconnect && registeredAccounts.isNotEmpty()) {
+            log.d(tag = TAG1) { "Restoring PUSH mode after reconnection for ${registeredAccounts.size} accounts" }
+            wasInPushBeforeDisconnect = false
+            transitionToPush(registeredAccounts, PushModeReasons.RECONNECTION_RESTORED)
+        }
+    }
+
+    /**
+     * Notificar desconexion - guardar estado actual
+     */
+    fun onDisconnected() {
+        val currentMode = getCurrentMode()
+        wasInPushBeforeDisconnect = (currentMode == PushMode.PUSH)
+        log.d(tag = TAG1) { "Disconnected, saving push state: wasInPush=$wasInPushBeforeDisconnect" }
+    }
+
+    /**
+     * Notifica que la aplicacion paso a segundo plano
      */
     fun onAppBackgrounded(registeredAccounts: Set<String>) {
         log.d(tag = TAG1) {
@@ -95,19 +144,10 @@ class PushModeManager(
             }
         }
     }
-    //    /**
-//     * Notifica que la aplicación pasó a segundo plano
-//     /
-//    fun onAppBackgrounded(registeredAccounts: Set<String>) {
-//        log.d(tag = TAG) { "App backgrounded with ${registeredAccounts.size} accounts" }
-//
-//        if (config.strategy == PushModeStrategy.AUTOMATIC && !isCallActive) {
-//            scheduleTransitionToPush(registeredAccounts, PushModeReasons.APP_BACKGROUNDED)
-//        }
-//    }
-    /*
-    * Notifica que la aplicación pasó a primer plano
-    */
+
+    /**
+     * Notifica que la aplicacion paso a primer plano
+     */
     fun onAppForegrounded(registeredAccounts: Set<String>) {
         log.d(tag = TAG1) {
             "=== APP FOREGROUNDED EVENT ===" +
@@ -117,59 +157,78 @@ class PushModeManager(
                     "\nStrategy: ${config.strategy}"
         }
 
-        // Cancelar transición pendiente a push
+        // Cancelar transicion pendiente a push
         cancelPendingTransition()
 
         if (config.strategy == PushModeStrategy.AUTOMATIC && registeredAccounts.isNotEmpty()) {
-            log.d(tag = TAG1) { "Transitioning to foreground mode" }
-            transitionToForeground(registeredAccounts, PushModeReasons.APP_FOREGROUNDED)
+            // Verificar WebSocket saludable antes de transicionar
+            ensureWebSocketHealthyAndTransition(registeredAccounts, PushModeReasons.APP_FOREGROUNDED)
         } else {
             log.w(tag = TAG1) { "Transition to foreground NOT executed - strategy: ${config.strategy}" }
         }
     }
-//    /**
-//     * Notifica que la aplicación pasó a primer plano
-//     */
-//    fun onAppForegrounded(registeredAccounts: Set<String>) {
-//        log.d(tag = TAG) { "App foregrounded with ${registeredAccounts.size} accounts" }
-//
-//        // Cancelar transición pendiente a push
-//        cancelPendingTransition()
-//
-//        if (config.strategy == PushModeStrategy.AUTOMATIC) {
-//            transitionToForeground(registeredAccounts, PushModeReasons.APP_FOREGROUNDED)
-//        }
-//    }
 
     /**
-     * Notifica que se recibió una llamada entrante
+     * Verificar WebSocket y transicionar a foreground con timeout de seguridad
+     */
+    private fun ensureWebSocketHealthyAndTransition(accounts: Set<String>, reason: String) {
+        val isHealthy = isWebSocketHealthyCallback?.invoke() ?: true
+
+        if (!isHealthy) {
+            log.w(tag = TAG1) { "WebSocket not healthy, forcing reconnect before foreground transition" }
+            forceReconnectCallback?.invoke()
+
+            // Programar transicion con timeout de seguridad de 10s
+            scope.launch {
+                var waited = 0L
+                val timeout = 10000L
+                while (waited < timeout) {
+                    delay(500)
+                    waited += 500
+                    if (isWebSocketHealthyCallback?.invoke() == true) {
+                        log.d(tag = TAG1) { "WebSocket healthy after ${waited}ms, transitioning to foreground" }
+                        transitionToForeground(accounts, reason)
+                        return@launch
+                    }
+                }
+                // Timeout: transicionar de todas formas
+                log.w(tag = TAG1) { "WebSocket not healthy after ${timeout}ms timeout, transitioning anyway" }
+                transitionToForeground(accounts, reason)
+            }
+        } else {
+            log.d(tag = TAG1) { "WebSocket healthy, transitioning to foreground" }
+            transitionToForeground(accounts, reason)
+        }
+    }
+
+    /**
+     * Notifica que se recibio una llamada entrante
      */
     fun onIncomingCallReceived(registeredAccounts: Set<String>) {
         log.d(tag = TAG) { "Incoming call received, current mode: ${getCurrentMode()}" }
 
         val currentState = _pushModeStateFlow.value
 
-        // Recordar si estábamos en modo push antes de la llamada
+        // Recordar si estabamos en modo push antes de la llamada
         if (currentState.currentMode == PushMode.PUSH) {
             wasInPushBeforeCall = true
         }
 
         isCallActive = true
 
-        // Cancelar cualquier transición pendiente
+        // Cancelar cualquier transicion pendiente
         cancelPendingTransition()
         cancelCallEndTransition()
 
-        // Si estamos en modo push y se requiere reregistro automático
+        // Si estamos en modo push y se requiere reregistro automatico
         if (currentState.currentMode == PushMode.PUSH && config.forceReregisterOnIncomingCall) {
             transitionToForeground(registeredAccounts, PushModeReasons.INCOMING_CALL_RECEIVED)
         }
     }
 
     /**
-     * Notifica que una llamada terminó
+     * Notifica que una llamada termino
      */
-// Y modifica el método onCallEnded:
     fun onCallEnded(registeredAccounts: Set<String>) {
         log.d(tag = TAG) { "Call ended, was in push before call: $wasInPushBeforeCall" }
 
@@ -179,12 +238,12 @@ class PushModeManager(
             scheduleReturnToPushAfterCall(registeredAccounts)
         }
 
-        // Resetear el flag solo aquí, después de programar el retorno
+        // Resetear el flag solo aqui, despues de programar el retorno
         wasInPushBeforeCall = false
     }
 
     /**
-     * Transición manual a modo push
+     * Transicion manual a modo push
      */
     fun switchToPushMode(accountsToSwitch: Set<String>) {
         log.d(tag = TAG) { "Manual switch to push mode for accounts: $accountsToSwitch" }
@@ -194,7 +253,7 @@ class PushModeManager(
     }
 
     /**
-     * Transición manual a modo foreground
+     * Transicion manual a modo foreground
      */
     fun switchToForegroundMode(accountsToSwitch: Set<String>) {
         log.d(tag = TAG) { "Manual switch to foreground mode for accounts: $accountsToSwitch" }
@@ -204,7 +263,7 @@ class PushModeManager(
     }
 
     /**
-     * Notifica que se recibió una notificación push
+     * Notifica que se recibio una notificacion push
      */
     fun onPushNotificationReceived(specificAccount: String? = null, allRegisteredAccounts: Set<String> = emptySet()) {
         log.d(tag = TAG1) { "Push notification received" }
@@ -213,29 +272,29 @@ class PushModeManager(
         val currentState = _pushModeStateFlow.value
         log.d(tag = TAG1) { "currentState : $currentState" }
 
-        // Si estamos en modo push, cambiar a foreground solo la cuenta específica o todas
-        //if (currentState.currentMode == PushMode.PUSH) {
-
         if (specificAccount != null) {
-            // CORREGIDO: Recordar estado push ANTES de cambiar
-            accountPushStates[specificAccount] = true
+            // Recordar estado push ANTES de cambiar
+            synchronized(accountPushStatesLock) {
+                accountPushStates[specificAccount] = true
+            }
             log.d(tag = TAG1) { "Recorded push state for $specificAccount before foreground transition" }
 
-            // Solo cambiar la cuenta específica a foreground
+            // Solo cambiar la cuenta especifica a foreground
             log.d(tag = TAG1) { "Switching specific account to foreground: $specificAccount" }
             transitionSpecificAccountToForeground(specificAccount, PushModeReasons.PUSH_NOTIFICATION_RECEIVED)
         } else {
             // Cambiar todas las cuentas (comportamiento anterior)
-            allRegisteredAccounts.forEach { account ->
-                accountPushStates[account] = true
+            synchronized(accountPushStatesLock) {
+                allRegisteredAccounts.forEach { account ->
+                    accountPushStates[account] = true
+                }
             }
             transitionToForeground(allRegisteredAccounts, PushModeReasons.PUSH_NOTIFICATION_RECEIVED)
         }
-        //   }
     }
 
     /**
-     * Transición de una cuenta específica a modo foreground
+     * Transicion de una cuenta especifica a modo foreground
      */
     @OptIn(ExperimentalTime::class)
     private fun transitionSpecificAccountToForeground(accountKey: String, reason: String) {
@@ -259,52 +318,57 @@ class PushModeManager(
 
         _pushModeStateFlow.value = newState
 
-        // Notificar que se requiere reregistro solo para la cuenta específica
+        // Notificar que se requiere reregistro solo para la cuenta especifica
         onRegistrationRequiredCallback?.invoke(setOf(accountKey), PushMode.FOREGROUND)
         onModeChangeCallback?.invoke(newState)
     }
 
     /**
-     * Notifica que una llamada terminó para una cuenta específica
+     * Notifica que una llamada termino para una cuenta especifica
+     * Protegido con Mutex para evitar race conditions
      */
     fun onCallEndedForAccount(accountKey: String, allRegisteredAccounts: Set<String>) {
-        // PREVENIR LLAMADAS DUPLICADAS
-        if (pendingReturns.contains(accountKey)) {
-            log.d(tag = TAG1) { "Call end already being processed for $accountKey, ignoring duplicate" }
-            return
-        }
+        scope.launch {
+            callEndMutex.withLock {
+                // Prevenir llamadas duplicadas - thread-safe con mutex
+                if (pendingReturns.contains(accountKey)) {
+                    log.d(tag = TAG1) { "Call end already being processed for $accountKey, ignoring duplicate" }
+                    return@withLock
+                }
 
-        val wasInPush = accountPushStates[accountKey] ?: false
+                val wasInPush = synchronized(accountPushStatesLock) {
+                    accountPushStates[accountKey] ?: false
+                }
 
-        log.d(tag = TAG1) { "Call ended for specific account: $accountKey, was in push before call: $wasInPush" }
+                log.d(tag = TAG1) { "Call ended for specific account: $accountKey, was in push before call: $wasInPush" }
 
-        isCallActive = false
+                isCallActive = false
 
-        // Si estábamos en modo push antes de la llamada y está configurado para volver
-        if (wasInPush && config.returnToPushAfterCallEnd) {
-            log.d(tag = TAG1) { "Scheduling return to push mode for account: $accountKey" }
+                // Si estabamos en modo push antes de la llamada y esta configurado para volver
+                if (wasInPush && config.returnToPushAfterCallEnd) {
+                    log.d(tag = TAG1) { "Scheduling return to push mode for account: $accountKey" }
 
-            // Marcar como pendiente ANTES de programar
-            pendingReturns.add(accountKey)
+                    // Marcar como pendiente ANTES de programar
+                    pendingReturns.add(accountKey)
 
-            scheduleReturnToPushForSpecificAccount(accountKey)
-        } else {
-            log.d(tag = TAG1) { "Not returning to push mode - wasInPushBeforeCall: $wasInPush, returnToPushAfterCallEnd: ${config.returnToPushAfterCallEnd}" }
+                    // Cancelar job anterior ANTES de crear nuevo
+                    callEndTransitionJobs[accountKey]?.cancel()
 
-            // Limpiar estado si no va a retornar
-            accountPushStates.remove(accountKey)
+                    scheduleReturnToPushForSpecificAccount(accountKey)
+                } else {
+                    log.d(tag = TAG1) { "Not returning to push mode - wasInPushBeforeCall: $wasInPush, returnToPushAfterCallEnd: ${config.returnToPushAfterCallEnd}" }
+
+                    // Limpiar estado si no va a retornar
+                    cleanupAccountState(accountKey)
+                }
+            }
         }
     }
 
-
-
     /**
-     * Programa retorno a modo push para una cuenta específica después de que termine una llamada
+     * Programa retorno a modo push para una cuenta especifica despues de que termine una llamada
      */
     private fun scheduleReturnToPushForSpecificAccount(accountKey: String) {
-        // Cancelar job anterior SOLO para esta cuenta específica
-        callEndTransitionJobs[accountKey]?.cancel()
-
         callEndTransitionJobs[accountKey] = scope.launch {
             try {
                 val returnDelay = 2000L
@@ -312,14 +376,14 @@ class PushModeManager(
 
                 delay(returnDelay)
 
-                // Verificar que no hay nueva llamada activa Y que aún está pendiente el retorno
+                // Verificar que no hay nueva llamada activa Y que aun esta pendiente el retorno
                 if (!isCallActive && pendingReturns.contains(accountKey)) {
                     log.d(tag = TAG1) { "Executing return to push mode for account: $accountKey" }
 
-                    // Ejecutar transición
+                    // Ejecutar transicion
                     transitionSpecificAccountToPush(accountKey, PushModeReasons.CALL_ENDED)
 
-                    // Limpiar estados DESPUÉS de completar la transición
+                    // Limpiar estados DESPUES de completar la transicion
                     cleanupAccountState(accountKey)
 
                 } else {
@@ -344,17 +408,20 @@ class PushModeManager(
             }
         }
     }
+
     /**
-     * NUEVO: Limpieza de estado para una cuenta específica
+     * Limpieza de estado para una cuenta especifica - thread-safe
      */
     private fun cleanupAccountState(accountKey: String) {
-        accountPushStates.remove(accountKey)
+        synchronized(accountPushStatesLock) {
+            accountPushStates.remove(accountKey)
+        }
         pendingReturns.remove(accountKey)
         log.d(tag = TAG1) { "Cleaned up state for account: $accountKey" }
     }
 
     /**
-     * Transición de una cuenta específica a modo push
+     * Transicion de una cuenta especifica a modo push
      */
     @OptIn(ExperimentalTime::class)
     private fun transitionSpecificAccountToPush(accountKey: String, reason: String) {
@@ -362,7 +429,7 @@ class PushModeManager(
 
         log.d(tag = TAG1) { "Transitioning specific account to PUSH: $accountKey, reason: $reason" }
 
-        // Agregar la cuenta específica al conjunto de cuentas en push
+        // Agregar la cuenta especifica al conjunto de cuentas en push
         val updatedAccountsInPush = currentState.accountsInPushMode.toMutableSet()
         updatedAccountsInPush.add(accountKey)
 
@@ -378,7 +445,7 @@ class PushModeManager(
 
         _pushModeStateFlow.value = newState
 
-        // Notificar que se requiere reregistro en modo push para la cuenta específica
+        // Notificar que se requiere reregistro en modo push para la cuenta especifica
         onRegistrationRequiredCallback?.invoke(setOf(accountKey), PushMode.PUSH)
         onModeChangeCallback?.invoke(newState)
 
@@ -386,31 +453,8 @@ class PushModeManager(
         log.d(tag = TAG1) { "Account $accountKey successfully transitioned to push mode" }
     }
 
-
     /**
-     * Programa transición a modo push con delay
-     */
-//    private fun scheduleTransitionToPush(accounts: Set<String>, reason: String) {
-//        cancelPendingTransition()
-//
-//        transitionJob = scope.launch {
-//            try {
-//                log.d(tag = TAG) { "Scheduling transition to push in ${config.autoTransitionDelay}ms" }
-//                delay(config.autoTransitionDelay)
-//
-//                // Verificar que aún no hay llamada activa
-//                if (!isCallActive) {
-//                    transitionToPush(accounts, reason)
-//                } else {
-//                    log.d(tag = TAG) { "Transition to push cancelled - call is active" }
-//                }
-//            } catch (e: Exception) {
-//                log.e(tag = TAG) { "Error in scheduled transition: ${e.message}" }
-//            }
-//        }
-//    }
-    /**
-     * Programa transición a modo push con delay y logging mejorado
+     * Programa transicion a modo push con delay y logging mejorado
      */
     private fun scheduleTransitionToPush(accounts: Set<String>, reason: String) {
         log.d(tag = TAG1) { "Scheduling transition to push mode..." }
@@ -427,7 +471,7 @@ class PushModeManager(
 
                 delay(config.autoTransitionDelay)
 
-                // Verificar que aún no hay llamada activa
+                // Verificar que aun no hay llamada activa
                 if (!isCallActive) {
                     log.d(tag = TAG1) { "Delay completed, executing transition to push" }
                     transitionToPush(accounts, reason)
@@ -443,15 +487,14 @@ class PushModeManager(
     }
 
     /**
-     * Programa retorno a modo push después de que termine una llamada
+     * Programa retorno a modo push despues de que termine una llamada
      */
     private fun scheduleReturnToPushAfterCall(accounts: Set<String>) {
         cancelCallEndTransition()
 
-        //  callEndTransitionJob =
         scope.launch {
             try {
-                // Delay más corto para retorno después de llamada
+                // Delay mas corto para retorno despues de llamada
                 val returnDelay = 2000L
                 log.d(tag = TAG) { "Scheduling return to push in ${returnDelay}ms after call end" }
                 delay(returnDelay)
@@ -470,7 +513,7 @@ class PushModeManager(
 
 
     /**
-     * Transición inmediata a modo push con logging detallado
+     * Transicion inmediata a modo push con logging detallado
      */
     @OptIn(ExperimentalTime::class)
     private fun transitionToPush(accounts: Set<String>, reason: String) {
@@ -516,34 +559,9 @@ class PushModeManager(
             log.e(tag = TAG1) { "Error in transition callbacks: ${e.message}" }
         }
     }
-//    private fun transitionToPush(accounts: Set<String>, reason: String) {
-//        val currentState = _pushModeStateFlow.value
-//
-//        if (currentState.currentMode == PushMode.PUSH) {
-//            log.d(tag = TAG) { "Already in push mode, ignoring transition" }
-//            return
-//        }
-//
-//        log.d(tag = TAG) { "Transitioning to PUSH mode: $reason" }
-//
-//        val newState = PushModeState(
-//            currentMode = PushMode.PUSH,
-//            previousMode = currentState.currentMode,
-//            timestamp = Clock.System.now().toEpochMilliseconds(),
-//            reason = reason,
-//            accountsInPushMode = accounts,
-//            wasInPushBeforeCall = currentState.wasInPushBeforeCall
-//        )
-//
-//        _pushModeStateFlow.value = newState
-//
-//        // Notificar que se requiere reregistro en modo push
-//        onRegistrationRequiredCallback?.invoke(accounts, PushMode.PUSH)
-//        onModeChangeCallback?.invoke(newState)
-//    }
 
     /**
-     * Transición inmediata a modo foreground con logging detallado
+     * Transicion inmediata a modo foreground con logging detallado
      */
     @OptIn(ExperimentalTime::class)
     private fun transitionToForeground(accounts: Set<String>, reason: String) {
@@ -589,36 +607,7 @@ class PushModeManager(
     }
 
     /**
-     * Transición inmediata a modo foreground
-     */
-//    private fun transitionToForeground(accounts: Set<String>, reason: String) {
-//        val currentState = _pushModeStateFlow.value
-//
-//        if (currentState.currentMode == PushMode.FOREGROUND) {
-//            log.d(tag = TAG) { "Already in foreground mode, ignoring transition" }
-//            return
-//        }
-//
-//        log.d(tag = TAG) { "Transitioning to FOREGROUND mode: $reason" }
-//
-//        val newState = PushModeState(
-//            currentMode = PushMode.FOREGROUND,
-//            previousMode = currentState.currentMode,
-//            timestamp = Clock.System.now().toEpochMilliseconds(),
-//            reason = reason,
-//            accountsInPushMode = emptySet(),
-//            wasInPushBeforeCall = currentState.wasInPushBeforeCall
-//        )
-//
-//        _pushModeStateFlow.value = newState
-//
-//        // Notificar que se requiere reregistro en modo foreground
-//        onRegistrationRequiredCallback?.invoke(accounts, PushMode.FOREGROUND)
-//        onModeChangeCallback?.invoke(newState)
-//    }
-
-    /**
-     * Cancela transición pendiente
+     * Cancela transicion pendiente
      */
     private fun cancelPendingTransition() {
         transitionJob?.cancel()
@@ -626,11 +615,11 @@ class PushModeManager(
     }
 
     /**
-     * Cancela transición de fin de llamada
+     * Cancela transicion de fin de llamada
      */
     private fun cancelCallEndTransition(accountKey: String? = null) {
         if (accountKey != null) {
-            // Cancelar solo para cuenta específica
+            // Cancelar solo para cuenta especifica
             callEndTransitionJobs[accountKey]?.cancel()
             callEndTransitionJobs.remove(accountKey)
             pendingReturns.remove(accountKey)
@@ -644,22 +633,25 @@ class PushModeManager(
         }
     }
 
-// === MÉTODOS DE CONSULTA ===
+// === METODOS DE CONSULTA ===
 
     fun getCurrentMode(): PushMode = _pushModeStateFlow.value.currentMode
     fun getCurrentState(): PushModeState = _pushModeStateFlow.value
     fun isInPushMode(): Boolean = getCurrentMode() == PushMode.PUSH
     fun isInForegroundMode(): Boolean = getCurrentMode() == PushMode.FOREGROUND
     fun getConfig(): PushModeConfig = config
+
     /**
-     * NUEVO: Método para debugging del estado por cuenta
+     * Metodo para debugging del estado por cuenta
      */
     fun getAccountStates(): String {
         return buildString {
             appendLine("=== ACCOUNT PUSH STATES ===")
             appendLine("Accounts in push before call:")
-            accountPushStates.forEach { (account, wasInPush) ->
-                appendLine("  $account: $wasInPush")
+            synchronized(accountPushStatesLock) {
+                accountPushStates.forEach { (account, wasInPush) ->
+                    appendLine("  $account: $wasInPush")
+                }
             }
             appendLine("Pending returns:")
             pendingReturns.forEach { account ->
@@ -669,10 +661,12 @@ class PushModeManager(
             callEndTransitionJobs.forEach { (account, job) ->
                 appendLine("  $account: ${job.isActive}")
             }
+            appendLine("Was in push before disconnect: $wasInPushBeforeDisconnect")
         }
     }
+
     /**
-     * Información de diagnóstico - ACTUALIZADA
+     * Informacion de diagnostico
      */
     fun getDiagnosticInfo(): String {
         val state = getCurrentState()
@@ -695,21 +689,24 @@ class PushModeManager(
             appendLine("Auto Transition Delay: ${config.autoTransitionDelay}ms")
             appendLine("Force Reregister On Call: ${config.forceReregisterOnIncomingCall}")
             appendLine("Return To Push After Call: ${config.returnToPushAfterCallEnd}")
+            appendLine("Was In Push Before Disconnect: $wasInPushBeforeDisconnect")
 
-            // NUEVO: Estado por cuenta
+            // Estado por cuenta
             appendLine("\n${getAccountStates()}")
         }
     }
 
     /**
-     * Limpieza de recursos - MEJORADA
+     * Limpieza de recursos
      */
     fun dispose() {
         cancelPendingTransition()
         cancelCallEndTransition() // Cancela todos
 
         // Limpiar estados por cuenta
-        accountPushStates.clear()
+        synchronized(accountPushStatesLock) {
+            accountPushStates.clear()
+        }
         pendingReturns.clear()
         callEndTransitionJobs.clear()
 

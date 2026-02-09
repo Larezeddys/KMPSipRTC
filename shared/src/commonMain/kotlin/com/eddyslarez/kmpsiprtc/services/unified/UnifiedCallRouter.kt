@@ -92,4 +92,25 @@ class UnifiedCallRouter(
             }
         }
     }
+
+    /**
+     * Responder llamada Matrix
+     */
+    suspend fun answerMatrixCall(callId: String): Result<Unit> {
+        return matrixManager.answerCall(callId)
+    }
+
+    /**
+     * Colgar llamada Matrix
+     */
+    suspend fun hangupMatrixCall(callId: String): Result<Unit> {
+        return matrixManager.hangupCall(callId)
+    }
+
+    /**
+     * Verificar si hay una llamada Matrix activa
+     */
+    fun hasActiveMatrixCall(): Boolean {
+        return matrixManager.activeCall.value != null
+    }
 }

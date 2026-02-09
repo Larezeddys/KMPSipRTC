@@ -19,6 +19,7 @@ import com.eddyslarez.kmpsiprtc.core.SipCoreManager
 import com.eddyslarez.kmpsiprtc.data.database.DatabaseManager
 import com.eddyslarez.kmpsiprtc.services.calls.CallStateManager
 import com.eddyslarez.kmpsiprtc.services.calls.MultiCallManager
+import com.eddyslarez.kmpsiprtc.services.matrix.MatrixCall
 import com.eddyslarez.kmpsiprtc.services.matrix.MatrixConfig
 import com.eddyslarez.kmpsiprtc.services.matrix.MatrixManager
 import com.eddyslarez.kmpsiprtc.services.matrix.MatrixMessage
@@ -2067,6 +2068,73 @@ class KmpSipRtc private constructor() {
             onComplete?.invoke(result)
         }
     }
+
+    /**
+     * Logout de Matrix
+     */
+    fun logoutMatrix(onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run {
+            onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized")))
+            return
+        }
+
+        internalScope.launch {
+            try {
+                matrix.logout()
+                onComplete?.invoke(Result.success(Unit))
+            } catch (e: Exception) {
+                onComplete?.invoke(Result.failure(e))
+            }
+        }
+    }
+
+    /**
+     * Verificar si esta logueado en Matrix
+     */
+    fun isMatrixLoggedIn(): Boolean {
+        return matrixManager?.isLoggedIn() ?: false
+    }
+
+    /**
+     * Responder llamada Matrix entrante
+     */
+    fun answerMatrixCall(callId: String, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run {
+            onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized")))
+            return
+        }
+
+        internalScope.launch {
+            val result = matrix.answerCall(callId)
+            onComplete?.invoke(result)
+        }
+    }
+
+    /**
+     * Colgar llamada Matrix
+     */
+    fun hangupMatrixCall(callId: String, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run {
+            onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized")))
+            return
+        }
+
+        internalScope.launch {
+            val result = matrix.hangupCall(callId)
+            onComplete?.invoke(result)
+        }
+    }
+
+    /**
+     * Obtener estado de la llamada Matrix activa
+     */
+    fun getActiveMatrixCallFlow(): Flow<MatrixCall?>? {
+        checkInitialized()
+        return matrixManager?.activeCall
+    }
     /**
      * Crear sala Matrix
      */
@@ -2143,6 +2211,39 @@ class KmpSipRtc private constructor() {
     fun getMatrixMessagesFlow(): Flow<Map<String, List<MatrixMessage>>>? {
         checkInitialized()
         return matrixManager?.messages
+    }
+
+    ////////WEBSOCKET STATE//////
+
+    /**
+     * Obtener estado de conexion WebSocket como Flow observable
+     */
+    fun getWebSocketConnectionStateFlow(): StateFlow<com.eddyslarez.kmpsiprtc.core.WebSocketConnectionState>? {
+        checkInitialized()
+        return sipCoreManager?.sharedWebSocketManager?.connectionState
+    }
+
+    /**
+     * Configurar listener de eventos de conexion WebSocket
+     */
+    fun setConnectionEventListener(listener: com.eddyslarez.kmpsiprtc.core.SharedWebSocketManager.ConnectionEventListener?) {
+        checkInitialized()
+        sipCoreManager?.sharedWebSocketManager?.setConnectionEventListener(listener)
+    }
+
+    /**
+     * Obtener estado de salud del WebSocket
+     */
+    fun isWebSocketHealthy(): Boolean {
+        return sipCoreManager?.sharedWebSocketManager?.isWebSocketHealthy() ?: false
+    }
+
+    /**
+     * Forzar reconexion del WebSocket
+     */
+    fun forceWebSocketReconnect() {
+        checkInitialized()
+        sipCoreManager?.sharedWebSocketManager?.forceReconnect()
     }
 
     // === CLASES DE EXCEPCIÓN ===
