@@ -284,7 +284,7 @@ class PeerConnectionController(
                     ) {
                         // Enviar al recorder si está grabando o haciendo streaming
                         if (callRecorder.isRecording() || callRecorder.isStreaming()) {
-                            callRecorder.captureRemoteAudio(data)
+                            callRecorder.captureRemoteAudio(data, sampleRate, channels, bitsPerSample)
                         }
                     }
                 }

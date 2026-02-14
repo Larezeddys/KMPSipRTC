@@ -3,7 +3,7 @@ package com.eddyslarez.kmpsiprtc.services.calls
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.services.webrtc.WebRtcManager
 
-class CallHoldManager(private val webRtcManager: WebRtcManager) {
+internal class CallHoldManager(private val webRtcManager: WebRtcManager) {
 
     private var isCallOnHold = false
     private var originalLocalSdp: String? = null
@@ -93,7 +93,7 @@ class CallHoldManager(private val webRtcManager: WebRtcManager) {
 //        try {
 //            if (isCallOnHold) return null
 //
-//            // ✅ Usar transceivers en lugar de modificar SDP
+//            // [OK] Usar transceivers en lugar de modificar SDP
 //            webRtcManager.setAudioEnabled(false)
 //
 //            // Obtener el SDP actualizado
@@ -115,7 +115,7 @@ class CallHoldManager(private val webRtcManager: WebRtcManager) {
 //        try {
 //            if (!isCallOnHold) return null
 //
-//            // ✅ Habilitar audio nuevamente
+//            // [OK] Habilitar audio nuevamente
 //            webRtcManager.setAudioEnabled(true)
 //
 //            val resumeSdp = webRtcManager.getLocalDescription()

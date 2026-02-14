@@ -372,7 +372,7 @@ class IosPeerConnectionController(
                         timestampMs: Long
                     ) {
                         if (callRecorder.isRecording() || callRecorder.isStreaming()) {
-                            callRecorder.captureRemoteAudio(data)
+                            callRecorder.captureRemoteAudio(data, sampleRate, channels, bitsPerSample)
                         }
                     }
                 }

@@ -21,9 +21,17 @@ interface CallRecorder {
 
     /**
      * Capturar audio remoto (del peer)
-     * @param audioData datos de audio en formato PCM 16-bit
+     * @param audioData datos de audio en formato PCM
+     * @param sampleRate sample rate real del audio (e.g. 48000, 16000)
+     * @param channels número de canales (1=mono, 2=stereo)
+     * @param bitsPerSample bits por muestra (16 o 32)
      */
-    fun captureRemoteAudio(audioData: ByteArray)
+    fun captureRemoteAudio(
+        audioData: ByteArray,
+        sampleRate: Int = 48000,
+        channels: Int = 1,
+        bitsPerSample: Int = 16
+    )
 
     /**
      * Verificar si está grabando actualmente

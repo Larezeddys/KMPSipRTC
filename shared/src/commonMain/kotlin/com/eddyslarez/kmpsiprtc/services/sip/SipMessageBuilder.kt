@@ -236,12 +236,22 @@ object SipMessageBuilder {
         builder.append("Call-ID: ${callData.callId}\r\n")
 
         val cseqValue = if (method == "CANCEL") {
-            val originalCseqHeader = SipMessageParser.extractHeader(
-                callData.originalCallInviteMessage.split("\r\n"), "CSeq"
-            )
-            log.d(tag = TAG) { "originalCseqHeader $originalCseqHeader" }
+            if (callData.originalCallInviteMessage.isNotEmpty()) {
+                val originalCseqHeader = SipMessageParser.extractHeader(
+                    callData.originalCallInviteMessage.split("\r\n"), "CSeq"
+                )
+                log.d(tag = TAG) { "originalCseqHeader '$originalCseqHeader'" }
 
-            originalCseqHeader.split(" ")[0].trim().toInt()
+                if (originalCseqHeader.isNotEmpty()) {
+                    originalCseqHeader.split(" ")[0].trim().toIntOrNull() ?: (currentCSeq - 1)
+                } else {
+                    log.w(tag = TAG) { "CSeq header not found in original INVITE, using fallback" }
+                    currentCSeq - 1
+                }
+            } else {
+                log.w(tag = TAG) { "originalCallInviteMessage is empty, using fallback CSeq" }
+                currentCSeq - 1
+            }
         } else {
             currentCSeq
         }

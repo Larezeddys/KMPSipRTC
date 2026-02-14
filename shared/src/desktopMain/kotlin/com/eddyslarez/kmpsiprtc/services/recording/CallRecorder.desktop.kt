@@ -17,7 +17,7 @@ class DesktopCallRecorder : CallRecorder {
     private val TAG = "DesktopCallRecorder"
 
     // Configuración de audio
-    private val SAMPLE_RATE = 8000f // 8kHz
+    private val SAMPLE_RATE = 48000f // 48kHz (WebRTC remote audio rate)
     private val CHANNELS = 1 // Mono
     private val SAMPLE_SIZE_BITS = 16
     private val SIGNED = true
@@ -35,6 +35,10 @@ class DesktopCallRecorder : CallRecorder {
     private val localAudioBuffer = mutableListOf<ByteArray>()
     private val remoteAudioBuffer = mutableListOf<ByteArray>()
 
+    // Formato real del audio remoto (detectado en primer callback)
+    @Volatile
+    private var remoteSampleRate: Int = 48000
+
     // Listener para streaming en tiempo real
     private var audioStreamListener: AudioStreamListener? = null
 
@@ -45,6 +49,14 @@ class DesktopCallRecorder : CallRecorder {
     private var isStreamingActive = false
     private var recordingJob: Job? = null
     private val recordingScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    // Diagnóstico de audio remoto
+    @Volatile
+    private var remoteCallbackCount = 0
+    @Volatile
+    private var remoteTotalBytes = 0L
+    @Volatile
+    private var remoteFirstCallbackLogged = false
 
     // TargetDataLine para captura de audio
     private var targetDataLine: TargetDataLine? = null
@@ -68,6 +80,12 @@ class DesktopCallRecorder : CallRecorder {
 
         currentCallId = callId
         isRecording = true
+        remoteSampleRate = SAMPLE_RATE.toInt()
+
+        // Reset diagnóstico
+        remoteCallbackCount = 0
+        remoteTotalBytes = 0L
+        remoteFirstCallbackLogged = false
 
         // Limpiar buffers anteriores
         localAudioBuffer.clear()
@@ -153,9 +171,19 @@ class DesktopCallRecorder : CallRecorder {
         val callId = currentCallId ?: "unknown"
         val timestamp = System.currentTimeMillis()
 
-        // Guardar archivos
-        val localFile = saveAudioToFile(localAudioBuffer, "${callId}_local_${timestamp}.wav")
-        val remoteFile = saveAudioToFile(remoteAudioBuffer, "${callId}_remote_${timestamp}.wav")
+        // Diagnóstico antes de guardar
+        val localTotalBytes = localAudioBuffer.sumOf { it.size }
+        val remoteTotalBytesNorm = remoteAudioBuffer.sumOf { it.size }
+        val localDurationSec = localTotalBytes.toDouble() / (SAMPLE_RATE * 2)
+        val remoteDurationSec = remoteTotalBytesNorm.toDouble() / (remoteSampleRate * 2)
+        log.d(TAG) { "RECORDING STATS:" }
+        log.d(TAG) { "  Local: ${localTotalBytes} bytes, ~${String.format("%.1f", localDurationSec)}s @ ${SAMPLE_RATE.toInt()}Hz" }
+        log.d(TAG) { "  Remote: ${remoteTotalBytesNorm} bytes, ~${String.format("%.1f", remoteDurationSec)}s @ ${remoteSampleRate}Hz" }
+        log.d(TAG) { "  Remote callbacks: $remoteCallbackCount, raw bytes: $remoteTotalBytes" }
+
+        // Guardar archivos - local usa SAMPLE_RATE del mic, remote usa remoteSampleRate detectado
+        val localFile = saveAudioToFile(localAudioBuffer, "${callId}_local_${timestamp}.wav", SAMPLE_RATE.toInt())
+        val remoteFile = saveAudioToFile(remoteAudioBuffer, "${callId}_remote_${timestamp}.wav", remoteSampleRate)
         val mixedFile = mixAndSaveAudio(localAudioBuffer, remoteAudioBuffer, "${callId}_mixed_${timestamp}.wav")
 
         // Limpiar buffers
@@ -171,15 +199,34 @@ class DesktopCallRecorder : CallRecorder {
         RecordingResult(localFile?.path, remoteFile?.path, mixedFile?.path)
     }
 
-    override fun captureRemoteAudio(audioData: ByteArray) {
+    override fun captureRemoteAudio(
+        audioData: ByteArray,
+        sampleRate: Int,
+        channels: Int,
+        bitsPerSample: Int
+    ) {
         if (!isRecording && !isStreamingActive) return
 
-        val dataCopy = audioData.copyOf()
+        // Log primer callback para diagnóstico
+        if (!remoteFirstCallbackLogged) {
+            remoteFirstCallbackLogged = true
+            log.d(TAG) { "REMOTE AUDIO FIRST CALLBACK: sampleRate=$sampleRate, channels=$channels, bitsPerSample=$bitsPerSample, dataSize=${audioData.size}" }
+            val expectedFrames = audioData.size / (channels * (bitsPerSample / 8))
+            log.d(TAG) { "REMOTE AUDIO: expectedFrames=$expectedFrames, durationMs=${expectedFrames * 1000.0 / sampleRate}" }
+        }
+        remoteCallbackCount++
+        remoteTotalBytes += audioData.size
+
+        // Detectar sample rate real del audio remoto
+        remoteSampleRate = sampleRate
+
+        // Normalizar a mono 16-bit PCM
+        val normalized = normalizeToMono16bit(audioData, channels, bitsPerSample)
 
         // Guardar en buffer si está grabando
         if (isRecording) {
             synchronized(remoteAudioBuffer) {
-                remoteAudioBuffer.add(dataCopy)
+                remoteAudioBuffer.add(normalized)
             }
         }
 
@@ -187,13 +234,59 @@ class DesktopCallRecorder : CallRecorder {
         if (isStreamingActive && audioStreamListener != null) {
             try {
                 audioStreamListener?.onRemoteAudioData(
-                    dataCopy, SAMPLE_RATE.toInt(), CHANNELS, SAMPLE_SIZE_BITS
+                    normalized, sampleRate, 1, 16
                 )
             } catch (e: Exception) {
                 log.e(TAG) { "Error sending remote audio stream: ${e.message}" }
                 audioStreamListener?.onStreamError(e.message ?: "Error sending remote audio")
             }
         }
+    }
+
+    /**
+     * Normaliza audio PCM a mono 16-bit little-endian.
+     * Maneja conversiones de: stereo→mono, 32-bit(int/float)→16-bit.
+     */
+    private fun normalizeToMono16bit(data: ByteArray, channels: Int, bitsPerSample: Int): ByteArray {
+        if (channels == 1 && bitsPerSample == 16) return data.copyOf()
+
+        val bytesPerSample = bitsPerSample / 8
+        val frameSize = bytesPerSample * channels
+        val frameCount = data.size / frameSize
+        val output = ByteBuffer.allocate(frameCount * 2).order(ByteOrder.LITTLE_ENDIAN)
+        val input = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
+
+        for (i in 0 until frameCount) {
+            var sum = 0L
+            for (ch in 0 until channels) {
+                val sample16: Int = when (bitsPerSample) {
+                    16 -> input.short.toInt()
+                    32 -> {
+                        // WebRTC puede enviar int32 o float32
+                        val raw = input.int
+                        // Heuristica: si los valores son muy pequeños para int32,
+                        // probablemente es float32
+                        val asFloat = Float.fromBits(raw)
+                        if (asFloat in -1.1f..1.1f) {
+                            (asFloat * 32767f).toInt().coerceIn(-32768, 32767)
+                        } else {
+                            (raw shr 16) // int32 → int16 shift
+                        }
+                    }
+                    else -> {
+                        // Skip bytes desconocidos
+                        repeat(bytesPerSample) { input.get() }
+                        0
+                    }
+                }
+                sum += sample16
+            }
+            // Promediar canales para downmix a mono
+            val mono = (sum / channels).coerceIn(-32768, 32767).toShort()
+            output.putShort(mono)
+        }
+
+        return output.array()
     }
 
     override fun isRecording(): Boolean = isRecording
@@ -295,7 +388,7 @@ class DesktopCallRecorder : CallRecorder {
 
     // ==================== GUARDADO DE ARCHIVOS ====================
 
-    private fun saveAudioToFile(audioBuffer: List<ByteArray>, fileName: String): File? {
+    private fun saveAudioToFile(audioBuffer: List<ByteArray>, fileName: String, sampleRate: Int = SAMPLE_RATE.toInt()): File? {
         if (audioBuffer.isEmpty()) {
             log.w(TAG) { "⚠️ Empty audio buffer for $fileName" }
             return null
@@ -307,11 +400,11 @@ class DesktopCallRecorder : CallRecorder {
             val totalDataLen = totalAudioLen + 36
 
             FileOutputStream(file).use { fos ->
-                writeWavHeader(fos, totalAudioLen.toLong(), totalDataLen.toLong(), SAMPLE_RATE.toLong())
+                writeWavHeader(fos, totalAudioLen.toLong(), totalDataLen.toLong(), sampleRate.toLong())
                 audioBuffer.forEach { chunk -> fos.write(chunk) }
             }
 
-            log.d(TAG) { "✅ Saved: ${file.absolutePath} (${file.length() / 1024}KB)" }
+            log.d(TAG) { "✅ Saved: ${file.absolutePath} (${file.length() / 1024}KB) @ ${sampleRate}Hz" }
             file
         } catch (e: Exception) {
             log.e(TAG) { "❌ Error saving audio: ${e.message}" }
@@ -333,7 +426,14 @@ class DesktopCallRecorder : CallRecorder {
         return try {
             val file = File(outputDir, fileName)
             val localSamples = bufferToSamples(localBuffer)
-            val remoteSamples = bufferToSamples(remoteBuffer)
+            var remoteSamples = bufferToSamples(remoteBuffer)
+
+            // Si los sample rates difieren, resamplear el remoto al rate local
+            val localRate = SAMPLE_RATE.toInt()
+            if (remoteSampleRate != localRate && remoteSamples.isNotEmpty()) {
+                remoteSamples = resample(remoteSamples, remoteSampleRate, localRate)
+            }
+
             val maxLength = maxOf(localSamples.size, remoteSamples.size)
             val mixedSamples = ShortArray(maxLength)
 
@@ -350,7 +450,7 @@ class DesktopCallRecorder : CallRecorder {
             FileOutputStream(file).use { fos ->
                 val totalAudioLen = mixedBytes.size
                 val totalDataLen = totalAudioLen + 36
-                writeWavHeader(fos, totalAudioLen.toLong(), totalDataLen.toLong(), SAMPLE_RATE.toLong())
+                writeWavHeader(fos, totalAudioLen.toLong(), totalDataLen.toLong(), localRate.toLong())
                 fos.write(mixedBytes)
             }
 
@@ -361,6 +461,25 @@ class DesktopCallRecorder : CallRecorder {
             e.printStackTrace()
             null
         }
+    }
+
+    /**
+     * Resample lineal simple de samples a un nuevo sample rate
+     */
+    private fun resample(samples: ShortArray, fromRate: Int, toRate: Int): ShortArray {
+        if (fromRate == toRate || samples.isEmpty()) return samples
+        val ratio = fromRate.toDouble() / toRate.toDouble()
+        val newLength = (samples.size / ratio).toInt()
+        val result = ShortArray(newLength)
+        for (i in result.indices) {
+            val srcPos = i * ratio
+            val srcIndex = srcPos.toInt()
+            val frac = srcPos - srcIndex
+            val s0 = samples[srcIndex.coerceIn(0, samples.lastIndex)].toInt()
+            val s1 = samples[(srcIndex + 1).coerceIn(0, samples.lastIndex)].toInt()
+            result[i] = (s0 + (s1 - s0) * frac).toInt().coerceIn(-32768, 32767).toShort()
+        }
+        return result
     }
 
     private fun writeWavHeader(
@@ -405,7 +524,7 @@ class DesktopCallRecorder : CallRecorder {
         header[29] = ((byteRate shr 8) and 0xff).toByte()
         header[30] = ((byteRate shr 16) and 0xff).toByte()
         header[31] = ((byteRate shr 24) and 0xff).toByte()
-        header[32] = (2 * SAMPLE_SIZE_BITS / 8).toByte()
+        header[32] = (CHANNELS * SAMPLE_SIZE_BITS / 8).toByte()
         header[33] = 0
         header[34] = SAMPLE_SIZE_BITS.toByte()
         header[35] = 0

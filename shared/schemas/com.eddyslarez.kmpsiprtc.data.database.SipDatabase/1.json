@@ -1,0 +1,935 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 1,
+    "identityHash": "52e4d4d1c4ddd7adc0e0cc937f8f57af",
+    "entities": [
+      {
+        "tableName": "sip_accounts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `username` TEXT NOT NULL, `password` TEXT NOT NULL, `domain` TEXT NOT NULL, `displayName` TEXT, `userAgent` TEXT, `pushToken` TEXT, `pushProvider` TEXT, `registrationState` TEXT NOT NULL, `lastRegistrationTime` INTEGER NOT NULL, `registrationExpiry` INTEGER NOT NULL, `isActive` INTEGER NOT NULL, `isDefault` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, `autoRegister` INTEGER NOT NULL, `enablePush` INTEGER NOT NULL, `registrationTimeout` INTEGER NOT NULL, `keepAliveInterval` INTEGER NOT NULL, `totalCalls` INTEGER NOT NULL, `successfulCalls` INTEGER NOT NULL, `failedCalls` INTEGER NOT NULL, `lastCallTime` INTEGER NOT NULL, `lastErrorMessage` TEXT, `connectionQuality` REAL NOT NULL, `averageLatency` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "username",
+            "columnName": "username",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "password",
+            "columnName": "password",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "domain",
+            "columnName": "domain",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "displayName",
+            "columnName": "displayName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "userAgent",
+            "columnName": "userAgent",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "pushToken",
+            "columnName": "pushToken",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "pushProvider",
+            "columnName": "pushProvider",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "registrationState",
+            "columnName": "registrationState",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastRegistrationTime",
+            "columnName": "lastRegistrationTime",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "registrationExpiry",
+            "columnName": "registrationExpiry",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isActive",
+            "columnName": "isActive",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isDefault",
+            "columnName": "isDefault",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "autoRegister",
+            "columnName": "autoRegister",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "enablePush",
+            "columnName": "enablePush",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "registrationTimeout",
+            "columnName": "registrationTimeout",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "keepAliveInterval",
+            "columnName": "keepAliveInterval",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalCalls",
+            "columnName": "totalCalls",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "successfulCalls",
+            "columnName": "successfulCalls",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "failedCalls",
+            "columnName": "failedCalls",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastCallTime",
+            "columnName": "lastCallTime",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastErrorMessage",
+            "columnName": "lastErrorMessage",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "connectionQuality",
+            "columnName": "connectionQuality",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "averageLatency",
+            "columnName": "averageLatency",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_sip_accounts_username_domain",
+            "unique": true,
+            "columnNames": [
+              "username",
+              "domain"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_sip_accounts_username_domain` ON `${TABLE_NAME}` (`username`, `domain`)"
+          }
+        ]
+      },
+      {
+        "tableName": "call_logs",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `accountId` TEXT NOT NULL, `callId` TEXT NOT NULL, `phoneNumber` TEXT NOT NULL, `displayName` TEXT, `direction` TEXT NOT NULL, `callType` TEXT NOT NULL, `startTime` INTEGER NOT NULL, `endTime` INTEGER, `duration` INTEGER NOT NULL, `isRead` INTEGER NOT NULL, `notes` TEXT, `sipCode` INTEGER, `sipReason` TEXT, `localAddress` TEXT, `remoteAddress` TEXT, `userAgent` TEXT, `audioQuality` REAL NOT NULL, `networkLatency` INTEGER NOT NULL, `packetLoss` REAL NOT NULL, `jitter` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "callId",
+            "columnName": "callId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "phoneNumber",
+            "columnName": "phoneNumber",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "displayName",
+            "columnName": "displayName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "direction",
+            "columnName": "direction",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "callType",
+            "columnName": "callType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "startTime",
+            "columnName": "startTime",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "endTime",
+            "columnName": "endTime",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "duration",
+            "columnName": "duration",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isRead",
+            "columnName": "isRead",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "notes",
+            "columnName": "notes",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sipCode",
+            "columnName": "sipCode",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "sipReason",
+            "columnName": "sipReason",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "localAddress",
+            "columnName": "localAddress",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "remoteAddress",
+            "columnName": "remoteAddress",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "userAgent",
+            "columnName": "userAgent",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "audioQuality",
+            "columnName": "audioQuality",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "networkLatency",
+            "columnName": "networkLatency",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "packetLoss",
+            "columnName": "packetLoss",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "jitter",
+            "columnName": "jitter",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_call_logs_accountId",
+            "unique": false,
+            "columnNames": [
+              "accountId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_call_logs_accountId` ON `${TABLE_NAME}` (`accountId`)"
+          },
+          {
+            "name": "index_call_logs_phoneNumber",
+            "unique": false,
+            "columnNames": [
+              "phoneNumber"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_call_logs_phoneNumber` ON `${TABLE_NAME}` (`phoneNumber`)"
+          },
+          {
+            "name": "index_call_logs_startTime",
+            "unique": false,
+            "columnNames": [
+              "startTime"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_call_logs_startTime` ON `${TABLE_NAME}` (`startTime`)"
+          }
+        ]
+      },
+      {
+        "tableName": "call_data",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`callId` TEXT NOT NULL, `accountId` TEXT NOT NULL, `fromNumber` TEXT NOT NULL, `toNumber` TEXT NOT NULL, `direction` TEXT NOT NULL, `currentState` TEXT NOT NULL, `startTime` INTEGER NOT NULL, `connectTime` INTEGER, `endTime` INTEGER, `isActive` INTEGER NOT NULL, `fromTag` TEXT, `toTag` TEXT, `inviteFromTag` TEXT NOT NULL, `inviteToTag` TEXT NOT NULL, `remoteContactUri` TEXT, `remoteDisplayName` TEXT NOT NULL, `remoteUserAgent` TEXT, `localSdp` TEXT NOT NULL, `remoteSdp` TEXT NOT NULL, `iceUfrag` TEXT, `icePwd` TEXT, `dtlsFingerprint` TEXT, `viaHeader` TEXT NOT NULL, `inviteViaBranch` TEXT NOT NULL, `lastCSeqValue` INTEGER NOT NULL, `isOnHold` INTEGER NOT NULL, `isMuted` INTEGER NOT NULL, `isRecording` INTEGER NOT NULL, `originalInviteMessage` TEXT NOT NULL, `originalCallInviteMessage` TEXT NOT NULL, `audioCodec` TEXT, `videoCodec` TEXT, `bandwidth` INTEGER NOT NULL, `packetsSent` INTEGER NOT NULL, `packetsReceived` INTEGER NOT NULL, `bytesTransferred` INTEGER NOT NULL, `md5Hash` TEXT NOT NULL, `sipName` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`callId`))",
+        "fields": [
+          {
+            "fieldPath": "callId",
+            "columnName": "callId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fromNumber",
+            "columnName": "fromNumber",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "toNumber",
+            "columnName": "toNumber",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "direction",
+            "columnName": "direction",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "currentState",
+            "columnName": "currentState",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "startTime",
+            "columnName": "startTime",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "connectTime",
+            "columnName": "connectTime",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "endTime",
+            "columnName": "endTime",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "isActive",
+            "columnName": "isActive",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fromTag",
+            "columnName": "fromTag",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "toTag",
+            "columnName": "toTag",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "inviteFromTag",
+            "columnName": "inviteFromTag",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "inviteToTag",
+            "columnName": "inviteToTag",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "remoteContactUri",
+            "columnName": "remoteContactUri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "remoteDisplayName",
+            "columnName": "remoteDisplayName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "remoteUserAgent",
+            "columnName": "remoteUserAgent",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "localSdp",
+            "columnName": "localSdp",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "remoteSdp",
+            "columnName": "remoteSdp",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "iceUfrag",
+            "columnName": "iceUfrag",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "icePwd",
+            "columnName": "icePwd",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "dtlsFingerprint",
+            "columnName": "dtlsFingerprint",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "viaHeader",
+            "columnName": "viaHeader",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "inviteViaBranch",
+            "columnName": "inviteViaBranch",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastCSeqValue",
+            "columnName": "lastCSeqValue",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isOnHold",
+            "columnName": "isOnHold",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isMuted",
+            "columnName": "isMuted",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isRecording",
+            "columnName": "isRecording",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "originalInviteMessage",
+            "columnName": "originalInviteMessage",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "originalCallInviteMessage",
+            "columnName": "originalCallInviteMessage",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "audioCodec",
+            "columnName": "audioCodec",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "videoCodec",
+            "columnName": "videoCodec",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "bandwidth",
+            "columnName": "bandwidth",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "packetsSent",
+            "columnName": "packetsSent",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "packetsReceived",
+            "columnName": "packetsReceived",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "bytesTransferred",
+            "columnName": "bytesTransferred",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "md5Hash",
+            "columnName": "md5Hash",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sipName",
+            "columnName": "sipName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "callId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_call_data_callId",
+            "unique": true,
+            "columnNames": [
+              "callId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_call_data_callId` ON `${TABLE_NAME}` (`callId`)"
+          },
+          {
+            "name": "index_call_data_accountId",
+            "unique": false,
+            "columnNames": [
+              "accountId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_call_data_accountId` ON `${TABLE_NAME}` (`accountId`)"
+          },
+          {
+            "name": "index_call_data_isActive",
+            "unique": false,
+            "columnNames": [
+              "isActive"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_call_data_isActive` ON `${TABLE_NAME}` (`isActive`)"
+          }
+        ]
+      },
+      {
+        "tableName": "contacts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `phoneNumber` TEXT NOT NULL, `displayName` TEXT NOT NULL, `firstName` TEXT, `lastName` TEXT, `email` TEXT, `company` TEXT, `notes` TEXT, `avatarUrl` TEXT, `isFavorite` INTEGER NOT NULL, `isBlocked` INTEGER NOT NULL, `ringtoneUri` TEXT, `totalCalls` INTEGER NOT NULL, `lastCallTime` INTEGER NOT NULL, `totalCallDuration` INTEGER NOT NULL, `missedCalls` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, `syncedAt` INTEGER NOT NULL, `source` TEXT NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "phoneNumber",
+            "columnName": "phoneNumber",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "displayName",
+            "columnName": "displayName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "firstName",
+            "columnName": "firstName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "lastName",
+            "columnName": "lastName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "email",
+            "columnName": "email",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "company",
+            "columnName": "company",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "notes",
+            "columnName": "notes",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "avatarUrl",
+            "columnName": "avatarUrl",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "isFavorite",
+            "columnName": "isFavorite",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isBlocked",
+            "columnName": "isBlocked",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ringtoneUri",
+            "columnName": "ringtoneUri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "totalCalls",
+            "columnName": "totalCalls",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastCallTime",
+            "columnName": "lastCallTime",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalCallDuration",
+            "columnName": "totalCallDuration",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "missedCalls",
+            "columnName": "missedCalls",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "syncedAt",
+            "columnName": "syncedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "source",
+            "columnName": "source",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_contacts_phoneNumber",
+            "unique": true,
+            "columnNames": [
+              "phoneNumber"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_contacts_phoneNumber` ON `${TABLE_NAME}` (`phoneNumber`)"
+          }
+        ]
+      },
+      {
+        "tableName": "call_state_history",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `callId` TEXT NOT NULL, `state` TEXT NOT NULL, `previousState` TEXT, `timestamp` INTEGER NOT NULL, `errorReason` TEXT NOT NULL, `sipCode` INTEGER, `sipReason` TEXT, `hasError` INTEGER NOT NULL, `duration` INTEGER NOT NULL, `additionalInfo` TEXT, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "callId",
+            "columnName": "callId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "previousState",
+            "columnName": "previousState",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "timestamp",
+            "columnName": "timestamp",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "errorReason",
+            "columnName": "errorReason",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sipCode",
+            "columnName": "sipCode",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "sipReason",
+            "columnName": "sipReason",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "hasError",
+            "columnName": "hasError",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "duration",
+            "columnName": "duration",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "additionalInfo",
+            "columnName": "additionalInfo",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_call_state_history_callId",
+            "unique": false,
+            "columnNames": [
+              "callId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_call_state_history_callId` ON `${TABLE_NAME}` (`callId`)"
+          },
+          {
+            "name": "index_call_state_history_timestamp",
+            "unique": false,
+            "columnNames": [
+              "timestamp"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_call_state_history_timestamp` ON `${TABLE_NAME}` (`timestamp`)"
+          }
+        ]
+      },
+      {
+        "tableName": "app_configuration",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `incomingRingtoneUri` TEXT, `outgoingRingtoneUri` TEXT, `defaultDomain` TEXT NOT NULL, `webSocketUrl` TEXT NOT NULL, `userAgent` TEXT NOT NULL, `enableLogs` INTEGER NOT NULL, `enableAutoReconnect` INTEGER NOT NULL, `pingIntervalMs` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "incomingRingtoneUri",
+            "columnName": "incomingRingtoneUri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "outgoingRingtoneUri",
+            "columnName": "outgoingRingtoneUri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "defaultDomain",
+            "columnName": "defaultDomain",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "webSocketUrl",
+            "columnName": "webSocketUrl",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "userAgent",
+            "columnName": "userAgent",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "enableLogs",
+            "columnName": "enableLogs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "enableAutoReconnect",
+            "columnName": "enableAutoReconnect",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pingIntervalMs",
+            "columnName": "pingIntervalMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '52e4d4d1c4ddd7adc0e0cc937f8f57af')"
+    ]
+  }
+}

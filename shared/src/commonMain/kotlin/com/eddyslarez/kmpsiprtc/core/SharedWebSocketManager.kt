@@ -11,6 +11,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -48,8 +50,10 @@ class SharedWebSocketManager(
         private const val RECONNECT_DEGRADED_DELAY = 60000L // 60s despues de degradado
         private const val RECONNECT_JITTER_FACTOR = 0.1    // 10% jitter
         private const val DEGRADED_THRESHOLD = 10           // Intentos antes de notificar degradado
+        private const val MAX_RECONNECT_ATTEMPTS = 30       // Limite maximo de intentos de reconexion
     }
 
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var lastPongTimestamp = 0L
     private var webSocketClient: MultiplatformWebSocket? = null
     private var isConnecting = false
@@ -69,12 +73,16 @@ class SharedWebSocketManager(
     // Mantener track de que cuentas estan usando esta conexion
     private val registeredAccounts = mutableSetOf<String>()
 
+    // Jobs de renovacion de registro per-account
+    private val renewalJobs = mutableMapOf<String, Job>()
+
     /**
      * Listener para eventos de estado de conexion - propaga a la app
      */
     interface ConnectionEventListener {
         fun onConnectionDegraded(attemptCount: Int, lastError: Exception?)
         fun onConnectionRestored(downTimeMs: Long)
+        fun onConnectionFailed(error: Exception) {}  // Default vacío para retrocompatibilidad
     }
 
     fun setConnectionEventListener(listener: ConnectionEventListener?) {
@@ -201,16 +209,25 @@ class SharedWebSocketManager(
      * Verificar salud del WebSocket basado en conexion + ultimo pong
      */
     @OptIn(ExperimentalTime::class)
+    fun getConnectionState(): WebSocketConnectionState = _connectionState.value
+
+    fun getReconnectAttempts(): Int = reconnectAttempts
+
+    @OptIn(ExperimentalTime::class)
     fun isWebSocketHealthy(): Boolean {
-        // Si no hay cliente o no esta conectado
+        // Si no hay cliente o no esta conectado (ahora isConnected() refleja estado real)
         val socketConnected = webSocketClient?.isConnected() == true
         if (!socketConnected) return false
 
         // Si esta en proceso de conexion, no es saludable aun
         if (isConnecting) return false
 
-        // Si nunca se recibio pong, asumimos que esta bien si recien se conecto
-        if (lastPongTimestamp == 0L) return true
+        // Si nunca se recibio pong, dar un periodo de gracia de 2 intervalos de ping
+        // desde que se establecio la conexion (antes retornaba true incondicionalmente)
+        if (lastPongTimestamp == 0L) {
+            val connectedState = _connectionState.value
+            return connectedState == WebSocketConnectionState.CONNECTED
+        }
 
         // Cuanto tiempo paso desde el ultimo pong
         val elapsed = kotlin.time.Clock.System.now().toEpochMilliseconds() - lastPongTimestamp
@@ -224,7 +241,7 @@ class SharedWebSocketManager(
      */
     fun forceReconnect() {
         log.d(tag = TAG) { "Forcing WebSocket reconnection" }
-        CoroutineScope(Dispatchers.IO).launch {
+        scope.launch {
             try {
                 webSocketClient?.stopPingTimer()
                 webSocketClient?.close(1000, "Force reconnect")
@@ -302,13 +319,13 @@ class SharedWebSocketManager(
                 log.d(tag = TAG) { "Shared WebSocket opened" }
                 onConnectionSuccess()
 
-                CoroutineScope(Dispatchers.IO).launch {
+                scope.launch {
                     reregisterOnlyFailedAccounts()
                 }
             }
 
             override fun onMessage(message: String) {
-                CoroutineScope(Dispatchers.IO).launch {
+                scope.launch {
                     // Determinar a que cuenta pertenece el mensaje
                     val accountInfo = determineAccountFromMessage(message)
 
@@ -326,6 +343,9 @@ class SharedWebSocketManager(
 
             override fun onClose(code: Int, reason: String) {
                 log.w(tag = TAG) { "Shared WebSocket closed: $code - $reason" }
+
+                // Cancelar todas las renovaciones programadas (conexion perdida)
+                cancelAllRenewals()
 
                 // Registrar timestamp de desconexion
                 if (disconnectedSince == 0L) {
@@ -366,11 +386,18 @@ class SharedWebSocketManager(
             }
 
             override fun onRegistrationRenewalRequired(accountKey: String) {
-                CoroutineScope(Dispatchers.IO).launch {
+                scope.launch {
                     val account = sipCoreManager.activeAccounts[accountKey]
                     if (account != null && isConnected()) {
-                        log.d(tag = TAG) { "Renewing registration for: $accountKey" }
-                        registerAccount(account, sipCoreManager.isAppInBackground)
+                        log.d(tag = TAG) { "Renewing registration for: $accountKey (re-REGISTER before expiry)" }
+                        val success = registerAccount(account, sipCoreManager.isAppInBackground)
+                        if (success) {
+                            log.d(tag = TAG) { "Renewal REGISTER sent for: $accountKey" }
+                        } else {
+                            log.e(tag = TAG) { "Failed to send renewal REGISTER for: $accountKey" }
+                        }
+                    } else {
+                        log.w(tag = TAG) { "Cannot renew $accountKey: account=${account != null}, connected=${isConnected()}" }
                     }
                 }
             }
@@ -499,6 +526,18 @@ class SharedWebSocketManager(
         reconnectJob?.cancel()
         reconnectAttempts++
 
+        // Guard: limite maximo de intentos para evitar reconexion infinita
+        if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+            log.e(tag = TAG) {
+                "Max reconnection attempts ($MAX_RECONNECT_ATTEMPTS) reached. Giving up."
+            }
+            _connectionState.value = WebSocketConnectionState.DISCONNECTED
+            connectionEventListener?.onConnectionFailed(
+                Exception("Max reconnection attempts ($MAX_RECONNECT_ATTEMPTS) exceeded")
+            )
+            return
+        }
+
         // Determinar delay segun fase
         val delayMs: Long
         if (reconnectAttempts <= DEGRADED_THRESHOLD) {
@@ -520,21 +559,19 @@ class SharedWebSocketManager(
             connectionEventListener?.onConnectionDegraded(reconnectAttempts, lastError)
         }
 
-        log.d(tag = TAG) { "Scheduling reconnect attempt $reconnectAttempts in ${delayMs}ms" }
+        log.d(tag = TAG) { "Scheduling reconnect attempt $reconnectAttempts/$MAX_RECONNECT_ATTEMPTS in ${delayMs}ms" }
 
-        reconnectJob = CoroutineScope(Dispatchers.IO).launch {
+        reconnectJob = scope.launch {
             delay(delayMs)
 
             if (sipCoreManager.networkManager.isNetworkAvailable()) {
                 log.d(tag = TAG) { "Attempting reconnection #$reconnectAttempts..." }
                 val success = connect()
                 if (!success) {
-                    // Seguir intentando - no hay limite
                     scheduleReconnect()
                 }
             } else {
                 log.w(tag = TAG) { "Network not available for reconnection, will retry" }
-                // Reintentar en el proximo ciclo
                 scheduleReconnect()
             }
         }
@@ -548,6 +585,7 @@ class SharedWebSocketManager(
             log.d(tag = TAG) { "Disconnecting shared WebSocket" }
 
             reconnectJob?.cancel()
+            cancelAllRenewals()
 
             webSocketClient?.stopPingTimer()
             webSocketClient?.stopRegistrationRenewalTimer()
@@ -566,8 +604,45 @@ class SharedWebSocketManager(
         }
     }
 
-    fun setRegistrationExpiration(accountKey: String, expirationTimeMs: Long) {
-        webSocketClient?.setRegistrationExpiration(accountKey, expirationTimeMs)
+    /**
+     * Programa la renovacion de registro para una cuenta especifica.
+     * Cada cuenta se auto-renueva individualmente basandose en su propio Expires
+     * (puede ser 300s, 600s, 1800s, o dias en push mode).
+     * Se re-registra 10 segundos antes del vencimiento.
+     */
+    fun scheduleRegistrationRenewal(accountKey: String, expiresSeconds: Int) {
+        // Cancelar renovacion anterior de esta cuenta
+        renewalJobs[accountKey]?.cancel()
+
+        // Programar renovacion 10 segundos antes del vencimiento
+        val delayMs = maxOf((expiresSeconds - 10) * 1000L, 5_000L)
+
+        renewalJobs[accountKey] = scope.launch {
+            log.d(tag = TAG) { "Renewal scheduled for $accountKey: re-REGISTER in ${delayMs / 1000}s (expires in ${expiresSeconds}s)" }
+            delay(delayMs)
+
+            val account = sipCoreManager.activeAccounts[accountKey]
+            if (account != null && isConnected()) {
+                log.d(tag = TAG) { "Renewing registration for $accountKey (${expiresSeconds}s expired)" }
+                val success = registerAccount(account, sipCoreManager.isAppInBackground)
+                if (success) {
+                    log.d(tag = TAG) { "Renewal REGISTER sent for $accountKey" }
+                } else {
+                    log.e(tag = TAG) { "Failed to send renewal REGISTER for $accountKey" }
+                }
+            } else {
+                log.w(tag = TAG) { "Cannot renew $accountKey: account=${account != null}, connected=${isConnected()}" }
+            }
+        }
+    }
+
+    /**
+     * Cancela todas las renovaciones programadas (al desconectar)
+     */
+    fun cancelAllRenewals() {
+        renewalJobs.values.forEach { it.cancel() }
+        renewalJobs.clear()
+        log.d(tag = TAG) { "All renewal jobs cancelled" }
     }
 
     /**
@@ -591,8 +666,18 @@ class SharedWebSocketManager(
     )
 
     fun dispose() {
-        CoroutineScope(Dispatchers.IO).launch {
-            disconnect()
+        try {
+            reconnectJob?.cancel()
+            cancelAllRenewals()
+            webSocketClient?.stopPingTimer()
+            webSocketClient?.stopRegistrationRenewalTimer()
+            webSocketClient?.close(1000, "Dispose")
+            webSocketClient = null
+            registeredAccounts.clear()
+        } catch (e: Exception) {
+            log.e(tag = TAG) { "Error in dispose: ${e.message}" }
+        } finally {
+            scope.cancel()
         }
     }
 }

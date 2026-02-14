@@ -5,6 +5,11 @@ import com.eddyslarez.kmpsiprtc.services.webrtc.WebRtcEventListener
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
 import com.eddyslarez.kmpsiprtc.data.models.SdpType
 import com.eddyslarez.kmpsiprtc.data.models.AudioDevice
+import com.eddyslarez.kmpsiprtc.data.models.CallData
+import com.eddyslarez.kmpsiprtc.data.models.CallDirections
+import com.eddyslarez.kmpsiprtc.data.models.CallState
+import com.eddyslarez.kmpsiprtc.services.calls.CallStateManager
+import com.eddyslarez.kmpsiprtc.services.unified.CallType
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import net.folivo.trixnity.client.*
@@ -36,6 +41,15 @@ class MatrixManager(
     private val TAG = "MatrixManager"
     private val CALL_VERSION = "1"
     private val CALL_LIFETIME = 60000L // 60 segundos para que expire el invite
+    private var storedAccessToken: String? = null
+    private var storedUserId: String? = null
+
+    // Referencia a SipCoreManager para notificar cambios de estado
+    private var sipCoreManager: com.eddyslarez.kmpsiprtc.core.SipCoreManager? = null
+
+    fun setSipCoreManager(coreManager: com.eddyslarez.kmpsiprtc.core.SipCoreManager) {
+        sipCoreManager = coreManager
+    }
 
     // Listener para eventos de llamada (propaga a la app)
     private var callEventListener: MatrixCallEventListener? = null
@@ -113,7 +127,8 @@ class MatrixManager(
 
             loginResult.onSuccess { client ->
                 matrixClient = client
-                log.d { "Login exitoso para $userId" }
+                storedUserId = client.userId.full
+                log.d { "Login exitoso para $userId (resolved: ${storedUserId})" }
 
                 // Iniciar sincronizacion
                 client.startSync()
@@ -194,6 +209,23 @@ class MatrixManager(
             _connectionState.value == MatrixConnectionState.Connected
 
     /**
+     * Obtiene el user ID del usuario logueado (ej: "@user:localhost")
+     */
+    fun getUserId(): String? = storedUserId ?: matrixClient?.userId?.full
+
+    /**
+     * Obtiene el access token de la sesion activa (para autenticacion con servicios externos)
+     */
+    fun getAccessToken(): String? = storedAccessToken
+
+    /**
+     * Establece el access token manualmente (ej: obtenido durante login)
+     */
+    fun setAccessToken(token: String) {
+        storedAccessToken = token
+    }
+
+    /**
      * Logout
      */
     suspend fun logout() {
@@ -214,10 +246,11 @@ class MatrixManager(
     }
 
     /**
-     * Configura listener de WebRTC para enviar ICE candidates automaticamente
+     * Registra el listener de WebRTC de Matrix en el CompositeWebRtcEventListener.
+     * Esto permite que tanto SIP como Matrix reciban eventos WebRTC simultaneamente.
      */
-    private fun setupWebRtcListener() {
-        webRtcManager.setListener(object : WebRtcEventListener {
+    internal fun registerWebRtcListener(composite: com.eddyslarez.kmpsiprtc.services.webrtc.CompositeWebRtcEventListener) {
+        composite.addListener(object : WebRtcEventListener {
             override fun onIceCandidate(candidate: String, sdpMid: String, sdpMLineIndex: Int) {
                 // Enviar ICE candidate via Matrix cuando se descubre
                 val call = _activeCall.value ?: return
@@ -229,7 +262,7 @@ class MatrixManager(
             }
 
             override fun onConnectionStateChange(state: WebRtcConnectionState) {
-                log.d(TAG) { "WebRTC connection state changed: $state" }
+                log.d(TAG) { "WebRTC connection state changed (Matrix): $state" }
                 val call = _activeCall.value ?: return
 
                 when (state) {
@@ -253,6 +286,14 @@ class MatrixManager(
                 log.d(TAG) { "Audio device changed: $device" }
             }
         })
+    }
+
+    /**
+     * Legacy: configura listener de WebRTC directamente (para cuando no hay composite)
+     */
+    private fun setupWebRtcListener() {
+        // No-op: ahora se usa registerWebRtcListener() via wireMatrixManager()
+        log.d(TAG) { "setupWebRtcListener() is now a no-op, using composite listener instead" }
     }
 
     /**
@@ -356,6 +397,7 @@ class MatrixManager(
     /**
      * Maneja m.call.invite recibido
      */
+    @OptIn(kotlin.time.ExperimentalTime::class)
     private suspend fun handleCallInvite(
         roomId: String,
         senderId: String,
@@ -378,11 +420,25 @@ class MatrixManager(
 
             _activeCall.value = call
 
-            // Configurar WebRTC con la oferta remota
-            webRtcManager.initialize()
-            webRtcManager.setRemoteDescription(sdp, SdpType.OFFER)
+            // NO inicializar WebRTC aqui (se hara en acceptCall via CallManager)
 
-            // Notificar a la app
+            // Alimentar CallStateManager con CallData de tipo Matrix
+            val callData = CallData(
+                callId = callId,
+                from = senderId,
+                to = matrixClient?.userId?.full ?: "",
+                direction = CallDirections.INCOMING,
+                startTime = kotlin.time.Clock.System.now().toEpochMilliseconds(),
+                callType = CallType.MATRIX_INTERNAL,
+                roomId = roomId,
+                remoteSdp = sdp
+            )
+            CallStateManager.incomingCallReceived(callId, senderId, callData)
+
+            // Notificar a SipCoreManager para que dispare la UI de llamada entrante
+            sipCoreManager?.notifyCallStateChanged(CallState.INCOMING_RECEIVED)
+
+            // Notificar listeners legacy de Matrix
             callEventListener?.onIncomingCall(call)
             callEventListener?.onCallStateChanged(callId, MatrixCallState.RINGING)
 
@@ -392,7 +448,7 @@ class MatrixManager(
     }
 
     /**
-     * Maneja m.call.answer recibido
+     * Maneja m.call.answer recibido (la otra parte acepto nuestra llamada saliente)
      */
     private suspend fun handleCallAnswer(
         roomId: String,
@@ -408,12 +464,21 @@ class MatrixManager(
             // Setear remote SDP
             webRtcManager.setRemoteDescription(sdp, SdpType.ANSWER)
 
-            // Actualizar estado
+            // Habilitar audio
+            webRtcManager.setAudioEnabled(true)
+
+            // Actualizar estado local de Matrix
             _activeCall.value = call.copy(
                 state = MatrixCallState.CONNECTED,
                 remoteSdp = sdp
             )
 
+            // Alimentar CallStateManager
+            CallStateManager.callConnected(call.callId, 200)
+            CallStateManager.streamsRunning(call.callId)
+            sipCoreManager?.notifyCallStateChanged(CallState.STREAMS_RUNNING)
+
+            // Notificar listeners legacy de Matrix
             callEventListener?.onCallAnswered(call.callId)
             callEventListener?.onCallStateChanged(call.callId, MatrixCallState.CONNECTED)
 
@@ -423,7 +488,7 @@ class MatrixManager(
     }
 
     /**
-     * Maneja m.call.hangup recibido
+     * Maneja m.call.hangup recibido (la otra parte colgo)
      */
     private fun handleCallHangup(
         roomId: String,
@@ -439,10 +504,15 @@ class MatrixManager(
             // Limpiar WebRTC
             webRtcManager.closePeerConnection()
 
-            // Actualizar estado
+            // Alimentar CallStateManager
+            CallStateManager.callEnded(call.callId, sipReason = reason)
+            sipCoreManager?.notifyCallStateChanged(CallState.ENDED)
+
+            // Actualizar estado local de Matrix
             _activeCall.value = call.copy(state = MatrixCallState.ENDED)
             _activeCall.value = null
 
+            // Notificar listeners legacy de Matrix
             callEventListener?.onCallHangup(call.callId, reason)
             callEventListener?.onCallStateChanged(call.callId, MatrixCallState.ENDED)
 
@@ -529,11 +599,13 @@ class MatrixManager(
     /**
      * Iniciar llamada de voz - envia m.call.invite
      */
+    @OptIn(kotlin.time.ExperimentalTime::class)
     suspend fun startVoiceCall(roomId: String): Result<MatrixCall> {
         return try {
             log.d { "Starting Matrix voice call in room: $roomId" }
 
             val client = matrixClient ?: throw Exception("Not logged in to Matrix")
+            val myUserId = client.userId.full
 
             // Inicializar WebRTC y crear oferta
             webRtcManager.initialize()
@@ -550,6 +622,20 @@ class MatrixManager(
             )
             _activeCall.value = call
 
+            // Alimentar CallStateManager con CallData de tipo Matrix
+            val callData = CallData(
+                callId = callId,
+                from = myUserId,
+                to = roomId,
+                direction = CallDirections.OUTGOING,
+                startTime = kotlin.time.Clock.System.now().toEpochMilliseconds(),
+                callType = CallType.MATRIX_INTERNAL,
+                roomId = roomId,
+                localSdp = offerSdp
+            )
+            CallStateManager.startOutgoingCall(callId, roomId, callData)
+            sipCoreManager?.notifyCallStateChanged(CallState.OUTGOING_INIT)
+
             // Enviar m.call.invite usando tipos nativos de Trixnity
             client.api.room.sendMessageEvent(
                 roomId = RoomId(roomId),
@@ -564,6 +650,10 @@ class MatrixManager(
                     sdpStreamMetadata = null
                 )
             )
+
+            // Notificar que esta sonando
+            CallStateManager.outgoingCallRinging(callId)
+            sipCoreManager?.notifyCallStateChanged(CallState.OUTGOING_RINGING)
 
             log.d(TAG) { "m.call.invite sent for call $callId" }
             Result.success(call)

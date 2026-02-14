@@ -376,7 +376,7 @@ class DesktopPeerConnectionController(
                         timestampMs: Long
                     ) {
                         if (callRecorder.isRecording() || callRecorder.isStreaming()) {
-                            callRecorder.captureRemoteAudio(data)
+                            callRecorder.captureRemoteAudio(data, sampleRate, channels, bitsPerSample)
                         }
                     }
                 }
@@ -466,46 +466,57 @@ class DesktopPeerConnectionController(
 
         try {
             localAudioTrack?.setEnabled(false)
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             log.w(TAG) { "Error disabling track: ${e.message}" }
+        }
+
+        // Remover senders del PeerConnection antes de cerrar para liberar referencias a tracks
+        try {
+            peerConnection?.senders?.forEach { sender ->
+                try {
+                    peerConnection?.removeTrack(sender)
+                } catch (_: Throwable) {}
+            }
+        } catch (e: Throwable) {
+            log.w(TAG) { "Error removing senders: ${e.message}" }
         }
 
         try {
             peerConnection?.close()
             peerConnection = null
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             log.w(TAG) { "Error closing peer connection: ${e.message}" }
         }
 
-        Thread.sleep(100)
+        Thread.sleep(200)
 
         try {
             localAudioTrack?.dispose()
-            localAudioTrack = null
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             log.w(TAG) { "Error disposing track: ${e.message}" }
         }
+        localAudioTrack = null
 
         try {
             audioDeviceModule?.dispose()
-            audioDeviceModule = null
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             log.w(TAG) { "Error releasing audio module: ${e.message}" }
         }
+        audioDeviceModule = null
 
         try {
             peerConnectionFactory?.dispose()
-            peerConnectionFactory = null
-        } catch (e: Exception) {
-            log.e(TAG) { "Error disposing factory: ${e.message}" }
+        } catch (e: Throwable) {
+            log.w(TAG) { "Error disposing factory: ${e.message}" }
         }
+        peerConnectionFactory = null
 
         callRecorder.dispose()
         scope.cancel()
 
         currentConnectionState = WebRtcConnectionState.DISCONNECTED
 
-        log.d(TAG) { "✅ All resources disposed" }
+        log.d(TAG) { "All resources disposed" }
     }
 
     fun diagnose(): String {

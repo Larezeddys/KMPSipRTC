@@ -1,4 +1,4 @@
-package com.eddyslarez.kmpsiprtc.core
+﻿package com.eddyslarez.kmpsiprtc.core
 
 import com.eddyslarez.kmpsiprtc.data.database.DatabaseManager
 import com.eddyslarez.kmpsiprtc.data.database.entities.AppConfigEntity
@@ -12,14 +12,18 @@ import com.eddyslarez.kmpsiprtc.services.webrtc.WebRtcManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 
 
 class SipAudioManager(
     private val audioManager: AudioManager,
     private val webRtcManager: WebRtcManager
 ) {
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val audioDeviceManager = AudioDeviceManager()
     private var loadedConfig: AppConfigEntity? = null
 
@@ -65,13 +69,11 @@ class SipAudioManager(
      */
     suspend fun prepareAudioForIncomingCall() {
         try {
-            println("[AUDIO_MANAGER] 🎤 Preparing audio for incoming call...")
 
             if (!webRtcManager.isInitialized()) {
-                println("[AUDIO_MANAGER] ⚠️ WebRTC not initialized, initializing...")
                 webRtcManager.initialize()
 
-                // Esperar con timeout más largo
+                // Esperar con timeout mÃ¡s largo
                 var attempts = 0
                 while (!webRtcManager.isInitialized() && attempts < 40) {
                     delay(250)
@@ -82,25 +84,22 @@ class SipAudioManager(
                     throw Exception("WebRTC failed to initialize within timeout")
                 }
 
-                println("[AUDIO_MANAGER] ✅ WebRTC initialized")
             }
 
-            // ✅ CRÍTICO: Llamar a prepareAudioForIncomingCall en el manager
+            // âœ… CRÃTICO: Llamar a prepareAudioForIncomingCall en el manager
             webRtcManager.prepareAudioForIncomingCall()
 
             // Dar tiempo extra para que audio capture se configure
             delay(500)
 
-            // ✅ Verificar que audio está listo
+            // âœ… Verificar que audio estÃ¡ listo
             if (!webRtcManager.isInitialized()) {
                 throw Exception("WebRTC lost initialization during audio preparation")
             }
 
-            println("[AUDIO_MANAGER] ✅ Audio prepared and verified")
 
         } catch (e: Exception) {
-            println("[AUDIO_MANAGER] ❌ Error preparing audio: ${e.message}")
-            log.e(tag = TAG) { "❌ Error preparing audio: ${e.message}" }
+            log.e(tag = TAG) { "âŒ Error preparing audio: ${e.message}" }
             throw e
         }
     }
@@ -141,7 +140,7 @@ class SipAudioManager(
      * Cambiar dispositivo de audio durante llamada
      */
     fun changeAudioDevice(device: AudioDevice) {
-        CoroutineScope(Dispatchers.IO).launch {
+        scope.launch {
             val isInput = audioDeviceManager.inputDevices.value.contains(device)
 
             val success = if (isInput) {
@@ -170,7 +169,7 @@ class SipAudioManager(
     }
 
     /**
-     * Verificar si está silenciado
+     * Verificar si estÃ¡ silenciado
      */
     fun isMuted(): Boolean = webRtcManager.isMuted()
 
@@ -203,7 +202,7 @@ class SipAudioManager(
     }
 
     /**
-     * Detener ringtone específico
+     * Detener ringtone especÃ­fico
      */
     fun stopRingtone() {
         audioManager.stopRingtone()
@@ -221,7 +220,7 @@ class SipAudioManager(
      */
     fun saveIncomingRingtoneUri(uri: String, databaseManager: DatabaseManager?) {
         try {
-            CoroutineScope(Dispatchers.IO).launch {
+            scope.launch {
                 databaseManager?.updateIncomingRingtoneUri(uri)
                 audioManager.setIncomingRingtone(uri)
                 log.d(tag = TAG) { "Incoming ringtone URI saved to database: $uri" }
@@ -236,7 +235,7 @@ class SipAudioManager(
      */
     fun saveOutgoingRingtoneUri(uri: String, databaseManager: DatabaseManager?) {
         try {
-            CoroutineScope(Dispatchers.IO).launch {
+            scope.launch {
                 databaseManager?.updateOutgoingRingtoneUri(uri)
                 audioManager.setOutgoingRingtone(uri)
                 log.d(tag = TAG) { "Outgoing ringtone URI saved to database: $uri" }
@@ -263,7 +262,7 @@ class SipAudioManager(
     }
 
     /**
-     * Cargar configuración de audio desde base de datos
+     * Cargar configuraciÃ³n de audio desde base de datos
      */
     fun loadAudioConfigFromDatabase(config: AppConfigEntity?) {
         loadedConfig = config
@@ -294,19 +293,21 @@ class SipAudioManager(
     /**
      * Crear SDP offer para llamada saliente
      */
-    suspend fun createOffer(): String = webRtcManager.createOffer()
+    suspend fun createOffer(): String = withTimeout(15_000L) {
+        webRtcManager.createOffer()
+    }
 
     /**
      * Crear SDP answer para llamada entrante
      */
-    suspend fun createAnswer(remoteSdp: String): String {
+    suspend fun createAnswer(remoteSdp: String): String = withTimeout(15_000L) {
         if (!webRtcManager.isInitialized()) {
-            log.w(tag = TAG) { "⚠️ WebRTC not initialized in createAnswer, initializing..." }
+            log.w(tag = TAG) { "[WARN] WebRTC not initialized in createAnswer, initializing..." }
             webRtcManager.initialize()
             delay(500)
         }
 
-        return webRtcManager.createAnswer(remoteSdp)
+        webRtcManager.createAnswer(remoteSdp)
     }
 
 
@@ -314,12 +315,13 @@ class SipAudioManager(
      * Limpiar recursos de audio
      */
     fun dispose() {
+        scope.cancel()
         audioManager.stopAllRingtones()
         webRtcManager.closePeerConnection()
     }
 
     /**
-     * Verificar si WebRTC está inicializado
+     * Verificar si WebRTC estÃ¡ inicializado
      */
     fun isWebRtcInitialized(): Boolean = webRtcManager.isInitialized()
 }

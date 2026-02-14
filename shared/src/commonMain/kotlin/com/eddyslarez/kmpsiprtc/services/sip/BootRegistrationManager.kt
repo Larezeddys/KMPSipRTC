@@ -11,6 +11,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -24,6 +25,7 @@ class BootRegistrationManager(
     private val sipCoreManager: SipCoreManager,
     private val databaseManager: DatabaseManager
 ) {
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val TAG = "BootRegistrationManager"
     private val registrationQueue = mutableListOf<AccountInfo>()
     private val registrationResults = mutableMapOf<String, RegistrationState>()
@@ -129,18 +131,24 @@ class BootRegistrationManager(
      */
     private suspend fun validateNetworkConnectivity(): Boolean {
         return try {
-            // Verificar conectividad básica
-            if (!sipCoreManager.networkManager.isNetworkAvailable()) {
-                log.e(tag = TAG) { "Basic network connectivity not available" }
-                return false
+            // Verificar conectividad via NetworkManager
+            if (sipCoreManager.networkManager.isNetworkAvailable()) {
+                log.d(tag = TAG) { "Network available via NetworkManager" }
+                return true
             }
 
-            // Esperar un poco para que la red se estabilice después del boot
+            // Fallback: verificar si el WebSocket ya esta conectado (red funciona aunque NetworkManager no lo detecte)
+            if (sipCoreManager.sharedWebSocketManager.isWebSocketHealthy()) {
+                log.d(tag = TAG) { "Network available via WebSocket (NetworkManager false negative)" }
+                return true
+            }
+
+            // Forzar re-check del NetworkManager
+            sipCoreManager.networkManager.forceNetworkCheck()
             delay(2000)
 
-            // Verificar conectividad a internet
             val hasInternet = sipCoreManager.networkManager.isNetworkAvailable()
-            log.d(tag = TAG) { "Internet connectivity: $hasInternet" }
+            log.d(tag = TAG) { "Internet connectivity after re-check: $hasInternet" }
 
             hasInternet
 
@@ -163,7 +171,7 @@ class BootRegistrationManager(
 
             // Procesar cuentas del lote actual
             val batchJobs = batch.map { accountInfo ->
-                CoroutineScope(Dispatchers.IO).async {
+                scope.async {
                     registerAccountWithRetry(accountInfo)
                 }
             }
@@ -321,9 +329,11 @@ sealed class RegistrationRecoveryResult {
     data class CriticalError(val error: String) : RegistrationRecoveryResult()
 }
 
+private val bootScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
 // Metodo de inicializacion de registro al boot
 fun SipCoreManager.initializeBootRegistration() {
-    CoroutineScope(Dispatchers.IO).launch {
+    bootScope.launch {
         try {
             log.d(tag = "SipCoreManager") { "Starting boot registration process..." }
 
@@ -409,7 +419,7 @@ private fun SipCoreManager.notifyBootRegistrationFailure(results: Map<String, Re
 }
 
 private fun SipCoreManager.scheduleFailedAccountRetries(failedAccounts: Set<String>) {
-    CoroutineScope(Dispatchers.IO).launch {
+    bootScope.launch {
         delay(15000L) // 15 segundos antes de reintentar
 
         log.d(tag = "SipCoreManager") { "Retrying registration for ${failedAccounts.size} failed accounts" }
@@ -431,7 +441,7 @@ private fun SipCoreManager.scheduleFailedAccountRetries(failedAccounts: Set<Stri
 }
 
 private fun SipCoreManager.scheduleCompleteRegistrationRetry(delayMs: Long) {
-    CoroutineScope(Dispatchers.IO).launch {
+    bootScope.launch {
         delay(delayMs)
 
         log.d(tag = "SipCoreManager") { "Attempting complete registration retry" }
@@ -449,7 +459,7 @@ private fun SipCoreManager.observeNetworkAndRetryRegistration() {
         override fun onNetworkRestored() {
             log.d(tag = "SipCoreManager") { "Network restored, retrying boot registration" }
 
-            CoroutineScope(Dispatchers.IO).launch {
+            bootScope.launch {
                 delay(3000L) // Esperar estabilización
                 initializeBootRegistration()
             }

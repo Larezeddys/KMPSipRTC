@@ -58,14 +58,16 @@ class IosAudioTrackCapture(
 
             audioEngine = AVAudioEngine()
 
-            // Usar el inputNode para capturar el audio que está siendo reproducido
-            val inputNode = audioEngine?.inputNode ?: return
-            val format = inputNode.outputFormatForBus(0u)
+            // Usar mainMixerNode para capturar el audio remoto que WebRTC reproduce
+            // En modo PlayAndRecord, el micrófono NO se mezcla en el output,
+            // así que mainMixerNode contiene solo el audio remoto
+            val mixerNode = audioEngine?.mainMixerNode ?: return
+            val format = mixerNode.outputFormatForBus(0u)
 
-            // Instalar tap para capturar audio
-            inputNode.installTapOnBus(
+            // Instalar tap para capturar audio remoto
+            mixerNode.installTapOnBus(
                 bus = 0u,
-                bufferSize = 1024u,
+                bufferSize = 4096u,
                 format = format
             ) { buffer, _ ->
                 buffer?.let { processAudioBuffer(it) }
@@ -120,7 +122,7 @@ class IosAudioTrackCapture(
         if (!isCapturing) return
 
         try {
-            audioEngine?.inputNode?.removeTapOnBus(0u)
+            audioEngine?.mainMixerNode?.removeTapOnBus(0u)
             audioEngine?.stop()
             audioEngine = null
             isCapturing = false

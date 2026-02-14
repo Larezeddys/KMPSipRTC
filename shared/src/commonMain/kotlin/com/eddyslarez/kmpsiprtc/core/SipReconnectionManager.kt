@@ -11,9 +11,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -39,6 +41,7 @@ class SipReconnectionManager(
         private const val NETWORK_STABILITY_CHECK_DELAY = 3000L
         private const val ACCOUNT_RECOVERY_TIMEOUT = 10000L
     }
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val networkManager = createNetworkManager()
     private var reconnectionJob: Job? = null
     private var networkStabilityJob: Job? = null
@@ -71,14 +74,14 @@ class SipReconnectionManager(
     }
 
     suspend fun forceReconnection(accounts: List<AccountInfo>) {
-        log.d(tag = TAG) { "🔧 FORCING MANUAL RECONNECTION" }
+        log.d(tag = TAG) { "[FIX] FORCING MANUAL RECONNECTION" }
 
         // Verificar y forzar estado actual en NetworkManager
         networkManager.forceNetworkCheck()
         isNetworkAvailable = networkManager.isNetworkAvailable()
 
         if (!isNetworkAvailable) {
-            log.w(tag = TAG) { "🌐 Cannot force reconnection - no connectivity" }
+            log.w(tag = TAG) { "[NET] Cannot force reconnection - no connectivity" }
             return
         }
 
@@ -135,7 +138,7 @@ class SipReconnectionManager(
     }
 
     private fun startPeriodicAccountSync() {
-        CoroutineScope(Dispatchers.IO).launch {
+        scope.launch {
             while (isActive) {
                 try {
                     delay(30.seconds)
@@ -149,7 +152,7 @@ class SipReconnectionManager(
 
     private fun setupNetworkListener() {
         networkManager.setConnectivityListener(object : NetworkConnectivityListener {
-            override fun onNetworkLost() = CoroutineScope(Dispatchers.IO).launch { handleNetworkLost() }
+            override fun onNetworkLost() = scope.launch { handleNetworkLost() }
             override fun onNetworkRestored() = handleNetworkRestored()
             override fun onReconnectionStarted() {
                 reconnectionListener?.onReconnectionStarted()
@@ -179,7 +182,7 @@ class SipReconnectionManager(
         val isStillConnected = networkInfo["isAvailable"] as? Boolean ?: false
 
         if (isStillConnected) {
-            networkStabilityJob = CoroutineScope(Dispatchers.IO).launch {
+            networkStabilityJob = scope.launch {
                 delay(1000L)
                 val recheckInfo = networkManager.getNetworkInfo()
                 val stillConnected = recheckInfo["isAvailable"] as? Boolean ?: false
@@ -215,7 +218,7 @@ class SipReconnectionManager(
         if (wasDisconnected) {
             wasDisconnectedDueToNetwork = false
             reconnectionListener?.onNetworkRestored()
-            networkStabilityJob = CoroutineScope(Dispatchers.IO).launch {
+            networkStabilityJob = scope.launch {
                 delay(NETWORK_STABILITY_CHECK_DELAY)
                 if (networkManager.isNetworkAvailable()) startReconnectionProcess()
                 else handleNetworkLost()
@@ -225,7 +228,7 @@ class SipReconnectionManager(
 
     fun startReconnectionProcess(accountsToReconnect: List<AccountInfo>? = null) {
         reconnectionJob?.cancel()
-        reconnectionJob = CoroutineScope(Dispatchers.IO).launch {
+        reconnectionJob = scope.launch {
             try {
                 val accounts = getAccountsForReconnection(accountsToReconnect)
                 if (accounts.isEmpty()) {
@@ -347,6 +350,7 @@ class SipReconnectionManager(
         wasDisconnectedDueToNetwork = false
         lastAccountSync = 0L
         accountRecoveryAttempts.reset()
+        scope.cancel()
     }
 }
 /**

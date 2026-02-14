@@ -512,7 +512,7 @@ class DatabaseAutoIntegration private constructor(
                     appendLine("  - $key: ${account.registrationState}")
                 }
 
-                appendLine("\nIntegration Status: ✅ ACTIVE")
+                appendLine("\nIntegration Status: [OK] ACTIVE")
             }
         } catch (e: Exception) {
             "Error getting diagnostic info: ${e.message}"

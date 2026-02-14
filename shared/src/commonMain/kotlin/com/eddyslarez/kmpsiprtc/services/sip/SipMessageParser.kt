@@ -62,7 +62,7 @@ object SipMessageParser {
                     // CAMBIO: Usar método thread-safe para actualizar CSeq
                     val updated = accountInfo.updateCSeqFromExternal(seqNum, "SIP_MESSAGE")
                     if (updated) {
-                        log.d(tag = TAG) { "⭐️ Updated accountInfo.cseq = $seqNum" }
+                        log.d(tag = TAG) { "[OK] Updated accountInfo.cseq = $seqNum" }
                     } else {
                         log.d(tag = TAG) { "CSeq $seqNum not applied (current: ${accountInfo.cseq})" }
                     }

@@ -247,8 +247,7 @@ class SipRepository(private val database: SipDatabase) {
     }
 
     suspend fun clearCallLogs() {
-
-//        callLogDao.deleteAllCallLogs()
+        callLogDao.deleteAllCallLogs()
     }
 
     // === OPERACIONES DE DATOS DE LLAMADAS ===

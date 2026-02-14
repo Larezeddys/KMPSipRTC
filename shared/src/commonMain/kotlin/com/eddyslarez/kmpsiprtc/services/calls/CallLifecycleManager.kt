@@ -15,7 +15,7 @@ import kotlinx.coroutines.launch
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.ExperimentalTime
 
-class CallLifecycleManager(
+internal class CallLifecycleManager(
     private val sipCoreManager: SipCoreManager,
     private val pushModeManager: PushModeManager?
 ) {
@@ -40,7 +40,7 @@ class CallLifecycleManager(
      */
     @OptIn(ExperimentalTime::class)
     suspend fun onIncomingCallReceived(accountKey: String) {
-        log.d(tag = TAG) { "📞 Incoming call received for $accountKey" }
+        log.d(tag = TAG) { "[CALL] Incoming call received for $accountKey" }
 
         val accountInfo = sipCoreManager.activeAccounts[accountKey] ?: return
         val wasInPush = accountInfo.userAgent.value?.contains("Push", ignoreCase = true)
@@ -101,13 +101,13 @@ class CallLifecycleManager(
 
         val job = scope.launch {
             try {
-                log.d(tag = TAG) { "⏳ Scheduling return to PUSH for $accountKey in ${RETURN_TO_PUSH_DELAY}ms" }
+                log.d(tag = TAG) { "[WAIT] Scheduling return to PUSH for $accountKey in ${RETURN_TO_PUSH_DELAY}ms" }
                 delay(RETURN_TO_PUSH_DELAY)
 
                 // Verificar que no hay nueva llamada
                 val currentState = accountsInCall.get(accountKey)
                 if (currentState?.callEndTime != null) {
-                    log.d(tag = TAG) { "✅ Returning $accountKey to PUSH mode" }
+                    log.d(tag = TAG) { "[OK] Returning $accountKey to PUSH mode" }
 
                     val accountInfo = sipCoreManager.activeAccounts[accountKey]
                     if (accountInfo != null) {
@@ -116,14 +116,14 @@ class CallLifecycleManager(
                             accountInfo.domain
                         )
 
-                        log.d(tag = TAG) { "✅ $accountKey returned to PUSH successfully" }
+                        log.d(tag = TAG) { "[OK] $accountKey returned to PUSH successfully" }
                     }
 
                     // Limpiar estado
                     accountsInCall.remove(accountKey)
                     returnToPushJobs.remove(accountKey)
                 } else {
-                    log.d(tag = TAG) { "⚠️ New call detected for $accountKey, cancelling return to PUSH" }
+                    log.d(tag = TAG) { "[WARN] New call detected for $accountKey, cancelling return to PUSH" }
                 }
 
             } catch (e: CancellationException) {

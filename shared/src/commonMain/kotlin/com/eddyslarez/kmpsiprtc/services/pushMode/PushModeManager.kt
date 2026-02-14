@@ -263,33 +263,36 @@ class PushModeManager(
     }
 
     /**
-     * Notifica que se recibio una notificacion push
+     * Notifica que se recibio una notificacion push.
+     * RFC 8599 §4.1.3: El binding-refresh REGISTER debe incluir los mismos pn-* params
+     * que se usaron al registrar en modo push. NO se transiciona a foreground.
      */
     fun onPushNotificationReceived(specificAccount: String? = null, allRegisteredAccounts: Set<String> = emptySet()) {
-        log.d(tag = TAG1) { "Push notification received" }
+        log.d(tag = TAG1) { "Push notification received - sending binding-refresh in PUSH mode (RFC 8599)" }
         log.d(tag = TAG1) { "specificAccount : $specificAccount" }
 
         val currentState = _pushModeStateFlow.value
         log.d(tag = TAG1) { "currentState : $currentState" }
 
         if (specificAccount != null) {
-            // Recordar estado push ANTES de cambiar
+            // Recordar estado push para manejo post-llamada
             synchronized(accountPushStatesLock) {
                 accountPushStates[specificAccount] = true
             }
-            log.d(tag = TAG1) { "Recorded push state for $specificAccount before foreground transition" }
+            log.d(tag = TAG1) { "Sending binding-refresh for $specificAccount in PUSH mode (keeping pn-prid)" }
 
-            // Solo cambiar la cuenta especifica a foreground
-            log.d(tag = TAG1) { "Switching specific account to foreground: $specificAccount" }
-            transitionSpecificAccountToForeground(specificAccount, PushModeReasons.PUSH_NOTIFICATION_RECEIVED)
+            // RFC 8599: re-registrar con los mismos pn-* params, SIN transicionar a foreground
+            onRegistrationRequiredCallback?.invoke(setOf(specificAccount), PushMode.PUSH)
         } else {
-            // Cambiar todas las cuentas (comportamiento anterior)
             synchronized(accountPushStatesLock) {
                 allRegisteredAccounts.forEach { account ->
                     accountPushStates[account] = true
                 }
             }
-            transitionToForeground(allRegisteredAccounts, PushModeReasons.PUSH_NOTIFICATION_RECEIVED)
+            log.d(tag = TAG1) { "Sending binding-refresh for all accounts in PUSH mode (keeping pn-prid)" }
+
+            // RFC 8599: re-registrar con los mismos pn-* params, SIN transicionar a foreground
+            onRegistrationRequiredCallback?.invoke(allRegisteredAccounts, PushMode.PUSH)
         }
     }
 

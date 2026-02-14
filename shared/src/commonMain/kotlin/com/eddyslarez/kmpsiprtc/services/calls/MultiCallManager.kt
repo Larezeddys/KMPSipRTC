@@ -9,19 +9,25 @@ import com.eddyslarez.kmpsiprtc.platform.log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlin.time.ExperimentalTime
 
-object MultiCallManager {
+internal object MultiCallManager {
 
-    // Scope para corrutinas
-    private val scope = CoroutineScope(Dispatchers.IO)
+    // Scope para corrutinas con SupervisorJob para que un fallo no cancele todo
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    // ✅ CRÍTICO: Usar la MISMA referencia de CallData, no copias
+    // Mutex para proteger mutaciones de CallData compartidos
+    private val callDataMutex = Mutex()
+
     // Mapa de llamadas activas por callId
     private val _activeCalls = MutableStateFlow<Map<String, CallData>>(emptyMap())
     val activeCallsFlow: StateFlow<Map<String, CallData>> = _activeCalls.asStateFlow()
@@ -43,42 +49,43 @@ object MultiCallManager {
     }
 
     /**
-     * ✅ CORREGIDO: Añade una nueva llamada manteniendo la MISMA referencia
-     * IMPORTANTE: No se debe crear una copia del CallData, usar la referencia original
+     * Añade una nueva llamada manteniendo la MISMA referencia.
+     * Mutaciones de campos protegidas por callDataMutex para thread-safety.
      */
     fun addCall(callData: CallData) {
-        val currentCalls = _activeCalls.value.toMutableMap()
-        val existingCall = currentCalls[callData.callId]
+        val existingCall = _activeCalls.value[callData.callId]
 
         if (existingCall != null) {
             log.d(tag = "MultiCallManager") {
-                "⚠️ Call ${callData.callId} already exists"
+                "[WARN] Call ${callData.callId} already exists"
             }
 
-            // Solo actualizar si el nuevo tiene datos y el existente no
-            if (callData.remoteSdp.isNotBlank() && existingCall.remoteSdp.isBlank()) {
-                existingCall.remoteSdp = callData.remoteSdp
-            }
-            if (callData.localSdp.isNotBlank() && existingCall.localSdp.isBlank()) {
-                existingCall.localSdp = callData.localSdp
-            }
-            if (callData.originalInviteMessage.isNotBlank() && existingCall.originalInviteMessage.isBlank()) {
-                existingCall.originalInviteMessage = callData.originalInviteMessage
+            // Proteger mutaciones de campos con Mutex
+            scope.launch {
+                callDataMutex.withLock {
+                    if (callData.remoteSdp.isNotBlank() && existingCall.remoteSdp.isBlank()) {
+                        existingCall.remoteSdp = callData.remoteSdp
+                    }
+                    if (callData.localSdp.isNotBlank() && existingCall.localSdp.isBlank()) {
+                        existingCall.localSdp = callData.localSdp
+                    }
+                    if (callData.originalInviteMessage.isNotBlank() && existingCall.originalInviteMessage.isBlank()) {
+                        existingCall.originalInviteMessage = callData.originalInviteMessage
+                    }
+                }
             }
 
             log.d(tag = "MultiCallManager") {
-                "✅ Preserved data (remoteSdp: ${existingCall.remoteSdp.length} chars)"
+                "[OK] Preserved data (remoteSdp: ${existingCall.remoteSdp.length} chars)"
             }
-            return // NO actualizar el mapa
+            return
         }
 
-        // Nueva llamada
-        currentCalls[callData.callId] = callData
-        _activeCalls.value = currentCalls
+        // Nueva llamada - operacion atomica via StateFlow.update
+        _activeCalls.update { current -> current + (callData.callId to callData) }
 
         log.d(tag = "MultiCallManager") {
-            "✅ New call added: ${callData.callId}"
-            "  - remoteSdp: ${callData.remoteSdp.length} chars"
+            "[OK] New call added: ${callData.callId}, remoteSdp: ${callData.remoteSdp.length} chars"
         }
 
         val initialState = if (callData.direction == CallDirections.INCOMING) {
@@ -95,15 +102,11 @@ object MultiCallManager {
      * Remueve una llamada del gestor
      */
     fun removeCall(callId: String) {
-        val currentCalls = _activeCalls.value.toMutableMap()
-        val removedCall = currentCalls.remove(callId)
-        _activeCalls.value = currentCalls
+        val existed = _activeCalls.value.containsKey(callId)
+        _activeCalls.update { it - callId }
+        _callStates.update { it - callId }
 
-        val currentStates = _callStates.value.toMutableMap()
-        currentStates.remove(callId)
-        _callStates.value = currentStates
-
-        if (removedCall != null) {
+        if (existed) {
             log.d(tag = "MultiCallManager") { "Call removed: $callId" }
         }
     }
@@ -113,8 +116,8 @@ object MultiCallManager {
      */
     @OptIn(ExperimentalTime::class)
     fun updateCallState(callId: String, newState: CallState, errorReason: CallErrorReason = CallErrorReason.NONE) {
-        val currentStates = _callStates.value.toMutableMap()
-        val previousState = currentStates[callId]
+        val previousState = _callStates.value[callId]
+        val direction = getCall(callId)?.direction ?: CallDirections.OUTGOING
 
         val newStateInfo = CallStateInfo(
             state = newState,
@@ -122,16 +125,15 @@ object MultiCallManager {
             errorReason = errorReason,
             timestamp = kotlin.time.Clock.System.now().toEpochMilliseconds(),
             callId = callId,
-            direction = getCall(callId)?.direction ?: CallDirections.OUTGOING
+            direction = direction
         )
 
-        currentStates[callId] = newStateInfo
-        _callStates.value = currentStates
+        _callStates.update { current -> current + (callId to newStateInfo) }
 
         // Si la llamada terminó, programar su eliminación
         if (newState == CallState.ENDED || newState == CallState.ERROR) {
             scope.launch {
-                delay(1000) // Esperar 1 segundo
+                delay(1000)
                 removeCall(callId)
             }
         }
@@ -140,7 +142,7 @@ object MultiCallManager {
     }
 
     /**
-     * ✅ CORREGIDO: Obtiene la MISMA referencia de CallData
+     * [OK] CORREGIDO: Obtiene la MISMA referencia de CallData
      */
     fun getCall(callId: String): CallData? {
         val call = _activeCalls.value[callId]
@@ -160,7 +162,7 @@ object MultiCallManager {
     }
 
     /**
-     * ✅ CORREGIDO: Obtiene todas las llamadas con verificación de SDP
+     * [OK] CORREGIDO: Obtiene todas las llamadas con verificación de SDP
      */
     fun getAllCalls(): List<CallData> {
         val allCalls = _activeCalls.value.values.toList()
@@ -306,8 +308,8 @@ object MultiCallManager {
     }
 
     /**
-     * ✅ NUEVO: Sincroniza CallData desde AccountInfo
-     * Útil cuando AccountInfo tiene datos actualizados que MultiCallManager necesita
+     * Sincroniza CallData desde AccountInfo.
+     * Mutaciones protegidas por callDataMutex para thread-safety.
      */
     fun syncCallDataFromAccountInfo(callId: String, accountInfoCallData: CallData) {
         val currentCall = getCall(callId)
@@ -316,13 +318,17 @@ object MultiCallManager {
                 "Syncing CallData from AccountInfo for: $callId"
             }
 
-            // Actualizar campos importantes sin romper la referencia
-            currentCall.remoteSdp = accountInfoCallData.remoteSdp
-            currentCall.localSdp = accountInfoCallData.localSdp
-            currentCall.originalInviteMessage = accountInfoCallData.originalInviteMessage
+            // Proteger mutaciones de campos con Mutex
+            scope.launch {
+                callDataMutex.withLock {
+                    currentCall.remoteSdp = accountInfoCallData.remoteSdp
+                    currentCall.localSdp = accountInfoCallData.localSdp
+                    currentCall.originalInviteMessage = accountInfoCallData.originalInviteMessage
+                }
+            }
 
             log.d(tag = "MultiCallManager") {
-                "✅ Synced: remoteSdp ${currentCall.remoteSdp.length} chars"
+                "[OK] Synced: remoteSdp ${currentCall.remoteSdp.length} chars"
             }
         }
     }

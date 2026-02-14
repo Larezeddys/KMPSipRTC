@@ -8,18 +8,22 @@ import com.eddyslarez.kmpsiprtc.data.models.CallStateInfo
 import com.eddyslarez.kmpsiprtc.data.models.CallStateTransitionValidator
 import com.eddyslarez.kmpsiprtc.data.models.SipErrorMapper
 import com.eddyslarez.kmpsiprtc.platform.log
+import com.eddyslarez.kmpsiprtc.utils.Lock
+import com.eddyslarez.kmpsiprtc.utils.synchronized
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlin.time.ExperimentalTime
 
-object CallStateManager {
+internal object CallStateManager {
 
-    private val scope = CoroutineScope(Dispatchers.IO)
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val updateLock = Lock()
 
     @OptIn(ExperimentalTime::class)
     private val _callStateFlow = MutableStateFlow(
@@ -66,14 +70,14 @@ object CallStateManager {
         sipReason: String? = null,
         errorReason: CallErrorReason = CallErrorReason.NONE,
         forceUpdate: Boolean = false
-    ): Boolean {
+    ): Boolean = synchronized(updateLock) {
 
         // Verificar si está inicializado
         if (!isInitialized) {
             log.w(tag = "CallStateManager") {
                 "State update attempted before initialization: $newState"
             }
-            return false
+            return@synchronized false
         }
 
         val currentTime = kotlin.time.Clock.System.now().toEpochMilliseconds()
@@ -84,7 +88,7 @@ object CallStateManager {
             log.d(tag = "CallStateManager") {
                 "State update too frequent, skipping: $newState"
             }
-            return false
+            return@synchronized false
         }
 
         // Validación estricta para prevenir estados duplicados
@@ -96,7 +100,7 @@ object CallStateManager {
             log.d(tag = "CallStateManager") {
                 "Duplicate state transition prevented: $newState for call $callId"
             }
-            return false
+            return@synchronized false
         }
 
         // Validar que tenemos un callId válido para estados activos
@@ -107,7 +111,7 @@ object CallStateManager {
             log.w(tag = "CallStateManager") {
                 "Invalid callId for active state: $newState"
             }
-            return false
+            return@synchronized false
         }
 
         // Validar transición
@@ -126,7 +130,7 @@ object CallStateManager {
                 newState != CallState.ENDED &&
                 newState != CallState.IDLE
             ) {
-                return false
+                return@synchronized false
             }
         }
 
@@ -156,10 +160,10 @@ object CallStateManager {
         updateCurrentCallInfo(newState, callId, direction)
 
         log.d(tag = "CallStateManager") {
-            "✓ State transition: ${currentStateInfo.state} -> $newState for call $callId (${direction.name})"
+            "State transition: ${currentStateInfo.state} -> $newState for call $callId (${direction.name})"
         }
 
-        return true
+        true
     }
 
     /**
@@ -226,19 +230,19 @@ object CallStateManager {
     // === MÉTODOS MEJORADOS PARA TRANSICIONES ===
 
     @OptIn(ExperimentalTime::class)
-    fun startOutgoingCall(callId: String, phoneNumber: String) {
+    fun startOutgoingCall(callId: String, phoneNumber: String, callData: CallData? = null) {
         if (!isInitialized) return
 
         currentCallerNumber = phoneNumber
 
-        val callData = CallData(
+        val finalCallData = callData ?: CallData(
             callId = callId,
             to = phoneNumber,
             from = "",
             direction = CallDirections.OUTGOING,
             startTime = kotlin.time.Clock.System.now().toEpochMilliseconds()
         )
-        MultiCallManager.addCall(callData)
+        MultiCallManager.addCall(finalCallData)
 
         updateCallState(
             newState = CallState.OUTGOING_INIT,
@@ -249,19 +253,19 @@ object CallStateManager {
     }
 
     @OptIn(ExperimentalTime::class)
-    fun incomingCallReceived(callId: String, callerNumber: String) {
+    fun incomingCallReceived(callId: String, callerNumber: String, callData: CallData? = null) {
         if (!isInitialized) return
 
         currentCallerNumber = callerNumber
 
-        val callData = CallData(
+        val finalCallData = callData ?: CallData(
             callId = callId,
             to = "",
             from = callerNumber,
             direction = CallDirections.INCOMING,
             startTime = kotlin.time.Clock.System.now().toEpochMilliseconds()
         )
-        MultiCallManager.addCall(callData)
+        MultiCallManager.addCall(finalCallData)
 
         updateCallState(
             newState = CallState.INCOMING_RECEIVED,

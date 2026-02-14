@@ -27,13 +27,17 @@ class IosCallRecorder : CallRecorder {
     private val TAG = "IosCallRecorder"
 
     // Configuración de audio
-    private val SAMPLE_RATE = 8000.0 // 8kHz
+    private val SAMPLE_RATE = 48000.0 // 48kHz (WebRTC remote audio rate)
     private val CHANNELS = 1 // Mono
     private val BIT_DEPTH = 16
 
     // Buffers de audio con protección thread-safe
     private val localAudioBuffer = mutableListOf<ByteArray>()
     private val remoteAudioBuffer = mutableListOf<ByteArray>()
+
+    // Formato real del audio remoto (detectado en primer callback)
+    @Volatile
+    private var remoteSampleRate: Int = 48000
 
     // ✅ Mutexes para sincronización thread-safe
     private val localBufferMutex = Mutex()
@@ -114,11 +118,12 @@ class IosCallRecorder : CallRecorder {
                 audioEngine = AVAudioEngine()
                 val inputNode = audioEngine?.inputNode ?: return@launch
 
-                val format = inputNode.outputFormatForBus(0u)
+                // Solicitar formato 48kHz explícitamente para que iOS resamplee si el hardware usa otra rate
+                val format = AVAudioFormat(standardFormatWithSampleRate = SAMPLE_RATE, channels = CHANNELS.toUInt())
 
                 inputNode.installTapOnBus(
                     bus = 0u,
-                    bufferSize = 1024u,
+                    bufferSize = 4096u,
                     format = format
                 ) { buffer, _ ->
                     buffer?.let {
@@ -209,9 +214,9 @@ class IosCallRecorder : CallRecorder {
         val localCopy = localBufferMutex.withLock { localAudioBuffer.toList() }
         val remoteCopy = remoteBufferMutex.withLock { remoteAudioBuffer.toList() }
 
-        // Guardar archivos
-        val localFile = saveAudioToFile(localCopy, "${callId}_local_${timestamp}.wav")
-        val remoteFile = saveAudioToFile(remoteCopy, "${callId}_remote_${timestamp}.wav")
+        // Guardar archivos - local usa SAMPLE_RATE del mic, remote usa remoteSampleRate detectado
+        val localFile = saveAudioToFile(localCopy, "${callId}_local_${timestamp}.wav", SAMPLE_RATE.toInt())
+        val remoteFile = saveAudioToFile(remoteCopy, "${callId}_remote_${timestamp}.wav", remoteSampleRate)
         val mixedFile = mixAndSaveAudio(localCopy, remoteCopy, "${callId}_mixed_${timestamp}.wav")
 
         // Limpiar buffers
@@ -227,17 +232,26 @@ class IosCallRecorder : CallRecorder {
         RecordingResult(localFile, remoteFile, mixedFile)
     }
 
-    override fun captureRemoteAudio(audioData: ByteArray) {
+    override fun captureRemoteAudio(
+        audioData: ByteArray,
+        sampleRate: Int,
+        channels: Int,
+        bitsPerSample: Int
+    ) {
         if (!isRecording && !isStreamingActive) return
 
-        val dataCopy = audioData.copyOf()
+        // Detectar sample rate real del audio remoto
+        remoteSampleRate = sampleRate
+
+        // Normalizar a mono 16-bit PCM
+        val normalized = normalizeToMono16bit(audioData, channels, bitsPerSample)
 
         // Guardar en buffer si está grabando
         if (isRecording) {
             recordingScope.launch {
                 remoteBufferMutex.withLock {
                     if (isRecording) {
-                        remoteAudioBuffer.add(dataCopy)
+                        remoteAudioBuffer.add(normalized)
                     }
                 }
             }
@@ -247,13 +261,59 @@ class IosCallRecorder : CallRecorder {
         if (isStreamingActive && audioStreamListener != null) {
             try {
                 audioStreamListener?.onRemoteAudioData(
-                    dataCopy, SAMPLE_RATE.toInt(), CHANNELS, BIT_DEPTH
+                    normalized, sampleRate, 1, 16
                 )
             } catch (e: Exception) {
                 log.e(TAG) { "Error sending remote audio stream: ${e.message}" }
                 audioStreamListener?.onStreamError(e.message ?: "Error sending remote audio")
             }
         }
+    }
+
+    /**
+     * Normaliza audio PCM a mono 16-bit little-endian.
+     */
+    private fun normalizeToMono16bit(data: ByteArray, channels: Int, bitsPerSample: Int): ByteArray {
+        if (channels == 1 && bitsPerSample == 16) return data.copyOf()
+
+        val bytesPerSample = bitsPerSample / 8
+        val frameSize = bytesPerSample * channels
+        val frameCount = data.size / frameSize
+        val output = ByteArray(frameCount * 2)
+        var outIdx = 0
+
+        for (f in 0 until frameCount) {
+            var sum = 0L
+            for (ch in 0 until channels) {
+                val offset = f * frameSize + ch * bytesPerSample
+                val sample16: Int = when (bitsPerSample) {
+                    16 -> {
+                        val lo = data[offset].toInt() and 0xFF
+                        val hi = data[offset + 1].toInt()
+                        (hi shl 8) or lo
+                    }
+                    32 -> {
+                        val b0 = data[offset].toInt() and 0xFF
+                        val b1 = data[offset + 1].toInt() and 0xFF
+                        val b2 = data[offset + 2].toInt() and 0xFF
+                        val b3 = data[offset + 3].toInt()
+                        val raw = (b3 shl 24) or (b2 shl 16) or (b1 shl 8) or b0
+                        val asFloat = Float.fromBits(raw)
+                        if (asFloat in -1.1f..1.1f) {
+                            (asFloat * 32767f).toInt().coerceIn(-32768, 32767)
+                        } else {
+                            (raw shr 16)
+                        }
+                    }
+                    else -> 0
+                }
+                sum += sample16
+            }
+            val mono = (sum / channels).coerceIn(-32768, 32767).toInt()
+            output[outIdx++] = (mono and 0xFF).toByte()
+            output[outIdx++] = ((mono shr 8) and 0xFF).toByte()
+        }
+        return output
     }
 
     override fun isRecording(): Boolean = isRecording
@@ -378,7 +438,7 @@ class IosCallRecorder : CallRecorder {
 
     // ==================== GUARDADO DE ARCHIVOS ====================
 
-    private fun saveAudioToFile(audioBuffer: List<ByteArray>, fileName: String): String? {
+    private fun saveAudioToFile(audioBuffer: List<ByteArray>, fileName: String, sampleRate: Int = SAMPLE_RATE.toInt()): String? {
         if (audioBuffer.isEmpty()) {
             log.w(TAG) { "⚠️ Empty audio buffer for $fileName" }
             return null
@@ -391,8 +451,8 @@ class IosCallRecorder : CallRecorder {
 
             val data = NSMutableData()
 
-            // Escribir encabezado WAV
-            val header = createWavHeader(totalAudioLen.toLong(), totalDataLen.toLong())
+            // Escribir encabezado WAV con sample rate real
+            val header = createWavHeader(totalAudioLen.toLong(), totalDataLen.toLong(), sampleRate.toLong())
             header.usePinned { pinned ->
                 data.appendBytes(pinned.addressOf(0), header.size.toULong())
             }
@@ -406,7 +466,7 @@ class IosCallRecorder : CallRecorder {
 
             data.writeToFile(filePath, atomically = true)
 
-            log.d(TAG) { "✅ Saved: $filePath (${data.length / 1024u}KB)" }
+            log.d(TAG) { "✅ Saved: $filePath (${data.length / 1024u}KB) @ ${sampleRate}Hz" }
             filePath
         } catch (e: Exception) {
             log.e(TAG) { "❌ Error saving audio: ${e.message}" }
@@ -429,7 +489,14 @@ class IosCallRecorder : CallRecorder {
             val filePath = "$outputDir/$fileName"
 
             val localSamples = bufferToSamples(localBuffer)
-            val remoteSamples = bufferToSamples(remoteBuffer)
+            var remoteSamples = bufferToSamples(remoteBuffer)
+            val localRate = SAMPLE_RATE.toInt()
+
+            // Si los sample rates difieren, resamplear el remoto al rate local
+            if (remoteSampleRate != localRate && remoteSamples.isNotEmpty()) {
+                remoteSamples = resample(remoteSamples, remoteSampleRate, localRate)
+            }
+
             val maxLength = maxOf(localSamples.size, remoteSamples.size)
             val mixedSamples = ShortArray(maxLength)
 
@@ -446,7 +513,7 @@ class IosCallRecorder : CallRecorder {
             val totalDataLen = totalAudioLen + 36
 
             val data = NSMutableData()
-            val header = createWavHeader(totalAudioLen.toLong(), totalDataLen.toLong())
+            val header = createWavHeader(totalAudioLen.toLong(), totalDataLen.toLong(), localRate.toLong())
             header.usePinned { pinned ->
                 data.appendBytes(pinned.addressOf(0), header.size.toULong())
             }
@@ -464,8 +531,26 @@ class IosCallRecorder : CallRecorder {
         }
     }
 
-    private fun createWavHeader(totalAudioLen: Long, totalDataLen: Long): ByteArray {
-        val sampleRate = SAMPLE_RATE.toLong()
+    /**
+     * Resample lineal simple de samples a un nuevo sample rate
+     */
+    private fun resample(samples: ShortArray, fromRate: Int, toRate: Int): ShortArray {
+        if (fromRate == toRate || samples.isEmpty()) return samples
+        val ratio = fromRate.toDouble() / toRate.toDouble()
+        val newLength = (samples.size / ratio).toInt()
+        val result = ShortArray(newLength)
+        for (i in result.indices) {
+            val srcPos = i * ratio
+            val srcIndex = srcPos.toInt()
+            val frac = srcPos - srcIndex
+            val s0 = samples[srcIndex.coerceIn(0, samples.lastIndex)].toInt()
+            val s1 = samples[(srcIndex + 1).coerceIn(0, samples.lastIndex)].toInt()
+            result[i] = (s0 + (s1 - s0) * frac).toInt().coerceIn(-32768, 32767).toShort()
+        }
+        return result
+    }
+
+    private fun createWavHeader(totalAudioLen: Long, totalDataLen: Long, sampleRate: Long = SAMPLE_RATE.toLong()): ByteArray {
         val channels = CHANNELS
         val byteRate = (16 * sampleRate * channels / 8)
 
@@ -487,7 +572,7 @@ class IosCallRecorder : CallRecorder {
             ((byteRate shr 8) and 0xff).toByte(),
             ((byteRate shr 16) and 0xff).toByte(),
             ((byteRate shr 24) and 0xff).toByte(),
-            (2 * 16 / 8).toByte(), 0, 16, 0,
+            (CHANNELS * BIT_DEPTH / 8).toByte(), 0, BIT_DEPTH.toByte(), 0,
             'd'.code.toByte(), 'a'.code.toByte(), 't'.code.toByte(), 'a'.code.toByte(),
             (totalAudioLen and 0xff).toByte(),
             ((totalAudioLen shr 8) and 0xff).toByte(),

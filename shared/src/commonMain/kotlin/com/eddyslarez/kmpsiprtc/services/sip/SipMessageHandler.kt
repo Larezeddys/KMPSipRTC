@@ -9,6 +9,8 @@ import com.eddyslarez.kmpsiprtc.data.models.CallState
 import com.eddyslarez.kmpsiprtc.data.models.SdpType
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.eddyslarez.kmpsiprtc.utils.generateId
@@ -21,6 +23,7 @@ import kotlin.time.ExperimentalTime
 class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
 
     private val TAG = "SipMessageHandler"
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private suspend fun sendViaSharedWebSocket(message: String): Boolean {
         return sipCoreManager.sharedWebSocketManager.sendMessage(message)
     }
@@ -96,19 +99,18 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
 
         when (statusCode) {
             200 -> {
-                CoroutineScope(Dispatchers.IO).launch {
+                scope.launch {
                     log.d(tag = TAG) { "Registration successful for $accountKey" }
                     sipCoreManager.handleRegistrationSuccess(accountInfo)
 
-                    // Extraer tiempo de expiración
+                    // Extraer tiempo de expiración y programar renovación per-account
                     val expiresValue = SipMessageParser.extractExpiresValue(fullResponse)
-                    val expirationTime =
-                        kotlin.time.Clock.System.now().toEpochMilliseconds() + (expiresValue * 1000L)
+                    log.d(tag = TAG) { "Registration expires in ${expiresValue}s for $accountKey" }
 
-                    // Configurar renovación automática
-                    sipCoreManager.sharedWebSocketManager.setRegistrationExpiration(
+                    // Programar re-REGISTER automático antes del vencimiento
+                    sipCoreManager.sharedWebSocketManager.scheduleRegistrationRenewal(
                         accountKey,
-                        expirationTime
+                        expiresValue
                     )
                 }
             }
@@ -119,7 +121,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             }
 
             403 -> {
-                CoroutineScope(Dispatchers.IO).launch {
+                scope.launch {
                     log.e(tag = TAG) { "Registration forbidden: $reason" }
                     // Error grave, probablemente credenciales incorrectas o cuenta deshabilitada.
                     // No se debe reintentar agresivamente.
@@ -131,7 +133,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             }
 
             in 400..499 -> {
-                CoroutineScope(Dispatchers.IO).launch {
+                scope.launch {
                     log.e(tag = TAG) { "Registration client error: $statusCode - $reason" }
                     // Otros errores de cliente. Podrían ser temporales (e.g., 423 Interval Too Brief)
                     // o permanentes. Por defecto, se reintenta pero con cuidado.
@@ -144,7 +146,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             }
 
             in 500..599 -> {
-                CoroutineScope(Dispatchers.IO).launch {
+                scope.launch {
                     log.e(tag = TAG) { "Registration server error: $statusCode - $reason" }
                     // Error del servidor. Se debe reintentar, pero usando el encabezado Retry-After si está presente.
                     val retryAfterMs = SipMessageParser.parseRetryAfter(fullResponse)?.times(1000L)
@@ -160,7 +162,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             }
 
             else -> {
-                CoroutineScope(Dispatchers.IO).launch {
+                scope.launch {
                     log.w(tag = TAG) { "Unhandled registration response: $statusCode" }
                     // Para códigos no manejados, se asume un error temporal y se reintenta.
                     sipCoreManager.handleRegistrationError(
@@ -302,7 +304,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
 
             when (currentState.state) {
                 CallState.PAUSING -> {
-                    CoroutineScope(Dispatchers.IO).launch {
+                    scope.launch {
                         // Completar transición a hold
                         CallStateManager.callOnHold(callData.callId)
                         sipCoreManager.notifyCallStateChanged(CallState.PAUSED)
@@ -311,7 +313,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 }
 
                 CallState.RESUMING -> {
-                    CoroutineScope(Dispatchers.IO).launch {
+                    scope.launch {
                         // Completar transición a resume
                         CallStateManager.callResumed(callData.callId)
                         sipCoreManager.notifyCallStateChanged(CallState.STREAMS_RUNNING)
@@ -365,32 +367,31 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             callData.remoteContactUri = contactUri
             callData.remoteSdp = remoteSdp
 
-            // CORREGIDO: Estado de conexión primero
-            CallStateManager.callConnected(callData.callId, 200)
-            sipCoreManager.notifyCallStateChanged(CallState.CONNECTED)
-
-            // Configurar WebRTC y luego transicionar a STREAMS_RUNNING
-            CoroutineScope(Dispatchers.IO).launch {
+            // Configurar WebRTC ANTES de cambiar estado a CONNECTED
+            scope.launch {
                 try {
-                    // Establecer SDP remoto
+                    // 1. Establecer SDP remoto
                     sipCoreManager.webRtcManager.setRemoteDescription(
                         remoteSdp,
                         SdpType.ANSWER
                     )
 
-                    // CRÍTICO: Enviar ACK antes de activar audio
+                    // 2. Enviar ACK
                     val ack = SipMessageBuilder.buildAckMessage(accountInfo, callData)
                     sendViaSharedWebSocket(ack)
                     log.d(tag = TAG) { "ACK enviado para call: ${callData.callId}" }
 
-                    // Esperar un momento para que se establezca la conexión
+                    // 3. Esperar a que se establezca la conexion
                     delay(500)
 
-                    // Activar audio
+                    // 4. Activar audio
                     sipCoreManager.webRtcManager.setAudioEnabled(true)
                     sipCoreManager.webRtcManager.setMuted(false)
 
-                    // TRANSICIÓN AUTOMÁTICA A STREAMS_RUNNING
+                    // 5. AHORA cambiar estado (WebRTC ya esta listo)
+                    CallStateManager.callConnected(callData.callId, 200)
+                    sipCoreManager.notifyCallStateChanged(CallState.CONNECTED)
+
                     CallStateManager.streamsRunning(callData.callId)
                     sipCoreManager.notifyCallStateChanged(CallState.STREAMS_RUNNING)
 
@@ -421,7 +422,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
         reason: String,
         errorReason: CallErrorReason
     ) {
-        CoroutineScope(Dispatchers.IO).launch {
+        scope.launch {
             // Detener todos los ringtones
             sipCoreManager.audioManager.stopAllRingtones()
 
@@ -442,7 +443,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
         lines: List<String>,
         accountInfo: AccountInfo
     ) {
-        CoroutineScope(Dispatchers.IO).launch {
+        scope.launch {
 
             try {
 
@@ -478,7 +479,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
     @OptIn(ExperimentalTime::class)
     private suspend fun handleInviteRequest(lines: List<String>, accountInfo: AccountInfo) {
         try {
-            log.d(tag = TAG) { "🔵 [INVITE] Handling incoming INVITE request" }
+            log.d(tag = TAG) { "[INVITE] [INVITE] Handling incoming INVITE request" }
 
             // Detener cualquier ringtone existente
             sipCoreManager.audioManager.stopAllRingtones()
@@ -489,7 +490,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             val remoteSdp = SipMessageParser.extractSdpContent(fullMessage)
 
             if (remoteSdp.isBlank()) {
-                log.e(tag = TAG) { "❌ FATAL: INVITE without SDP body!" }
+                log.e(tag = TAG) { "[ERROR] FATAL: INVITE without SDP body!" }
                 // Enviar error 400
                 val viaHeader = SipMessageParser.extractHeader(lines, "Via")
                 val fromHeader = SipMessageParser.extractHeader(lines, "From")
@@ -510,7 +511,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 return
             }
 
-            log.d(tag = TAG) { "✅ SDP validated: ${remoteSdp.length} chars" }
+            log.d(tag = TAG) { "[OK] SDP validated: ${remoteSdp.length} chars" }
 
             // === EXTRAER HEADERS ===
             val fromHeader = SipMessageParser.extractHeader(lines, "From")
@@ -542,7 +543,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 toTag = generateId(),
                 remoteContactUri = remoteContactUri,
                 remoteDisplayName = displayName,
-                remoteSdp = remoteSdp, // ✅ Asignar inmediatamente
+                remoteSdp = remoteSdp, // [OK] Asignar inmediatamente
                 localSdp = "",
                 via = viaHeader,
                 originalInviteMessage = fullMessage
@@ -554,10 +555,10 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 callData.lastCSeqValue = cseqParts[0].toIntOrNull() ?: 1
             }
 
-            // ✅ GUARDAR EN UN SOLO LUGAR
+            // [OK] GUARDAR EN UN SOLO LUGAR
             accountInfo.currentCallData.value = callData
 
-            // ✅ AGREGAR A MULTICALL MANAGER UNA SOLA VEZ
+            // [OK] AGREGAR A MULTICALL MANAGER UNA SOLA VEZ
             MultiCallManager.addCall(callData)
 
             // Actualizar CSeq si corresponde
@@ -571,7 +572,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             val tryingResponse = SipMessageBuilder.buildTryingResponse(accountInfo, callData)
             sendViaSharedWebSocket(tryingResponse)
 
-            CoroutineScope(Dispatchers.IO).launch {
+            scope.launch {
                 delay(100)
                 val ringingResponse = SipMessageBuilder.buildRingingResponse(accountInfo, callData)
                 sendViaSharedWebSocket(ringingResponse)
@@ -580,10 +581,10 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 sipCoreManager.audioManager.playIncomingRingtone(syncVibration = true)
             }
 
-            log.d(tag = TAG) { "✅ [INVITE] Incoming call setup completed" }
+            log.d(tag = TAG) { "[OK] [INVITE] Incoming call setup completed" }
 
         } catch (e: Exception) {
-            log.e(tag = TAG) { "💥 Exception in handleInviteRequest: ${e.message}" }
+            log.e(tag = TAG) { "[FATAL] Exception in handleInviteRequest: ${e.message}" }
             log.e(tag = TAG) { e.stackTraceToString() }
             sipCoreManager.audioManager.stopAllRingtones()
         }
@@ -592,16 +593,16 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
      * Maneja request BYE
      */
     private suspend fun handleByeRequest(lines: List<String>, accountInfo: AccountInfo) {
-        log.d(tag = TAG) { "🔴 Handling BYE request" }
+        log.d(tag = TAG) { "[BYE] Handling BYE request" }
 
         try {
-            // ✅ DETENER RINGTONES INMEDIATAMENTE
+            // [OK] DETENER RINGTONES INMEDIATAMENTE
             sipCoreManager.audioManager.stopAllRingtones()
 
             // Enviar 200 OK para BYE
             val okResponse = SipMessageBuilder.buildByeOkResponse(accountInfo, lines)
             sendViaSharedWebSocket(okResponse)
-            log.d(tag = TAG) { "✅ 200 OK sent for BYE" }
+            log.d(tag = TAG) { "[OK] 200 OK sent for BYE" }
 
             // Obtener callData
             accountInfo.currentCallData.value?.let { callData ->
@@ -615,8 +616,8 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 val accountKey = "${accountInfo.username}@${accountInfo.domain}"
                 sipCoreManager.notifyCallEndedForSpecificAccount(accountKey)
 
-                // ✅ LIMPIEZA ASÍNCRONA PERO RÁPIDA
-                CoroutineScope(Dispatchers.IO).launch {
+                // [OK] LIMPIEZA ASÍNCRONA PERO RÁPIDA
+                scope.launch {
                     try {
                         // Limpiar WebRTC
                         sipCoreManager.webRtcManager.dispose()
@@ -628,17 +629,17 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                         // Limpiar MultiCallManager
                         MultiCallManager.removeCall(callData.callId)
 
-                        log.d(tag = TAG) { "✅ BYE cleanup completed" }
+                        log.d(tag = TAG) { "[OK] BYE cleanup completed" }
                     } catch (e: Exception) {
                         log.e(tag = TAG) { "Error in BYE cleanup: ${e.message}" }
                     }
                 }
             } ?: run {
-                log.w(tag = TAG) { "⚠️ No call data found for BYE" }
+                log.w(tag = TAG) { "[WARN] No call data found for BYE" }
             }
 
         } catch (e: Exception) {
-            log.e(tag = TAG) { "❌ Error handling BYE request: ${e.message}" }
+            log.e(tag = TAG) { "[ERROR] Error handling BYE request: ${e.message}" }
             sipCoreManager.audioManager.stopAllRingtones()
         }
     }
@@ -650,10 +651,10 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
      * Maneja request CANCEL
      */
     private suspend fun handleCancelRequest(lines: List<String>, accountInfo: AccountInfo) {
-        log.d(tag = TAG) { "🟡 Handling CANCEL request" }
+        log.d(tag = TAG) { "[CANCEL] Handling CANCEL request" }
 
         try {
-            // ✅ Detener ringtones inmediatamente
+            // [OK] Detener ringtones inmediatamente
             sipCoreManager.audioManager.stopAllRingtones()
 
             // Extraer callId
@@ -663,11 +664,11 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             val callData = accountInfo.currentCallData.value ?: callId?.let { MultiCallManager.getCall(it) }
 
             if (callData == null) {
-                log.w(tag = TAG) { "❌ No call data for CANCEL" }
+                log.w(tag = TAG) { "[ERROR] No call data for CANCEL" }
             } else {
-                // ✅ REGISTRAR LLAMADA PERDIDA ANTES DE RESPUESTAS
+                // [OK] REGISTRAR LLAMADA PERDIDA ANTES DE RESPUESTAS
                 if (callData.direction == CallDirections.INCOMING) {
-                    log.d(tag = TAG) { "📝 Registering MISSED call from CANCEL: ${callData.callId}" }
+                    log.d(tag = TAG) { "[LOG] Registering MISSED call from CANCEL: ${callData.callId}" }
                     sipCoreManager.callManager?.registerMissedCall(callData)
                 }
             }
@@ -675,14 +676,14 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             // Enviar 200 OK para CANCEL
             val cancelOkResponse = SipMessageBuilder.buildCancelOkResponse(accountInfo, lines)
             sendViaSharedWebSocket(cancelOkResponse)
-            log.d(tag = TAG) { "✅ 200 OK sent for CANCEL" }
+            log.d(tag = TAG) { "[OK] 200 OK sent for CANCEL" }
 
             // Enviar 487 Request Terminated para INVITE original
             callData?.let {
                 val requestTerminatedResponse =
                     SipMessageBuilder.buildRequestTerminatedResponse(accountInfo, it)
                 sendViaSharedWebSocket(requestTerminatedResponse)
-                log.d(tag = TAG) { "✅ 487 Request Terminated sent" }
+                log.d(tag = TAG) { "[OK] 487 Request Terminated sent" }
 
                 // Actualizar estado
                 CallStateManager.callEnded(it.callId, 487, "Request Terminated")
@@ -692,24 +693,24 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 val accountKey = "${accountInfo.username}@${accountInfo.domain}"
                 sipCoreManager.notifyCallEndedForSpecificAccount(accountKey)
 
-                // ✅ Limpieza asíncrona
-                CoroutineScope(Dispatchers.IO).launch {
+                // [OK] Limpieza asíncrona
+                scope.launch {
                     try {
                         sipCoreManager.audioManager.stopAllRingtones()
                         delay(200)
                         accountInfo.resetCallState()
                         callData?.let { MultiCallManager.removeCall(it.callId) }
-                        log.d(tag = TAG) { "✅ CANCEL cleanup completed" }
+                        log.d(tag = TAG) { "[OK] CANCEL cleanup completed" }
                     } catch (e: Exception) {
                         log.e(tag = TAG) { "Error in CANCEL cleanup: ${e.message}" }
                     }
                 }
             } ?: run {
-                log.w(tag = TAG) { "⚠️ No call data found for CANCEL" }
+                log.w(tag = TAG) { "[WARN] No call data found for CANCEL" }
             }
 
         } catch (e: Exception) {
-            log.e(tag = TAG) { "❌ Error handling CANCEL request: ${e.message}" }
+            log.e(tag = TAG) { "[ERROR] Error handling CANCEL request: ${e.message}" }
             sipCoreManager.audioManager.stopAllRingtones()
         }
     }
@@ -876,7 +877,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
      * Limpia recursos de llamada
      */
     private fun cleanupCall(callData: CallData) {
-        CoroutineScope(Dispatchers.IO).launch {
+        scope.launch {
             try {
                 // Detener todos los ringtones
                 sipCoreManager.audioManager.stopAllRingtones()
@@ -1143,5 +1144,9 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
         } catch (e: Exception) {
             log.e(tag = TAG) { "Error sending DTMF INFO: ${e.message}" }
         }
+    }
+
+    fun dispose() {
+        scope.cancel()
     }
 }

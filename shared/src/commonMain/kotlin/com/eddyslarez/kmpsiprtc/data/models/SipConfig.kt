@@ -10,4 +10,65 @@ data class SipConfig(
     val pushModeConfig: PushModeConfig = PushModeConfig(),
     val incomingRingtoneUri: String? = null,
     val outgoingRingtoneUri: String? = null
-)
+) {
+    /**
+     * Valida la configuracion y retorna una lista de errores encontrados.
+     * Lista vacia = configuracion valida.
+     *
+     * ```kotlin
+     * val errors = config.validate()
+     * if (errors.isNotEmpty()) {
+     *     errors.forEach { println("Config error: ${it.message}") }
+     *     return
+     * }
+     * ```
+     */
+    fun validate(): List<SipError.Configuration> {
+        val errors = mutableListOf<SipError.Configuration>()
+
+        if (webSocketUrl.isNotEmpty()) {
+            if (!webSocketUrl.startsWith("ws://") && !webSocketUrl.startsWith("wss://")) {
+                errors.add(
+                    SipError.Configuration(
+                        "webSocketUrl",
+                        "Must start with ws:// or wss:// (got: '${webSocketUrl.take(10)}...')"
+                    )
+                )
+            }
+        }
+
+        if (pingIntervalMs < 5000) {
+            errors.add(
+                SipError.Configuration(
+                    "pingIntervalMs",
+                    "Must be >= 5000ms (got: $pingIntervalMs)"
+                )
+            )
+        }
+
+        if (pushModeConfig.autoTransitionDelay < 1000) {
+            errors.add(
+                SipError.Configuration(
+                    "pushModeConfig.autoTransitionDelay",
+                    "Must be >= 1000ms (got: ${pushModeConfig.autoTransitionDelay})"
+                )
+            )
+        }
+
+        return errors
+    }
+
+    /**
+     * Valida y lanza SipError.Configuration si hay errores.
+     *
+     * @throws IllegalArgumentException si la configuracion es invalida
+     */
+    fun validateOrThrow() {
+        val errors = validate()
+        if (errors.isNotEmpty()) {
+            throw IllegalArgumentException(
+                "Invalid SipConfig: ${errors.joinToString("; ") { it.message }}"
+            )
+        }
+    }
+}

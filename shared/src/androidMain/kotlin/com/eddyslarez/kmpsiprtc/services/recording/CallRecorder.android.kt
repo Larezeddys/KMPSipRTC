@@ -38,6 +38,10 @@ class AndroidCallRecorder() : CallRecorder {
     private val localAudioBuffer = mutableListOf<ByteArray>()
     private val remoteAudioBuffer = mutableListOf<ByteArray>()
 
+    // Formato real del audio remoto (detectado en primer callback)
+    @Volatile
+    private var remoteSampleRate: Int = SAMPLE_RATE
+
     // Control de grabación y streaming (independientes)
     @Volatile
     private var isRecording = false
@@ -207,13 +211,24 @@ class AndroidCallRecorder() : CallRecorder {
         }
     }
 
-    override fun captureRemoteAudio(audioData: ByteArray) {
+    override fun captureRemoteAudio(
+        audioData: ByteArray,
+        sampleRate: Int,
+        channels: Int,
+        bitsPerSample: Int
+    ) {
         if (!isRecording && !isStreaming) return
+
+        // Detectar sample rate real del audio remoto
+        remoteSampleRate = sampleRate
+
+        // Normalizar a mono 16-bit PCM
+        val normalized = normalizeToMono16bit(audioData, channels, bitsPerSample)
 
         // Guardar para archivo final (solo si está habilitado)
         if (currentConfig.enableRecording) {
             synchronized(remoteAudioBuffer) {
-                remoteAudioBuffer.add(audioData.copyOf())
+                remoteAudioBuffer.add(normalized)
             }
         }
 
@@ -221,13 +236,53 @@ class AndroidCallRecorder() : CallRecorder {
         if (currentConfig.enableStreaming && audioStreamListener != null) {
             try {
                 audioStreamListener?.onRemoteAudioData(
-                    audioData.copyOf(), SAMPLE_RATE, 1, 16
+                    normalized, sampleRate, 1, 16
                 )
             } catch (e: Exception) {
                 log.e(TAG) { "Error sending remote audio chunk: ${e.message}" }
                 audioStreamListener?.onStreamError(e.message ?: "Error sending remote audio")
             }
         }
+    }
+
+    /**
+     * Normaliza audio PCM a mono 16-bit little-endian.
+     */
+    private fun normalizeToMono16bit(data: ByteArray, channels: Int, bitsPerSample: Int): ByteArray {
+        if (channels == 1 && bitsPerSample == 16) return data.copyOf()
+
+        val bytesPerSample = bitsPerSample / 8
+        val frameSize = bytesPerSample * channels
+        val frameCount = data.size / frameSize
+        val output = ByteBuffer.allocate(frameCount * 2).order(ByteOrder.LITTLE_ENDIAN)
+        val input = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
+
+        for (i in 0 until frameCount) {
+            var sum = 0L
+            for (ch in 0 until channels) {
+                val sample16: Int = when (bitsPerSample) {
+                    16 -> input.short.toInt()
+                    32 -> {
+                        val raw = input.int
+                        val asFloat = Float.fromBits(raw)
+                        if (asFloat in -1.1f..1.1f) {
+                            (asFloat * 32767f).toInt().coerceIn(-32768, 32767)
+                        } else {
+                            (raw shr 16)
+                        }
+                    }
+                    else -> {
+                        repeat(bytesPerSample) { input.get() }
+                        0
+                    }
+                }
+                sum += sample16
+            }
+            val mono = (sum / channels).coerceIn(-32768, 32767).toShort()
+            output.putShort(mono)
+        }
+
+        return output.array()
     }
 
     override suspend fun stopRecording(): RecordingResult = withContext(Dispatchers.IO) {
@@ -249,8 +304,8 @@ class AndroidCallRecorder() : CallRecorder {
             val callId = currentCallId ?: "unknown"
             val timestamp = System.currentTimeMillis()
 
-            val localFile = saveAudioToFile(localAudioBuffer, "${callId}_local_${timestamp}.wav")
-            val remoteFile = saveAudioToFile(remoteAudioBuffer, "${callId}_remote_${timestamp}.wav")
+            val localFile = saveAudioToFile(localAudioBuffer, "${callId}_local_${timestamp}.wav", SAMPLE_RATE)
+            val remoteFile = saveAudioToFile(remoteAudioBuffer, "${callId}_remote_${timestamp}.wav", remoteSampleRate)
             val mixedFile = mixAndSaveAudio(localAudioBuffer, remoteAudioBuffer, "${callId}_mixed_${timestamp}.wav")
 
             localAudioBuffer.clear()
@@ -346,7 +401,7 @@ class AndroidCallRecorder() : CallRecorder {
 
     // ==================== GUARDADO DE ARCHIVOS ====================
 
-    private fun saveAudioToFile(audioBuffer: List<ByteArray>, fileName: String): File? {
+    private fun saveAudioToFile(audioBuffer: List<ByteArray>, fileName: String, sampleRate: Int = SAMPLE_RATE): File? {
         if (audioBuffer.isEmpty()) {
             log.w(TAG) { "⚠️ Empty audio buffer for $fileName" }
             return null
@@ -358,11 +413,11 @@ class AndroidCallRecorder() : CallRecorder {
             val totalDataLen = totalAudioLen + 36
 
             FileOutputStream(file).use { fos ->
-                writeWavHeader(fos, totalAudioLen.toLong(), totalDataLen.toLong(), SAMPLE_RATE.toLong())
+                writeWavHeader(fos, totalAudioLen.toLong(), totalDataLen.toLong(), sampleRate.toLong())
                 audioBuffer.forEach { chunk -> fos.write(chunk) }
             }
 
-            log.d(TAG) { "✅ Saved: ${file.absolutePath} (${file.length() / 1024}KB)" }
+            log.d(TAG) { "✅ Saved: ${file.absolutePath} (${file.length() / 1024}KB) @ ${sampleRate}Hz" }
             file
         } catch (e: Exception) {
             log.e(TAG) { "❌ Error saving audio: ${e.message}" }
@@ -384,7 +439,13 @@ class AndroidCallRecorder() : CallRecorder {
         return try {
             val file = File(outputDir, fileName)
             val localSamples = bufferToSamples(localBuffer)
-            val remoteSamples = bufferToSamples(remoteBuffer)
+            var remoteSamples = bufferToSamples(remoteBuffer)
+
+            // Si los sample rates difieren, resamplear el remoto al rate local
+            if (remoteSampleRate != SAMPLE_RATE && remoteSamples.isNotEmpty()) {
+                remoteSamples = resample(remoteSamples, remoteSampleRate, SAMPLE_RATE)
+            }
+
             val maxLength = maxOf(localSamples.size, remoteSamples.size)
             val mixedSamples = ShortArray(maxLength)
 
@@ -412,6 +473,25 @@ class AndroidCallRecorder() : CallRecorder {
             e.printStackTrace()
             null
         }
+    }
+
+    /**
+     * Resample lineal simple de samples a un nuevo sample rate
+     */
+    private fun resample(samples: ShortArray, fromRate: Int, toRate: Int): ShortArray {
+        if (fromRate == toRate || samples.isEmpty()) return samples
+        val ratio = fromRate.toDouble() / toRate.toDouble()
+        val newLength = (samples.size / ratio).toInt()
+        val result = ShortArray(newLength)
+        for (i in result.indices) {
+            val srcPos = i * ratio
+            val srcIndex = srcPos.toInt()
+            val frac = srcPos - srcIndex
+            val s0 = samples[srcIndex.coerceIn(0, samples.lastIndex)].toInt()
+            val s1 = samples[(srcIndex + 1).coerceIn(0, samples.lastIndex)].toInt()
+            result[i] = (s0 + (s1 - s0) * frac).toInt().coerceIn(-32768, 32767).toShort()
+        }
+        return result
     }
 
     private fun writeWavHeader(
