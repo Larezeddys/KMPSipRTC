@@ -57,15 +57,13 @@ internal class CallLifecycleManager(
 
         log.d(tag = TAG) { "Saved state: wasInPush=$wasInPush for $accountKey" }
 
-        // Si estaba en push, cambiar a foreground para la llamada
+        // IMPORTANTE: NO cambiar a FOREGROUND si la llamada viene de push.
+        // La llamada puede funcionar en modo push (WebSocket ya conectado).
+        // Cambiar a foreground aqui causa problemas de registro durante la llamada.
+        // El cambio de modo se maneja DESPUES de que termine la llamada,
+        // en onCallEnded(), segun el estado de la app (foreground/background).
         if (wasInPush == true) {
-            scope.launch {
-                log.d(tag = TAG) { "Switching $accountKey to FOREGROUND for call" }
-                sipCoreManager.switchToForegroundMode(
-                    accountInfo.username,
-                    accountInfo.domain
-                )
-            }
+            log.d(tag = TAG) { "Incoming call from push - keeping PUSH mode during call for $accountKey" }
         }
     }
 

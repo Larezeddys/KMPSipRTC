@@ -97,6 +97,11 @@ class SipCoreManager private constructor(
     var onCallTerminated: (() -> Unit)? = null
     private var registrationCallbackForCall: ((AccountInfo, Boolean) -> Unit)? = null
 
+    // Flag para indicar que hay una llamada entrante de push pendiente o activa.
+    // Cuando esta en true, onAppForegrounded() NO cambia el modo a FOREGROUND.
+    // Se limpia cuando termina la llamada.
+    var isIncomingPushCallPending: Boolean = false
+
     // Sincronización de cuentas con BD
     private var accountSyncJob: Job? = null
     private val accountSyncMutex = Mutex()
@@ -1881,6 +1886,16 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
 
         // Verificar conectividad al regresar del background
         verifyAndFixConnectivity()
+
+        // NO cambiar modo de registro si hay una llamada de push pendiente/activa.
+        // La race condition ocurre cuando el usuario acepta una CallKit call:
+        // UIApplicationDidBecomeActiveNotification dispara antes que el SIP INVITE llegue,
+        // por lo que CallStateManager puede estar en IDLE aunque la llamada este en progreso.
+        if (isIncomingPushCallPending || CallStateManager.getCurrentState().isActive()) {
+            log.d(tag = TAG) { "Push call pending/active - suppressing foreground mode switch (isIncomingPushCallPending=$isIncomingPushCallPending, callState=${CallStateManager.getCurrentState().state})" }
+            return
+        }
+
         refreshAllRegistrationsWithNewUserAgent()
     }
 

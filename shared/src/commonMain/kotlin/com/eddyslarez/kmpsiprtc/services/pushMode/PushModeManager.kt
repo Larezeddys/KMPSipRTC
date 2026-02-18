@@ -154,11 +154,19 @@ class PushModeManager(
                     "\nRegistered accounts: ${registeredAccounts.size}" +
                     "\nAccounts: $registeredAccounts" +
                     "\nCurrent mode: ${getCurrentMode()}" +
-                    "\nStrategy: ${config.strategy}"
+                    "\nStrategy: ${config.strategy}" +
+                    "\nIs call active: $isCallActive"
         }
 
         // Cancelar transicion pendiente a push
         cancelPendingTransition()
+
+        // NO cambiar a foreground si hay una llamada activa (ej: llamada entrante de push)
+        // El modo se ajustara cuando la llamada termine, segun el estado de la app
+        if (isCallActive) {
+            log.d(tag = TAG1) { "Call active - suppressing foreground mode transition" }
+            return
+        }
 
         if (config.strategy == PushModeStrategy.AUTOMATIC && registeredAccounts.isNotEmpty()) {
             // Verificar WebSocket saludable antes de transicionar
@@ -166,6 +174,15 @@ class PushModeManager(
         } else {
             log.w(tag = TAG1) { "Transition to foreground NOT executed - strategy: ${config.strategy}" }
         }
+    }
+
+    /**
+     * Marca explicitamente que hay una llamada activa (sin transicion de modo).
+     * Usar cuando se recibe un push VoIP para bloquear transiciones durante la llamada.
+     */
+    fun setCallActive(active: Boolean) {
+        isCallActive = active
+        log.d(tag = TAG1) { "Call active set to: $active" }
     }
 
     /**
@@ -228,14 +245,23 @@ class PushModeManager(
 
     /**
      * Notifica que una llamada termino
+     *
+     * @param isAppInBackground true si la app esta en segundo plano cuando termina la llamada
      */
-    fun onCallEnded(registeredAccounts: Set<String>) {
-        log.d(tag = TAG) { "Call ended, was in push before call: $wasInPushBeforeCall" }
+    fun onCallEnded(registeredAccounts: Set<String>, isAppInBackground: Boolean = true) {
+        log.d(tag = TAG) { "Call ended, was in push before call: $wasInPushBeforeCall, isAppInBackground: $isAppInBackground" }
 
         isCallActive = false
 
         if (wasInPushBeforeCall && config.returnToPushAfterCallEnd) {
-            scheduleReturnToPushAfterCall(registeredAccounts)
+            if (!isAppInBackground) {
+                // App en primer plano: cambiar a FOREGROUND
+                log.d(tag = TAG) { "App in foreground after push call - switching to FOREGROUND" }
+                transitionToForeground(registeredAccounts, PushModeReasons.APP_FOREGROUNDED)
+            } else {
+                // App en background: volver a PUSH
+                scheduleReturnToPushAfterCall(registeredAccounts)
+            }
         }
 
         // Resetear el flag solo aqui, despues de programar el retorno
@@ -329,8 +355,16 @@ class PushModeManager(
     /**
      * Notifica que una llamada termino para una cuenta especifica
      * Protegido con Mutex para evitar race conditions
+     *
+     * @param isAppInBackground true si la app esta en segundo plano cuando termina la llamada.
+     *        Si false (app en primer plano) y la llamada vino de push, se transiciona a FOREGROUND
+     *        en lugar de volver a PUSH.
      */
-    fun onCallEndedForAccount(accountKey: String, allRegisteredAccounts: Set<String>) {
+    fun onCallEndedForAccount(
+        accountKey: String,
+        allRegisteredAccounts: Set<String>,
+        isAppInBackground: Boolean = true
+    ) {
         scope.launch {
             callEndMutex.withLock {
                 // Prevenir llamadas duplicadas - thread-safe con mutex
@@ -343,21 +377,33 @@ class PushModeManager(
                     accountPushStates[accountKey] ?: false
                 }
 
-                log.d(tag = TAG1) { "Call ended for specific account: $accountKey, was in push before call: $wasInPush" }
+                log.d(tag = TAG1) {
+                    "Call ended for specific account: $accountKey" +
+                            "\nwasInPushBeforeCall: $wasInPush" +
+                            "\nisAppInBackground: $isAppInBackground"
+                }
 
                 isCallActive = false
 
                 // Si estabamos en modo push antes de la llamada y esta configurado para volver
                 if (wasInPush && config.returnToPushAfterCallEnd) {
-                    log.d(tag = TAG1) { "Scheduling return to push mode for account: $accountKey" }
+                    if (!isAppInBackground) {
+                        // App en primer plano: cambiar a FOREGROUND en lugar de volver a PUSH
+                        log.d(tag = TAG1) { "App in foreground after push call - switching to FOREGROUND for $accountKey" }
+                        transitionSpecificAccountToForeground(accountKey, PushModeReasons.APP_FOREGROUNDED)
+                        cleanupAccountState(accountKey)
+                    } else {
+                        // App en segundo plano/bloqueada: volver a PUSH
+                        log.d(tag = TAG1) { "Scheduling return to push mode for account: $accountKey" }
 
-                    // Marcar como pendiente ANTES de programar
-                    pendingReturns.add(accountKey)
+                        // Marcar como pendiente ANTES de programar
+                        pendingReturns.add(accountKey)
 
-                    // Cancelar job anterior ANTES de crear nuevo
-                    callEndTransitionJobs[accountKey]?.cancel()
+                        // Cancelar job anterior ANTES de crear nuevo
+                        callEndTransitionJobs[accountKey]?.cancel()
 
-                    scheduleReturnToPushForSpecificAccount(accountKey)
+                        scheduleReturnToPushForSpecificAccount(accountKey)
+                    }
                 } else {
                     log.d(tag = TAG1) { "Not returning to push mode - wasInPushBeforeCall: $wasInPush, returnToPushAfterCallEnd: ${config.returnToPushAfterCallEnd}" }
 

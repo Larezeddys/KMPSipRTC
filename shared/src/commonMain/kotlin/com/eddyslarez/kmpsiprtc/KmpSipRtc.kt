@@ -622,17 +622,21 @@ class KmpSipRtc private constructor() {
                             CallState.ENDED -> {
                                 val reason = mapErrorReasonToCallEndReason(stateInfo.errorReason)
                                 notifyCallEnded(info, reason)
+                                // Limpiar flag de llamada push pendiente
+                                sipCoreManager?.isIncomingPushCallPending = false
+                                val isBackground = sipCoreManager?.isAppInBackground ?: true
                                 val accountKey = determineAccountKeyFromCallInfo(info)
                                 if (accountKey != null) {
-                                    log.d(tag = TAG) { "Notifying PushModeManager: call ended for $accountKey" }
+                                    log.d(tag = TAG) { "Notifying PushModeManager: call ended for $accountKey (isBackground=$isBackground)" }
                                     pushModeManager?.onCallEndedForAccount(
                                         accountKey,
-                                        setOf(accountKey)
+                                        setOf(accountKey),
+                                        isBackground
                                     )
                                 } else {
                                     val registeredAccounts =
                                         sipCoreManager?.getAllRegisteredAccountKeys() ?: emptySet()
-                                    pushModeManager?.onCallEnded(registeredAccounts)
+                                    pushModeManager?.onCallEnded(registeredAccounts, isBackground)
                                 }
                             }
 
@@ -1035,6 +1039,11 @@ class KmpSipRtc private constructor() {
             val accountKey = "${currentAccount.username}@${currentAccount.domain}"
             log.d(tag = TAG) { "Determined account key from current account: $accountKey" }
 
+            // Marcar llamada activa en PushModeManager para bloquear transicion a FOREGROUND
+            // si el usuario acepta la llamada desde CallKit (UIApplicationDidBecomeActiveNotification
+            // dispara antes que el SIP INVITE llegue, causando race condition)
+            pushModeManager?.setCallActive(true)
+
             internalScope.launch {
                 sipCoreManager!!.callLifecycleManager.onIncomingCallReceived(accountKey)
             }
@@ -1048,6 +1057,22 @@ class KmpSipRtc private constructor() {
         )
 
         notifyIncomingCall(callInfo)
+    }
+
+    /**
+     * Marca que hay una llamada entrante de push pendiente.
+     * Llamar desde la app cuando llega un push VoIP, ANTES de que el SIP INVITE llegue.
+     * Esto previene que onAppForegrounded() cambie el modo a FOREGROUND durante la llamada.
+     * Llamar con false cuando terminen todas las llamadas.
+     */
+    fun setIncomingCallFromPush(isPending: Boolean) {
+        log.d(tag = TAG) { "setIncomingCallFromPush: $isPending" }
+        sipCoreManager?.isIncomingPushCallPending = isPending
+        if (isPending) {
+            // Marcar llamada activa en PushModeManager inmediatamente
+            // (antes de que llegue el SIP INVITE)
+            pushModeManager?.setCallActive(true)
+        }
     }
 
     /**
