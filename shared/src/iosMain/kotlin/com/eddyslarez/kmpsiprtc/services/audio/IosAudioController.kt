@@ -13,6 +13,10 @@ import kotlinx.cinterop.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlin.concurrent.Volatile
+
 @OptIn(ExperimentalForeignApi::class)
 class IosAudioController(
     private val onDeviceChanged: (AudioDevice?) -> Unit
@@ -20,13 +24,23 @@ class IosAudioController(
     private val TAG = "IosAudioController"
     private val coroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
+    // Thread-safety usando Mutex (compatible con Kotlin/Native)
+    private val audioDevicesMutex = Mutex()
     private val audioDevices = mutableListOf<AudioDevice>()
+
     private var savedAudioCategory: String? = null
     private var isStarted = false
     private var audioSessionConfigured = false
 
     private val _availableDevices = MutableStateFlow<List<AudioDevice>>(emptyList())
     val availableDevices: StateFlow<List<AudioDevice>> = _availableDevices.asStateFlow()
+
+    // Flag para evitar escaneos concurrentes
+    @Volatile
+    private var isScanning = false
+
+    // Job de debounce para el observer de cambio de ruta
+    private var routeChangeJob: Job? = null
 
     // ==================== INITIALIZATION ====================
 
@@ -49,8 +63,10 @@ class IosAudioController(
             queue = null
         ) { notification ->
             log.d(TAG) { "Audio route changed" }
-            coroutineScope.launch {
-                delay(200)
+            // Debounce: cancelar job anterior si llega otro cambio rapido
+            routeChangeJob?.cancel()
+            routeChangeJob = coroutineScope.launch {
+                delay(300)
                 scanDevices()
                 onDeviceChanged(getCurrentOutputDevice())
             }
@@ -272,9 +288,12 @@ class IosAudioController(
     }
 
     fun getAllDevices(): Pair<List<AudioDevice>, List<AudioDevice>> {
-        scanDevices()
-        val inputs = audioDevices.filter { !it.isOutput }
-        val outputs = audioDevices.filter { it.isOutput }
+        // CRÍTICO: Crear copia inmutable ANTES de filtrar
+        // Esto evita ConcurrentModificationException
+        val devicesCopy = audioDevices.toList()
+
+        val inputs = devicesCopy.filter { !it.isOutput }
+        val outputs = devicesCopy.filter { it.isOutput }
 
         log.d(TAG) { "All devices - Inputs: ${inputs.size}, Outputs: ${outputs.size}" }
         return Pair(inputs, outputs)
@@ -295,19 +314,25 @@ class IosAudioController(
     }
 
     fun getCurrentInputDevice(): AudioDevice? {
-        return audioDevices.firstOrNull { !it.isOutput && it.audioUnit.isCurrent }
+        // Crear copia para evitar ConcurrentModificationException
+        val devicesCopy = audioDevices.toList()
+        return devicesCopy.firstOrNull { !it.isOutput && it.audioUnit.isCurrent }
     }
 
     fun getCurrentOutputDevice(): AudioDevice? {
         val activeRoute = getActiveRoute()
-        return audioDevices.firstOrNull {
+        // Crear copia para evitar ConcurrentModificationException
+        val devicesCopy = audioDevices.toList()
+        return devicesCopy.firstOrNull {
             it.isOutput && it.audioUnit.type == activeRoute
         }
     }
 
     fun getAvailableAudioUnits(): Set<AudioUnit> {
         scanDevices()
-        return audioDevices.map { it.audioUnit }.toSet()
+        // Crear copia para evitar ConcurrentModificationException
+        val devicesCopy = audioDevices.toList()
+        return devicesCopy.map { it.audioUnit }.toSet()
     }
 
     fun getCurrentActiveAudioUnit(): AudioUnit? {
@@ -327,7 +352,9 @@ class IosAudioController(
     // ==================== PRIVATE HELPERS ====================
 
     private fun selectDefaultDeviceWithPriority() {
-        val availableTypes = audioDevices
+        // Crear copia para evitar ConcurrentModificationException
+        val devicesCopy = audioDevices.toList()
+        val availableTypes = devicesCopy
             .filter { it.isOutput }
             .map { it.audioUnit.type }
             .toSet()
@@ -356,45 +383,65 @@ class IosAudioController(
     }
 
     private fun scanDevices() {
-        audioDevices.clear()
-
-        val audioSession = AVAudioSession.sharedInstance()
-        val currentRoute = audioSession.currentRoute
-        val currentOutputPort = currentRoute.outputs.firstOrNull()?.let {
-            (it as AVAudioSessionPortDescription).portType
+        // Evitar escaneos concurrentes
+        if (isScanning) {
+            log.d(TAG) { "Already scanning, skipping..." }
+            return
         }
 
-        // Dispositivos siempre disponibles
-        audioDevices.add(createMicrophoneDevice())
-        audioDevices.add(createEarpieceDevice(currentOutputPort))
-        audioDevices.add(createSpeakerDevice(currentOutputPort))
+        isScanning = true
 
-        // Detectar dispositivos conectados
-        // Bluetooth
-        audioSession.availableInputs?.forEach { input ->
-            (input as? AVAudioSessionPortDescription)?.let { port ->
-                if (port.portType == AVAudioSessionPortBluetoothHFP) {
-                    audioDevices.add(createBluetoothDevice(port, currentOutputPort))
-                }
+        try {
+            // Construir lista local para evitar OOM por acceso concurrente a audioDevices
+            val newDevices = mutableListOf<AudioDevice>()
+
+            val audioSession = AVAudioSession.sharedInstance()
+            val currentRoute = audioSession.currentRoute
+            val currentOutputPort = currentRoute.outputs.firstOrNull()?.let {
+                (it as AVAudioSessionPortDescription).portType
             }
-        }
 
-        // Headphones/Headset
-        currentRoute.outputs.forEach { output ->
-            (output as? AVAudioSessionPortDescription)?.let { port ->
-                when (port.portType) {
-                    AVAudioSessionPortHeadphones -> {
-                        audioDevices.add(createHeadphonesDevice(port, currentOutputPort))
-                    }
-                    AVAudioSessionPortHeadsetMic -> {
-                        audioDevices.add(createHeadsetDevice(port, currentOutputPort))
+            // Dispositivos siempre disponibles
+            newDevices.add(createMicrophoneDevice())
+            newDevices.add(createEarpieceDevice(currentOutputPort))
+            newDevices.add(createSpeakerDevice(currentOutputPort))
+
+            // Detectar dispositivos conectados
+            // Bluetooth
+            audioSession.availableInputs?.forEach { input ->
+                (input as? AVAudioSessionPortDescription)?.let { port ->
+                    if (port.portType == AVAudioSessionPortBluetoothHFP) {
+                        newDevices.add(createBluetoothDevice(port, currentOutputPort))
                     }
                 }
             }
-        }
 
-        _availableDevices.value = audioDevices.toList()
-        log.d(TAG) { "Total devices scanned: ${audioDevices.size}" }
+            // Headphones/Headset
+            currentRoute.outputs.forEach { output ->
+                (output as? AVAudioSessionPortDescription)?.let { port ->
+                    when (port.portType) {
+                        AVAudioSessionPortHeadphones -> {
+                            newDevices.add(createHeadphonesDevice(port, currentOutputPort))
+                        }
+                        AVAudioSessionPortHeadsetMic -> {
+                            newDevices.add(createHeadsetDevice(port, currentOutputPort))
+                        }
+                    }
+                }
+            }
+
+            // Reemplazar atomicamente la lista compartida
+            audioDevices.clear()
+            audioDevices.addAll(newDevices)
+
+            // Actualizar StateFlow con copia inmutable
+            _availableDevices.value = newDevices.toList()
+            log.d(TAG) { "Total devices scanned: ${newDevices.size}" }
+        } catch (e: Exception) {
+            log.e(TAG) { "Error scanning devices: ${e.message}" }
+        } finally {
+            isScanning = false
+        }
     }
 
     // ==================== DEVICE CREATION ====================

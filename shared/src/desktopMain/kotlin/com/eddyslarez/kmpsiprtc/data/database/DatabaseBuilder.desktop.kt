@@ -13,8 +13,9 @@ private fun getDatabaseFile(): File {
     // Obtener directorio home del usuario
     val userHome = System.getProperty("user.home")
 
-    // Crear directorio de la aplicación si no existe
-    val appDir = File(userHome, ".kmpsiprtc")
+    // Directorio separado por marca para evitar mezclar datos
+    val suffix = DatabaseConfig.brandSuffix
+    val appDir = File(userHome, ".kmpsiprtc$suffix")
     if (!appDir.exists()) {
         appDir.mkdirs()
     }

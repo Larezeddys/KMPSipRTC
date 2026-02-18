@@ -10,6 +10,11 @@
     "sourceSetName": "nativeMain"
   },
   {
+    "moduleId": "net.folivo:trixnity-olm:4.22.7",
+    "file": "/Users/eddyslarez/Downloads/KMPSipRTCNew/.kotlin/metadata/kotlinTransformedCInteropMetadataLibraries/net.folivo-trixnity-olm-4.22.7-iosMain-cinterop/net.folivo_trixnity-olm-cinterop-libolm-zNZflw.klib",
+    "sourceSetName": "iosMain"
+  },
+  {
     "moduleId": "com.shepeliev:webrtc-kmp:0.125.11",
     "file": "/Users/eddyslarez/Downloads/KMPSipRTCNew/.kotlin/metadata/kotlinTransformedCInteropMetadataLibraries/com.shepeliev-webrtc-kmp-0.125.11-iosMain-cinterop/com.shepeliev_webrtc-kmp-cinterop-WebRTC-TULgZg.klib",
     "sourceSetName": "iosMain"

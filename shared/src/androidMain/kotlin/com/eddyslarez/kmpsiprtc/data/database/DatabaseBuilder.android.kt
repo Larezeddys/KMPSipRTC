@@ -8,7 +8,8 @@ import com.eddyslarez.kmpsiprtc.platform.AndroidContext
 
 actual fun getDatabaseBuilder(): RoomDatabase.Builder<SipDatabase> {
     val context: Context = AndroidContext.get()
-    val dbName = "sip.db"
+    val suffix = DatabaseConfig.brandSuffix
+    val dbName = "sip$suffix.db"
 
     return Room.databaseBuilder(
         context.applicationContext,

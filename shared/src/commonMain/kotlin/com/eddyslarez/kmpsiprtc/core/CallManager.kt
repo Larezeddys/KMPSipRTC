@@ -125,7 +125,7 @@ class CallManager(
         phoneNumber: String,
         accountInfo: AccountInfo,
         enableTranslation: Boolean = false,
-        recordCall: Boolean = true,
+        recordCall: Boolean = false,
     ) {
         if (!accountInfo.isRegistered.value) {
             log.d(tag = TAG) { "Error: Not registered with SIP server" }
@@ -350,7 +350,7 @@ class CallManager(
     /**
      * Acepta una llamada entrante - despacha por callType
      */
-    fun acceptCall(callId: String? = null, recordCall: Boolean = true) {
+    fun acceptCall(callId: String? = null, recordCall: Boolean = false) {
 
         // Resolver callData desde AccountInfo o MultiCallManager
         val accountInfo = sipCoreManager.currentAccountInfo
