@@ -36,9 +36,9 @@ class SipReconnectionManager(
     companion object {
         private const val TAG = "SipReconnectionManager"
         private const val MAX_RECONNECTION_ATTEMPTS = 5
-        private const val RECONNECTION_BASE_DELAY = 2000L
-        private const val RECONNECTION_MAX_DELAY = 30000L
-        private const val NETWORK_STABILITY_CHECK_DELAY = 3000L
+        private const val RECONNECTION_BASE_DELAY = 500L
+        private const val RECONNECTION_MAX_DELAY = 15000L
+        private const val NETWORK_STABILITY_CHECK_DELAY = 500L
         private const val ACCOUNT_RECOVERY_TIMEOUT = 10000L
     }
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())

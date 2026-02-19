@@ -21,7 +21,7 @@ internal class CallLifecycleManager(
 ) {
     companion object {
         private const val TAG = "CallLifecycleManager"
-        private const val RETURN_TO_PUSH_DELAY = 2000L
+        private const val RETURN_TO_PUSH_DELAY = 500L
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())

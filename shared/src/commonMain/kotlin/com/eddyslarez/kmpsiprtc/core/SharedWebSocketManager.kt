@@ -45,8 +45,8 @@ class SharedWebSocketManager(
         private const val WEBSOCKET_PROTOCOL = "sip"
 
         // Reconexion robusta con backoff exponencial
-        private const val RECONNECT_BASE_DELAY = 2000L    // 2s inicial
-        private const val RECONNECT_MAX_DELAY = 30000L     // 30s cap
+        private const val RECONNECT_BASE_DELAY = 500L     // 500ms inicial
+        private const val RECONNECT_MAX_DELAY = 15000L    // 15s cap
         private const val RECONNECT_DEGRADED_DELAY = 60000L // 60s despues de degradado
         private const val RECONNECT_JITTER_FACTOR = 0.1    // 10% jitter
         private const val DEGRADED_THRESHOLD = 10           // Intentos antes de notificar degradado
@@ -176,7 +176,7 @@ class SharedWebSocketManager(
             log.w(tag = TAG) { "WebSocket not healthy, forcing reconnection before register" }
             forceReconnect()
             // Esperar un poco para que se establezca la conexion
-            delay(2000)
+            delay(500)
             if (!isWebSocketHealthy()) {
                 log.e(tag = TAG) { "Cannot register account - WebSocket still not healthy after reconnect" }
                 return false

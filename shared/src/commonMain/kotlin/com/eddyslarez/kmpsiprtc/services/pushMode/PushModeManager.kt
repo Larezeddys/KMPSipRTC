@@ -420,7 +420,7 @@ class PushModeManager(
     private fun scheduleReturnToPushForSpecificAccount(accountKey: String) {
         callEndTransitionJobs[accountKey] = scope.launch {
             try {
-                val returnDelay = 2000L
+                val returnDelay = 500L
                 log.d(tag = TAG1) { "Scheduling return to push for account $accountKey in ${returnDelay}ms after call end" }
 
                 delay(returnDelay)
@@ -543,8 +543,7 @@ class PushModeManager(
 
         scope.launch {
             try {
-                // Delay mas corto para retorno despues de llamada
-                val returnDelay = 2000L
+                val returnDelay = 500L
                 log.d(tag = TAG) { "Scheduling return to push in ${returnDelay}ms after call end" }
                 delay(returnDelay)
 

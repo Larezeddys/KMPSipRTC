@@ -36,8 +36,8 @@ class RegistrationGuardianManager(
     companion object {
         private const val TAG = "RegistrationGuardian"
         private const val HEALTH_CHECK_INTERVAL = 60_000L
-        private const val QUICK_RETRY_DELAY = 3_000L
-        private const val NORMAL_RETRY_DELAY = 10_000L
+        private const val QUICK_RETRY_DELAY = 1_000L
+        private const val NORMAL_RETRY_DELAY = 5_000L
         private const val MAX_RETRY_DELAY = 60_000L
         private const val REGISTRATION_TIMEOUT = 30_000L // â¬…ï¸ Aumentado a 30 segundos
     }
@@ -234,7 +234,7 @@ class RegistrationGuardianManager(
                 cleanupAndResetSipDialog(accountInfo)
 
                 // â±ï¸ Delay para asegurar que el servidor procese la limpieza
-                delay(1500)
+                delay(500)
 
                 sipCoreManager.updateRegistrationState(
                     accountKey,
@@ -391,7 +391,7 @@ class RegistrationGuardianManager(
                         "ðŸ”Œ [${accountInfo.username}@${accountInfo.domain}] WebSocket not connected, connecting..."
                     }
                     sipCoreManager.sharedWebSocketManager.connect()
-                    delay(2000)
+                    delay(500)
 
                     if (!sipCoreManager.sharedWebSocketManager.isConnected()) {
                         log.e(tag = TAG) {
@@ -450,7 +450,7 @@ class RegistrationGuardianManager(
 
     private fun startAccountRecoveryFromDatabase() {
         scope.launch {
-            delay(5000)
+            delay(2000)
             try {
                 log.d(tag = TAG) { "ðŸ” Starting initial account recovery from database..." }
                 val dbAccounts = databaseManager.getRegisteredSipAccounts().first()

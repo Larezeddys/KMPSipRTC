@@ -578,7 +578,13 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 sendViaSharedWebSocket(ringingResponse)
 
                 delay(200)
-                sipCoreManager.audioManager.playIncomingRingtone(syncVibration = true)
+                // Solo reproducir ringtone en-app si la llamada NO viene de push.
+                // Cuando viene de push, CallKit ya presenta la UI con el ringtone del sistema.
+                if (!sipCoreManager.isIncomingPushCallPending) {
+                    sipCoreManager.audioManager.playIncomingRingtone(syncVibration = true)
+                } else {
+                    log.d(tag = TAG) { "Push call — skipping in-app ringtone (CallKit managing audio)" }
+                }
             }
 
             log.d(tag = TAG) { "[OK] [INVITE] Incoming call setup completed" }
