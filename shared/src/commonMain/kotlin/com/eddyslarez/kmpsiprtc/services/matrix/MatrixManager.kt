@@ -305,31 +305,33 @@ class MatrixManager(
     private fun observeMatrixChanges() {
         val client = matrixClient ?: return
 
-        // Observar rooms
+        // Observar rooms - collectLatest + combine para reaccionar reactivamente a cada room flow
         scope.launch {
             try {
-                client.room.getAll().collect { roomsMap ->
-                    val roomsList = mutableListOf<MatrixRoom>()
-                    roomsMap.forEach { (roomId, roomFlow) ->
-                        try {
-                            val room = roomFlow.first()
-                            if (room != null) {
-                                roomsList.add(
-                                    MatrixRoom(
-                                        id = roomId.full,
-                                        name = room.name?.explicitName ?: "Unnamed Room",
-                                        avatarUrl = null,
-                                        isDirect = room.isDirect,
-                                        isEncrypted = false,
-                                        unreadCount = 0
-                                    )
+                client.room.getAll().collectLatest { roomsMap ->
+                    if (roomsMap.isEmpty()) {
+                        _rooms.value = emptyList()
+                        return@collectLatest
+                    }
+                    val roomFlows: List<Flow<MatrixRoom?>> = roomsMap.entries.map { (roomId, roomFlow) ->
+                        roomFlow.map { room ->
+                            room?.let {
+                                MatrixRoom(
+                                    id = roomId.full,
+                                    name = it.name?.explicitName ?: it.name.toString().takeIf { n -> n.isNotBlank() } ?: "Sin nombre",
+                                    avatarUrl = null,
+                                    isDirect = it.isDirect,
+                                    isEncrypted = false,
+                                    unreadCount = 0
                                 )
                             }
-                        } catch (e: Exception) {
-                            log.w(TAG) { "Error collecting room $roomId: ${e.message}" }
                         }
                     }
-                    _rooms.value = roomsList
+                    combine(roomFlows) { rooms ->
+                        rooms.filterNotNull()
+                    }.collect { roomsList ->
+                        _rooms.value = roomsList
+                    }
                 }
             } catch (e: Exception) {
                 log.e(TAG) { "Error observing rooms: ${e.message}" }
@@ -354,16 +356,20 @@ class MatrixManager(
                             is CallEventContent.Invite -> {
                                 if (senderId != myUserId) {
                                     handleCallInvite(eventRoomId, senderId, content)
+                                    // Mostrar evento de llamada en el chat
+                                    addCallEventMessage(eventRoomId, event.id.full, senderId, event.originTimestamp, MessageType.CALL_INVITE)
                                 }
                             }
                             is CallEventContent.Answer -> {
                                 if (senderId != myUserId) {
                                     handleCallAnswer(eventRoomId, senderId, content)
+                                    addCallEventMessage(eventRoomId, event.id.full, senderId, event.originTimestamp, MessageType.CALL_ANSWER)
                                 }
                             }
                             is CallEventContent.Hangup -> {
                                 if (senderId != myUserId) {
                                     handleCallHangup(eventRoomId, senderId, content)
+                                    addCallEventMessage(eventRoomId, event.id.full, senderId, event.originTimestamp, MessageType.CALL_HANGUP)
                                 }
                             }
                             is CallEventContent.Candidates -> {
@@ -371,19 +377,26 @@ class MatrixManager(
                                     handleCallCandidates(eventRoomId, senderId, content)
                                 }
                             }
-                            // Manejar mensajes de texto
+                            // Manejar mensajes de texto de OTROS usuarios
+                            // (los propios aparecen via actualización optimista en sendTextMessage)
                             is RoomMessageEventContent -> {
-                                val currentMessages = _messages.value[eventRoomId] ?: emptyList()
-                                val newMessage = MatrixMessage(
-                                    id = event.id.full,
-                                    roomId = eventRoomId,
-                                    senderId = senderId,
-                                    senderDisplayName = null,
-                                    content = content.body,
-                                    timestamp = event.originTimestamp,
-                                    type = MessageType.TEXT
-                                )
-                                _messages.value = _messages.value + (eventRoomId to (currentMessages + newMessage))
+                                if (senderId != myUserId) {
+                                    val currentMessages = _messages.value[eventRoomId] ?: emptyList()
+                                    // Evitar duplicados comparando ID del evento
+                                    val alreadyExists = currentMessages.any { it.id == event.id.full }
+                                    if (!alreadyExists) {
+                                        val newMessage = MatrixMessage(
+                                            id = event.id.full,
+                                            roomId = eventRoomId,
+                                            senderId = senderId,
+                                            senderDisplayName = extractDisplayName(senderId),
+                                            content = content.body,
+                                            timestamp = event.originTimestamp,
+                                            type = MessageType.TEXT
+                                        )
+                                        _messages.value = _messages.value + (eventRoomId to (currentMessages + newMessage))
+                                    }
+                                }
                             }
                             else -> { /* Ignorar otros tipos de eventos */ }
                         }
@@ -550,11 +563,36 @@ class MatrixManager(
     }
 
     /**
-     * Enviar mensaje de texto
+     * Extrae el nombre de usuario legible de un ID Matrix completo.
+     * "@usuario:servidor.com" → "usuario"
      */
+    private fun extractDisplayName(userId: String): String {
+        return userId.substringAfter("@").substringBefore(":").takeIf { it.isNotBlank() } ?: userId
+    }
+
+    /**
+     * Enviar mensaje de texto.
+     * Añade actualización optimista inmediata para que el mensaje aparezca en la UI sin esperar el eco del servidor.
+     */
+    @OptIn(kotlin.time.ExperimentalTime::class)
     suspend fun sendTextMessage(roomId: String, message: String): Result<Unit> {
         return try {
             val client = matrixClient ?: throw Exception("Not logged in")
+            val myUserId = client.userId.full
+
+            // Actualización optimista: mostrar el mensaje enviado de inmediato
+            val tempId = "local_${kotlin.time.Clock.System.now().toEpochMilliseconds()}"
+            val optimisticMessage = MatrixMessage(
+                id = tempId,
+                roomId = roomId,
+                senderId = myUserId,
+                senderDisplayName = extractDisplayName(myUserId),
+                content = message,
+                timestamp = kotlin.time.Clock.System.now().toEpochMilliseconds(),
+                type = MessageType.TEXT
+            )
+            val currentMessages = _messages.value[roomId] ?: emptyList()
+            _messages.value = _messages.value + (roomId to (currentMessages + optimisticMessage))
 
             client.room.sendMessage(RoomId(roomId)) {
                 text(message)
@@ -728,6 +766,8 @@ class MatrixManager(
 
             // Crear answer SDP basado en la oferta remota
             val remoteSdp = call.remoteSdp ?: throw Exception("No remote SDP for answer")
+            // Inicializar WebRTC antes de crear la respuesta (necesario para peer connection)
+            webRtcManager.initialize()
             webRtcManager.prepareAudioForIncomingCall()
             val answerSdp = webRtcManager.createAnswer(remoteSdp)
 
@@ -793,6 +833,36 @@ class MatrixManager(
             log.e(TAG, { "Error hanging up: $e" })
             Result.failure(e)
         }
+    }
+
+    /**
+     * Agrega un evento de llamada como mensaje visible en el chat
+     */
+    private fun addCallEventMessage(
+        roomId: String,
+        eventId: String,
+        senderId: String,
+        timestamp: Long,
+        type: MessageType
+    ) {
+        val currentMessages = _messages.value[roomId] ?: emptyList()
+        if (currentMessages.any { it.id == eventId }) return
+        val label = when (type) {
+            MessageType.CALL_INVITE -> "Llamada entrante"
+            MessageType.CALL_ANSWER -> "Llamada respondida"
+            MessageType.CALL_HANGUP -> "Llamada finalizada"
+            else -> "Evento de llamada"
+        }
+        val callMsg = MatrixMessage(
+            id = eventId,
+            roomId = roomId,
+            senderId = senderId,
+            senderDisplayName = extractDisplayName(senderId),
+            content = label,
+            timestamp = timestamp,
+            type = type
+        )
+        _messages.value = _messages.value + (roomId to (currentMessages + callMsg))
     }
 
     /**
