@@ -313,16 +313,29 @@ class MatrixManager(
                         _rooms.value = emptyList()
                         return@collectLatest
                     }
+                    val myUserId = client.userId.full
                     val roomFlows: List<Flow<MatrixRoom?>> = roomsMap.entries.map { (roomId, roomFlow) ->
                         roomFlow.map { room ->
                             room?.let {
+                                // Resolver nombre de sala correctamente
+                                val resolvedName = resolveRoomName(
+                                    roomId = roomId.full,
+                                    explicitName = it.name?.explicitName,
+                                    isDirect = it.isDirect,
+                                    myUserId = myUserId
+                                )
+                                // Calcular ultimo mensaje y timestamp desde el cache de mensajes
+                                val roomMessages = _messages.value[roomId.full]
+                                val lastMsg = roomMessages?.lastOrNull()
                                 MatrixRoom(
                                     id = roomId.full,
-                                    name = it.name?.explicitName ?: it.name.toString().takeIf { n -> n.isNotBlank() } ?: "Sin nombre",
+                                    name = resolvedName,
                                     avatarUrl = null,
                                     isDirect = it.isDirect,
                                     isEncrypted = false,
-                                    unreadCount = 0
+                                    unreadCount = 0,
+                                    lastMessage = lastMsg?.content,
+                                    lastMessageTime = lastMsg?.timestamp
                                 )
                             }
                         }
@@ -568,6 +581,37 @@ class MatrixManager(
      */
     private fun extractDisplayName(userId: String): String {
         return userId.substringAfter("@").substringBefore(":").takeIf { it.isNotBlank() } ?: userId
+    }
+
+    /**
+     * Resuelve el nombre de una sala de forma correcta.
+     * - Salas con nombre explícito → usa ese nombre
+     * - Salas DM (isDirect=true) sin nombre → usa el displayName del otro miembro
+     * - Salas de grupo sin nombre → usa localpart del room ID
+     */
+    private fun resolveRoomName(
+        roomId: String,
+        explicitName: String?,
+        isDirect: Boolean,
+        myUserId: String
+    ): String {
+        // 1. Intentar nombre explícito (para salas con nombre configurado)
+        if (!explicitName.isNullOrBlank()) return explicitName
+
+        // 2. Para salas DM: buscar el otro miembro en mensajes recientes
+        if (isDirect) {
+            val roomMessages = _messages.value[roomId]
+            val otherSender = roomMessages
+                ?.map { it.senderId }
+                ?.firstOrNull { it != myUserId }
+            if (otherSender != null) {
+                return extractDisplayName(otherSender)
+            }
+        }
+
+        // 3. Fallback: usar el localpart del room ID (!localpart:server)
+        val localPart = roomId.substringAfter("!").substringBefore(":")
+        return localPart.takeIf { it.isNotBlank() } ?: "Sala"
     }
 
     /**
