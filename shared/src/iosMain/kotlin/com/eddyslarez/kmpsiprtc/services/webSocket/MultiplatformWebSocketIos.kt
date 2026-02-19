@@ -127,17 +127,29 @@ class IOSWebSocket(
             if (error != null) {
                 println("IOSWebSocket: Error receiving message: ${error.localizedDescription}")
 
-                // Handle error based on domain and code
                 val nsError = error as NSError
-                if (nsError.domain == "NSPOSIXErrorDomain" && nsError.code == 57L) {
-                    // Socket is not connected - señalar reconexion inmediata via onClose
-                    println("IOSWebSocket: POSIX 57 detected - socket not connected, signaling for reconnection")
+
+                // Todos los errores POSIX indican que el socket está muerto.
+                // Tratarlos como onClose para que SharedWebSocketManager active la reconexión.
+                // Sin este manejo, onError() + isConnectedFlag=true crea un bucle infinito.
+                if (nsError.domain == "NSPOSIXErrorDomain") {
+                    val code = nsError.code
+                    println("IOSWebSocket: POSIX error $code - cerrando socket para reconexion")
+
+                    // Si isConnectedFlag ya es false, significa que close() fue llamado
+                    // explicitamente (ej. forceReconnect). No disparar onClose() de nuevo
+                    // para evitar reconexiones duplicadas.
+                    if (!isConnectedFlag) {
+                        println("IOSWebSocket: POSIX $code ignorado - socket ya cerrado explicitamente")
+                        return@receiveMessageWithCompletionHandler
+                    }
+
                     dispatch_async(dispatch_get_main_queue()) {
                         isConnectedFlag = false
                         isReceivingMessages = false
                         stopPingTimer()
-                        // Usar onClose con codigo especial para que SharedWebSocketManager haga reconexion
-                        listener?.onClose(1006, "POSIX 57: Socket not connected")
+                        stopRegistrationRenewalTimer()
+                        listener?.onClose(1006, "POSIX $code: ${nsError.localizedDescription}")
                     }
                     return@receiveMessageWithCompletionHandler
                 }

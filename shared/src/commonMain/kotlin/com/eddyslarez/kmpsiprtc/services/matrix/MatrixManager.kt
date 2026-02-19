@@ -98,9 +98,10 @@ class MatrixManager(
     }
 
     /**
-     * Login con password
+     * Login con password. homeserverOverride permite cambiar el servidor sin
+     * recrear el MatrixManager (util cuando el usuario escribe su propio homeserver).
      */
-    suspend fun login(userId: String, password: String): Result<Unit> {
+    suspend fun login(userId: String, password: String, homeserverOverride: String? = null): Result<Unit> {
         return try {
             log.d { "Intentando login para el usuario: $userId" }
 
@@ -111,9 +112,11 @@ class MatrixManager(
             val mediaModule = createInMemoryMediaStoreModule()
             log.d { "Modulos de repositorios y media store creados" }
 
+            val baseUrlStr = homeserverOverride?.takeIf { it.isNotBlank() } ?: config.homeserverUrl
+
             // Crear cliente Matrix usando la API correcta
             val loginResult = MatrixClient.loginWithPassword(
-                baseUrl = Url(config.homeserverUrl),
+                baseUrl = Url(baseUrlStr),
                 identifier = IdentifierType.User(userId),
                 password = password,
                 deviceId = null,

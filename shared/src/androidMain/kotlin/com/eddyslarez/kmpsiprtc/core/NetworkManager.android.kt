@@ -5,6 +5,7 @@ import android.annotation.SuppressLint
 import android.app.Application
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
@@ -41,6 +42,8 @@ class AndroidNetworkManager() : NetworkManager {
     private var networkValidationRetries = 0
     private var connectivityListener: NetworkConnectivityListener? = null
     private val networkScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    // Tracks IP addresses of primary network to detect VPN on/off and IP changes
+    private var lastLinkAddresses: List<String> = emptyList()
 
     @SuppressLint("MissingPermission")
     override fun initialize() {
@@ -95,6 +98,20 @@ class AndroidNetworkManager() : NetworkManager {
                 networkScope.launch {
                     evaluatePrimaryNetwork(network, "onCapabilitiesChanged")
                 }
+            }
+
+            override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+                if (network != primaryNetwork || !isNetworkAvailable) return
+                // Detect IP address changes (VPN on/off assigns new IP to interface)
+                val newAddresses = linkProperties.linkAddresses
+                    .mapNotNull { it.address?.hostAddress }
+                    .filter { !it.startsWith("fe80") } // skip link-local IPv6
+                    .sorted()
+                if (newAddresses.isEmpty() || newAddresses == lastLinkAddresses) return
+                println("$TAG: IP changed on primary network (VPN?): $lastLinkAddresses → $newAddresses")
+                lastLinkAddresses = newAddresses
+                // Trigger re-registration so SIP uses new source IP
+                connectivityListener?.onNetworkRestored()
             }
         }
 
@@ -235,6 +252,15 @@ class AndroidNetworkManager() : NetworkManager {
 
         isNetworkAvailable = true
         lastNetworkChangeTime = now
+        // Capture current IP baseline so onLinkPropertiesChanged can detect future changes
+        primaryNetwork?.let { net ->
+            val lp = connectivityManager?.getLinkProperties(net)
+            lastLinkAddresses = lp?.linkAddresses
+                ?.mapNotNull { it.address?.hostAddress }
+                ?.filter { !it.startsWith("fe80") }
+                ?.sorted() ?: emptyList()
+            println("$TAG: Network available, baseline IPs: $lastLinkAddresses")
+        }
         if (wasUnavailable) connectivityListener?.onNetworkRestored()
     }
 
@@ -245,6 +271,7 @@ class AndroidNetworkManager() : NetworkManager {
 
         isNetworkAvailable = false
         lastNetworkChangeTime = now
+        lastLinkAddresses = emptyList()
         pendingValidationJob?.cancel()
         networkValidationRetries = 0
 

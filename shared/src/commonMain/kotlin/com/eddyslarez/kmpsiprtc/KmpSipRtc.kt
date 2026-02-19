@@ -22,6 +22,7 @@ import com.eddyslarez.kmpsiprtc.services.calls.CallStateManager
 import com.eddyslarez.kmpsiprtc.services.calls.MultiCallManager
 import com.eddyslarez.kmpsiprtc.services.matrix.MatrixCall
 import com.eddyslarez.kmpsiprtc.services.matrix.MatrixConfig
+import com.eddyslarez.kmpsiprtc.services.matrix.MatrixConnectionState
 import com.eddyslarez.kmpsiprtc.services.matrix.MatrixManager
 import com.eddyslarez.kmpsiprtc.services.matrix.MatrixMessage
 import com.eddyslarez.kmpsiprtc.services.matrix.MatrixRoom
@@ -2747,6 +2748,80 @@ class KmpSipRtc private constructor() {
     fun getMatrixMessagesFlow(): Flow<Map<String, List<MatrixMessage>>>? {
         checkInitialized()
         return matrixManager?.messages
+    }
+
+    /**
+     * Obtener estado de conexión Matrix como Flow observable
+     */
+    fun getMatrixConnectionStateFlow(): StateFlow<MatrixConnectionState>? {
+        checkInitialized()
+        return matrixManager?.connectionState
+    }
+
+    /**
+     * Obtener userId del usuario Matrix logueado
+     */
+    fun getMatrixUserId(): String? {
+        return matrixManager?.getUserId()
+    }
+
+    /**
+     * Iniciar llamada de voz Matrix en un room
+     */
+    fun startMatrixVoiceCall(roomId: String, onComplete: ((Result<MatrixCall>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run {
+            onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized")))
+            return
+        }
+
+        internalScope.launch {
+            val result = matrix.startVoiceCall(roomId)
+            onComplete?.invoke(result)
+        }
+    }
+
+    /**
+     * Iniciar llamada de video Matrix en un room
+     */
+    fun startMatrixVideoCall(roomId: String, onComplete: ((Result<MatrixCall>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run {
+            onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized")))
+            return
+        }
+
+        internalScope.launch {
+            val result = matrix.startVideoCall(roomId)
+            onComplete?.invoke(result)
+        }
+    }
+
+    /**
+     * Login Matrix con homeserver personalizado
+     */
+    fun loginMatrixWithServer(
+        userId: String,
+        password: String,
+        homeserverUrl: String,
+        onComplete: ((Result<Unit>) -> Unit)? = null
+    ) {
+        checkInitialized()
+        val matrix = matrixManager ?: run {
+            onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized")))
+            return
+        }
+
+        internalScope.launch {
+            val result = matrix.login(userId, password, homeserverOverride = homeserverUrl)
+            if (result.isSuccess) {
+                val accessToken = matrix.getAccessToken()
+                if (accessToken != null) {
+                    livekitCallManager?.setMatrixAccessToken(accessToken)
+                }
+            }
+            onComplete?.invoke(result)
+        }
     }
 
     ////////WEBSOCKET STATE//////

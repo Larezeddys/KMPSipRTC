@@ -145,6 +145,7 @@ class SipCoreManager private constructor(
     suspend fun initialize() {
         log.d(tag = TAG) { "Initializing SIP Core with integrated managers" }
 
+        initializeNetworkManager()
         initializeAudioManager()
         initializeReconnectionManager()
         initializeCallManager()

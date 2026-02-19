@@ -62,6 +62,8 @@ class SharedWebSocketManager(
     private val connectionMutex = Mutex()
     private var lastError: Exception? = null
     private var disconnectedSince = 0L  // Timestamp cuando se perdio conexion
+    private var lastErrorTimestamp = 0L // Para debounce de onError()
+    private var isForceReconnecting = false // Guard contra forceReconnect() concurrente
 
     // Estado de conexion observable
     private val _connectionState = MutableStateFlow(WebSocketConnectionState.DISCONNECTED)
@@ -215,18 +217,22 @@ class SharedWebSocketManager(
 
     @OptIn(ExperimentalTime::class)
     fun isWebSocketHealthy(): Boolean {
-        // Si no hay cliente o no esta conectado (ahora isConnected() refleja estado real)
+        // Si no hay cliente o no esta conectado (isConnected() refleja estado real del socket iOS)
         val socketConnected = webSocketClient?.isConnected() == true
         if (!socketConnected) return false
 
-        // Si esta en proceso de conexion, no es saludable aun
-        if (isConnecting) return false
+        // NOTA: Se elimino el check "if (isConnecting) return false" porque causaba un loop infinito:
+        // onOpen() llama reregisterOnlyFailedAccounts() antes de que connect() llegue al bloque
+        // finally donde pone isConnecting=false. El socket YA esta conectado en este punto, por lo
+        // que es seguro considerarlo saludable aunque isConnecting siga en true.
 
-        // Si nunca se recibio pong, dar un periodo de gracia de 2 intervalos de ping
-        // desde que se establecio la conexion (antes retornaba true incondicionalmente)
+        // Si nunca se recibio pong, verificar por estado de conexion o tiempo desde apertura
         if (lastPongTimestamp == 0L) {
+            // Si el socket esta conectado y el estado es CONNECTED o aun CONNECTING pero
+            // el socket ya reporta isConnected()=true, es saludable para enviar SIP
             val connectedState = _connectionState.value
-            return connectedState == WebSocketConnectionState.CONNECTED
+            return connectedState == WebSocketConnectionState.CONNECTED ||
+                    (socketConnected && connectedState == WebSocketConnectionState.CONNECTING)
         }
 
         // Cuanto tiempo paso desde el ultimo pong
@@ -237,10 +243,16 @@ class SharedWebSocketManager(
     }
 
     /**
-     * Forzar reconexion cerrando la conexion actual
+     * Forzar reconexion cerrando la conexion actual.
+     * Guard: si ya hay un forceReconnect en curso, ignorar la solicitud.
      */
     fun forceReconnect() {
+        if (isForceReconnecting) {
+            log.d(tag = TAG) { "forceReconnect ya en progreso, ignorando solicitud duplicada" }
+            return
+        }
         log.d(tag = TAG) { "Forcing WebSocket reconnection" }
+        isForceReconnecting = true
         scope.launch {
             try {
                 webSocketClient?.stopPingTimer()
@@ -249,6 +261,8 @@ class SharedWebSocketManager(
                 connect()
             } catch (e: Exception) {
                 log.e(tag = TAG) { "Error during force reconnect: ${e.message}" }
+            } finally {
+                isForceReconnecting = false
             }
         }
     }
@@ -344,6 +358,9 @@ class SharedWebSocketManager(
             override fun onClose(code: Int, reason: String) {
                 log.w(tag = TAG) { "Shared WebSocket closed: $code - $reason" }
 
+                // Reset pong timestamp para que la proxima conexion empiece limpia
+                lastPongTimestamp = 0L
+
                 // Cancelar todas las renovaciones programadas (conexion perdida)
                 cancelAllRenewals()
 
@@ -366,12 +383,19 @@ class SharedWebSocketManager(
             }
 
             override fun onError(error: Exception) {
+                // Debounce: ignorar errores repetidos dentro de 1 segundo para evitar storms
+                val now = kotlin.time.Clock.System.now().toEpochMilliseconds()
+                if (now - lastErrorTimestamp < 1000L) {
+                    return
+                }
+                lastErrorTimestamp = now
+
                 log.e(tag = TAG) { "WebSocket error: ${error.message}" }
                 lastError = error
 
                 // Registrar timestamp de desconexion
                 if (disconnectedSince == 0L) {
-                    disconnectedSince = kotlin.time.Clock.System.now().toEpochMilliseconds()
+                    disconnectedSince = now
                 }
 
                 // Marcar cuentas como fallidas
