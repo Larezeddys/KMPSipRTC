@@ -792,7 +792,11 @@ class CallManager(
             return
         }
 
-        sipCoreManager.callStartTimeMillis = kotlin.time.Clock.System.now().toEpochMilliseconds()
+        val connectTime = kotlin.time.Clock.System.now().toEpochMilliseconds()
+        sipCoreManager.callStartTimeMillis = connectTime
+
+        // Actualizar startTime al momento real de conexión (no al de creación del objeto)
+        sipCoreManager.currentAccountInfo?.currentCallData?.value?.startTime = connectTime
 
         sipCoreManager.currentAccountInfo?.currentCallData?.let { callData ->
             CallStateManager.streamsRunning(callData.value?.callId ?: generateId())

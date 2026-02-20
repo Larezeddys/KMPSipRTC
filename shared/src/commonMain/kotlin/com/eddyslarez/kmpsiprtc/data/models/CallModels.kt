@@ -40,7 +40,7 @@ data class CallData @OptIn(ExperimentalTime::class) constructor(
     val from: String = "",
     val to: String = "",
     val direction: CallDirections = CallDirections.OUTGOING,
-    val startTime: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
+    var startTime: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
     val callType: CallType = CallType.SIP_EXTERNAL,
     val roomId: String? = null,
     var toTag: String? = null,

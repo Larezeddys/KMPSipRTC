@@ -51,6 +51,7 @@ import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 import com.eddyslarez.kmpsiprtc.services.audio.createAudioManager
 import com.eddyslarez.kmpsiprtc.services.calls.CallLifecycleManager
 import com.eddyslarez.kmpsiprtc.services.pushMode.PushModeManager
+import kotlin.concurrent.Volatile
 import kotlin.time.ExperimentalTime
 
 class SipCoreManager private constructor(
@@ -1924,8 +1925,7 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
         }
 
         if (!accountInfo.isRegistered.value) {
-            log.w(tag = TAG) { "Account not registered, cannot switch to push mode: $accountKey" }
-            return
+            log.w(tag = TAG) { "Account not registered at push mode switch, sending register anyway: $accountKey" }
         }
 
         log.d(tag = TAG) { "Switching account to push mode: $accountKey" }
