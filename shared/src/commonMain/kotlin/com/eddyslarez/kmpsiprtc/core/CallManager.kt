@@ -473,6 +473,9 @@ class CallManager(
                 messageHandler.sendInviteOkResponse(accountInfo, callData)
 
                 // PASO 6: Actualizar estado a CONNECTED
+                // Detener ringtone ANTES de notificar (safety net para race conditions
+                // donde el ringtone arrancó después del stopAllRingtones() inicial).
+                audioManager.stopAllRingtones()
                 CallStateManager.callConnected(callData.callId, 200)
                 sipCoreManager.notifyCallStateChanged(CallState.CONNECTED)
 

@@ -616,7 +616,13 @@ class KmpSipRtc private constructor() {
 
                     callInfo?.let { info ->
                         when (stateInfo.state) {
-                            CallState.CONNECTED -> notifyCallConnected(info)
+                            CallState.CONNECTED -> {
+                                // Safety net: detener cualquier ringtone que haya quedado activo
+                                // (race condition en cold start donde el ringtone arranca 300ms
+                                // después del INVITE, pudiendo superar al stopAllRingtones del answer).
+                                sipCoreManager?.audioManager?.stopAllRingtones()
+                                notifyCallConnected(info)
+                            }
                             CallState.OUTGOING_RINGING -> notifyCallRinging(info)
                             CallState.OUTGOING_INIT -> notifyCallInitiated(info)
                             CallState.INCOMING_RECEIVED -> handleIncomingCall()

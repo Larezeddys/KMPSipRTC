@@ -580,15 +580,20 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 delay(200)
                 // No reproducir ringtone si:
                 // 1) Viene de push (CallKit ya puso el ringtone del sistema), O
-                // 2) La app está en background (incluye arranque en frío: isIncomingPushCallPending
-                //    puede ser false porque SipCoreManager se acaba de crear, pero CallKit ya
-                //    gestiona el audio).
+                // 2) La app está en background (incluye arranque en frío), O
+                // 3) La llamada ya fue contestada (race condition: el usuario acepta antes
+                //    de que este coroutine llegue aquí, 300ms después del INVITE).
+                //    Esto cubre el caso donde el usuario acepta desde la pantalla bloqueada
+                //    (CallKit) y la app conecta antes de que expire este delay.
+                val callState = CallStateManager.getCurrentState()
                 val shouldPlayRingtone = !sipCoreManager.isIncomingPushCallPending &&
-                        !sipCoreManager.isAppInBackground
+                        !sipCoreManager.isAppInBackground &&
+                        !callState.isConnected() &&
+                        callState.state != com.eddyslarez.kmpsiprtc.data.models.CallState.ENDED
                 if (shouldPlayRingtone) {
                     sipCoreManager.audioManager.playIncomingRingtone(syncVibration = true)
                 } else {
-                    log.d(tag = TAG) { "Skipping in-app ringtone (fromPush=${sipCoreManager.isIncomingPushCallPending}, background=${sipCoreManager.isAppInBackground})" }
+                    log.d(tag = TAG) { "Skipping in-app ringtone (fromPush=${sipCoreManager.isIncomingPushCallPending}, background=${sipCoreManager.isAppInBackground}, callState=${callState.state})" }
                 }
             }
 
