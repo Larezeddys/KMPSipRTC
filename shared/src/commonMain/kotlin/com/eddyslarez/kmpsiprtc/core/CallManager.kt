@@ -433,6 +433,9 @@ class CallManager(
 
         log.d(tag = TAG) { "Accepting SIP call: ${callData.callId}" }
 
+        // Marcar ANTES de stopAllRingtones para que el coroutine de handleInviteRequest
+        // (que tiene delay(300ms)) no reproduzca el ringtone después del stop.
+        sipCoreManager.isCallBeingAnswered = true
         audioManager.stopAllRingtones()
 
         scope.launch {
@@ -475,6 +478,7 @@ class CallManager(
                 // PASO 6: Actualizar estado a CONNECTED
                 // Detener ringtone ANTES de notificar (safety net para race conditions
                 // donde el ringtone arrancó después del stopAllRingtones() inicial).
+                sipCoreManager.isCallBeingAnswered = false
                 audioManager.stopAllRingtones()
                 CallStateManager.callConnected(callData.callId, 200)
                 sipCoreManager.notifyCallStateChanged(CallState.CONNECTED)
@@ -495,6 +499,7 @@ class CallManager(
             } catch (e: Exception) {
                 log.e(tag = TAG) { "Error accepting SIP call: ${e.message}" }
                 log.e(tag = TAG) { e.stackTraceToString() }
+                sipCoreManager.isCallBeingAnswered = false
 
                 CallStateManager.callError(
                     callData.callId,

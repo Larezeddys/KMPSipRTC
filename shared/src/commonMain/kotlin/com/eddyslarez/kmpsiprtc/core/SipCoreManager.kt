@@ -102,6 +102,12 @@ class SipCoreManager private constructor(
     // Se limpia cuando termina la llamada.
     var isIncomingPushCallPending: Boolean = false
 
+    // Flag que indica que acceptCall() ya fue invocado y está en progreso.
+    // Se usa para evitar que el coroutine de handleInviteRequest() (300ms delay)
+    // reproduzca el ringtone cuando la llamada ya está siendo contestada.
+    @Volatile
+    var isCallBeingAnswered: Boolean = false
+
     // Sincronización de cuentas con BD
     private var accountSyncJob: Job? = null
     private val accountSyncMutex = Mutex()

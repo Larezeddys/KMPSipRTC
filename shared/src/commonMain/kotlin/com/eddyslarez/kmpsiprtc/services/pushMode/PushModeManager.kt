@@ -387,23 +387,22 @@ class PushModeManager(
 
                 // Si estabamos en modo push antes de la llamada y esta configurado para volver
                 if (wasInPush && config.returnToPushAfterCallEnd) {
-                    if (!isAppInBackground) {
-                        // App en primer plano: cambiar a FOREGROUND en lugar de volver a PUSH
-                        log.d(tag = TAG1) { "App in foreground after push call - switching to FOREGROUND for $accountKey" }
-                        transitionSpecificAccountToForeground(accountKey, PushModeReasons.APP_FOREGROUNDED)
-                        cleanupAccountState(accountKey)
-                    } else {
-                        // App en segundo plano/bloqueada: volver a PUSH
-                        log.d(tag = TAG1) { "Scheduling return to push mode for account: $accountKey" }
+                    // Siempre volver a PUSH, independientemente de isAppInBackground.
+                    // Cuando el usuario acepta una llamada de CallKit desde la pantalla bloqueada,
+                    // iOS dispara UIApplicationDidBecomeActive → isAppInBackground=false, pero
+                    // el dispositivo sigue bloqueado. Si en ese caso se cambia a FOREGROUND,
+                    // el servidor pierde el binding push y la siguiente llamada no llega.
+                    // Si el usuario abre la app genuinamente, onAppForegrounded() cambiará
+                    // a FOREGROUND en el momento apropiado.
+                    log.d(tag = TAG1) { "Scheduling return to PUSH for $accountKey (wasInPush=true, isBackground=$isAppInBackground)" }
 
-                        // Marcar como pendiente ANTES de programar
-                        pendingReturns.add(accountKey)
+                    // Marcar como pendiente ANTES de programar
+                    pendingReturns.add(accountKey)
 
-                        // Cancelar job anterior ANTES de crear nuevo
-                        callEndTransitionJobs[accountKey]?.cancel()
+                    // Cancelar job anterior ANTES de crear nuevo
+                    callEndTransitionJobs[accountKey]?.cancel()
 
-                        scheduleReturnToPushForSpecificAccount(accountKey)
-                    }
+                    scheduleReturnToPushForSpecificAccount(accountKey)
                 } else {
                     log.d(tag = TAG1) { "Not returning to push mode - wasInPushBeforeCall: $wasInPush, returnToPushAfterCallEnd: ${config.returnToPushAfterCallEnd}" }
 

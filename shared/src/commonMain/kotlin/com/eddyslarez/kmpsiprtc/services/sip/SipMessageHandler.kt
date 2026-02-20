@@ -588,12 +588,13 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 val callState = CallStateManager.getCurrentState()
                 val shouldPlayRingtone = !sipCoreManager.isIncomingPushCallPending &&
                         !sipCoreManager.isAppInBackground &&
+                        !sipCoreManager.isCallBeingAnswered &&
                         !callState.isConnected() &&
                         callState.state != com.eddyslarez.kmpsiprtc.data.models.CallState.ENDED
                 if (shouldPlayRingtone) {
                     sipCoreManager.audioManager.playIncomingRingtone(syncVibration = true)
                 } else {
-                    log.d(tag = TAG) { "Skipping in-app ringtone (fromPush=${sipCoreManager.isIncomingPushCallPending}, background=${sipCoreManager.isAppInBackground}, callState=${callState.state})" }
+                    log.d(tag = TAG) { "Skipping in-app ringtone (fromPush=${sipCoreManager.isIncomingPushCallPending}, background=${sipCoreManager.isAppInBackground}, beingAnswered=${sipCoreManager.isCallBeingAnswered}, callState=${callState.state})" }
                 }
             }
 
