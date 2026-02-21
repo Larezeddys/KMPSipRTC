@@ -3,6 +3,7 @@ package com.eddyslarez.kmpsiprtc.services.sip
 import com.eddyslarez.kmpsiprtc.core.SipCoreManager
 import com.eddyslarez.kmpsiprtc.data.models.AccountInfo
 import com.eddyslarez.kmpsiprtc.data.models.CallData
+import com.eddyslarez.kmpsiprtc.data.models.CallDataNormalizer
 import com.eddyslarez.kmpsiprtc.data.models.CallDirections
 import com.eddyslarez.kmpsiprtc.data.models.CallErrorReason
 import com.eddyslarez.kmpsiprtc.data.models.CallState
@@ -520,9 +521,11 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             val viaHeader = SipMessageParser.extractHeader(lines, "Via")
             val contactHeader = SipMessageParser.extractHeader(lines, "Contact")
             val cseqHeader = SipMessageParser.extractHeader(lines, "CSeq")
+            val paiHeader = SipMessageParser.extractHeader(lines, "P-Asserted-Identity")
 
             // === PARSEAR CAMPOS ===
             val fromUri = SipMessageParser.extractUriFromHeader(fromHeader)
+            val toUri = SipMessageParser.extractUriFromHeader(toHeader)
             val fromUser = SipMessageParser.extractUserFromUri(fromUri)
             val fromTag = SipMessageParser.extractTag(fromHeader)
             val displayName = SipMessageParser.extractDisplayName(fromHeader)
@@ -546,7 +549,10 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 remoteSdp = remoteSdp, // [OK] Asignar inmediatamente
                 localSdp = "",
                 via = viaHeader,
-                originalInviteMessage = fullMessage
+                originalInviteMessage = fullMessage,
+                assertedIdentity = paiHeader.takeIf { it.isNotBlank() },
+                rawToUri = toUri.takeIf { it.isNotBlank() },
+                rawFromUri = fromUri.takeIf { it.isNotBlank() }
             )
 
             // Extraer CSeq
@@ -555,26 +561,29 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 callData.lastCSeqValue = cseqParts[0].toIntOrNull() ?: 1
             }
 
+            // Normalizar para callbacks (To con .invalid / transport=ws)
+            val normalizedCallData = CallDataNormalizer.normalize(callData)
+
             // [OK] GUARDAR EN UN SOLO LUGAR
-            accountInfo.currentCallData.value = callData
+            accountInfo.currentCallData.value = normalizedCallData
 
             // [OK] AGREGAR A MULTICALL MANAGER UNA SOLA VEZ
-            MultiCallManager.addCall(callData)
+            MultiCallManager.addCall(normalizedCallData)
 
             // Actualizar CSeq si corresponde
             SipMessageParser.updateCSeqIfPresent(lines, accountInfo)
 
             // === CAMBIO DE ESTADO ===
-            CallStateManager.incomingCallReceived(callData.callId, fromUser)
+            CallStateManager.incomingCallReceived(normalizedCallData.callId, normalizedCallData.from)
             sipCoreManager.notifyCallStateChanged(CallState.INCOMING_RECEIVED)
 
             // === ENVIAR RESPUESTAS SIP ===
-            val tryingResponse = SipMessageBuilder.buildTryingResponse(accountInfo, callData)
+            val tryingResponse = SipMessageBuilder.buildTryingResponse(accountInfo, normalizedCallData)
             sendViaSharedWebSocket(tryingResponse)
 
             scope.launch {
                 delay(100)
-                val ringingResponse = SipMessageBuilder.buildRingingResponse(accountInfo, callData)
+                val ringingResponse = SipMessageBuilder.buildRingingResponse(accountInfo, normalizedCallData)
                 sendViaSharedWebSocket(ringingResponse)
 
                 delay(200)
