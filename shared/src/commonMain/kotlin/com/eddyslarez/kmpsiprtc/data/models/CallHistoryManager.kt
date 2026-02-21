@@ -103,8 +103,18 @@ class CallHistoryManager(
         scope.launch {
             processingMutex.withLock {
                 try {
-                    val callId = callData.callId
-                    val startTime = callData.startTime ?: kotlin.time.Clock.System.now().toEpochMilliseconds()
+                    // Defensa: normalizar por si llega CallData sin pasar por SipMessageHandler
+                    val safeCallData = CallDataNormalizer.normalize(callData)
+
+                    if (safeCallData.isCallback) {
+                        log.d(TAG) {
+                            "[CALLBACK] Callback call detected: ${safeCallData.callId} | " +
+                            "from=${safeCallData.from} | type=$callType"
+                        }
+                    }
+
+                    val callId = safeCallData.callId
+                    val startTime = safeCallData.startTime ?: kotlin.time.Clock.System.now().toEpochMilliseconds()
                     val finalEndTime = endTime ?: kotlin.time.Clock.System.now().toEpochMilliseconds()
 
                     // Calcular duración solo para llamadas exitosas
@@ -119,19 +129,19 @@ class CallHistoryManager(
                     // Crear CallLog
                     val callLog = CallLog(
                         id = callId,
-                        direction = callData.direction,
-                        to = callData.to,
-                        formattedTo = formatPhoneNumber(callData.to),
-                        from = callData.from ?: callData.getLocalParty(),
-                        formattedFrom = formatPhoneNumber(callData.from ?: callData.getLocalParty()),
+                        direction = safeCallData.direction,
+                        to = safeCallData.to,
+                        formattedTo = formatPhoneNumber(safeCallData.to),
+                        from = safeCallData.from ?: safeCallData.getLocalParty(),
+                        formattedFrom = formatPhoneNumber(safeCallData.from ?: safeCallData.getLocalParty()),
                         contact = null,
                         formattedStartDate = formatStartDate(startTime),
                         duration = duration,
                         callType = callType,
-                        localAddress = callData.getLocalParty()
+                        localAddress = safeCallData.getLocalParty()
                     )
 
-                    log.d(TAG) { "[CALL] Adding call log: $callId | $callType | ${duration}s | ${callData.direction}" }
+                    log.d(TAG) { "[CALL] Adding call log: $callId | $callType | ${duration}s | ${safeCallData.direction}" }
 
                     // [OK] Verificar si ya existe
                     val existingIndex = _callLogs.indexOfFirst { it.id == callId }
@@ -159,7 +169,7 @@ class CallHistoryManager(
                     _callLogsFlow.value = _callLogs.toList()
 
                     // Persistir en BD
-                    saveCallLogToDatabase(callLog, callData, startTime, finalEndTime)
+                    saveCallLogToDatabase(callLog, safeCallData, startTime, finalEndTime)
 
                     // Mantener límite
                     if (_callLogs.size > RECENT_CALLS_LIMIT) {

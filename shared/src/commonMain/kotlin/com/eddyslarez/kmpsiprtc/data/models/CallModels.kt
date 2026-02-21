@@ -60,6 +60,10 @@ data class CallData @OptIn(ExperimentalTime::class) constructor(
     var lastCSeqValue: Int = 0,
     var sipName: String = "",
     val md5Hash: String = "",
+    var isCallback: Boolean = false,
+    var assertedIdentity: String? = null,  // Valor del header P-Asserted-Identity
+    var rawToUri: String? = null,           // To URI original (.invalid) para debugging
+    var rawFromUri: String? = null          // From URI original completo
 ) {
     fun storeInviteMessage(message: String) {
         originalInviteMessage = message
