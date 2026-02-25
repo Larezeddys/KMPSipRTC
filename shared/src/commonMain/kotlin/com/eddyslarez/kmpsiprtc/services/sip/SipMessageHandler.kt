@@ -623,6 +623,11 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             accountInfo.currentCallData.value?.let { callData ->
                 log.d(tag = TAG) { "Processing BYE for call: ${callData.callId}" }
 
+                // Registrar en historial ANTES de cambiar el estado a ENDED.
+                // handleWebRtcClosed() no puede hacerlo porque para cuando se dispara,
+                // el estado ya es ENDED y wasConnected = false.
+                sipCoreManager.callManager?.registerRemoteHangup(callData)
+
                 // Actualizar estado
                 CallStateManager.callEnded(callData.callId, sipReason = "Remote hangup")
                 sipCoreManager.notifyCallStateChanged(CallState.ENDED)

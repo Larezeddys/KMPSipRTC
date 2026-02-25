@@ -106,12 +106,27 @@ class CallHistoryManager(
                     // Defensa: normalizar por si llega CallData sin pasar por SipMessageHandler
                     val safeCallData = CallDataNormalizer.normalize(callData)
 
-                    if (safeCallData.isCallback) {
+                    // Un callback es técnicamente INCOMING en SIP, pero el usuario lo
+                    // inició, por lo que debe aparecer como OUTGOING en el historial.
+                    // Tras la normalización: safeCallData.from = número real del destino.
+                    val isCallback = safeCallData.isCallback
+                    if (isCallback) {
                         log.d(TAG) {
                             "[CALLBACK] Callback call detected: ${safeCallData.callId} | " +
-                            "from=${safeCallData.from} | type=$callType"
+                            "from=${safeCallData.from} | type=$callType → forzando OUTGOING"
                         }
                     }
+
+                    val effectiveDirection = if (isCallback) CallDirections.OUTGOING else safeCallData.direction
+                    // Para callback: to = número real (estaba en 'from'), from = cuenta local
+                    val effectiveTo = if (isCallback)
+                        safeCallData.from.ifEmpty { safeCallData.getRemoteParty() }
+                    else
+                        safeCallData.to
+                    val effectiveFrom = if (isCallback)
+                        safeCallData.getLocalParty()
+                    else
+                        safeCallData.from ?: safeCallData.getLocalParty()
 
                     val callId = safeCallData.callId
                     val startTime = safeCallData.startTime ?: kotlin.time.Clock.System.now().toEpochMilliseconds()
@@ -129,11 +144,11 @@ class CallHistoryManager(
                     // Crear CallLog
                     val callLog = CallLog(
                         id = callId,
-                        direction = safeCallData.direction,
-                        to = safeCallData.to,
-                        formattedTo = formatPhoneNumber(safeCallData.to),
-                        from = safeCallData.from ?: safeCallData.getLocalParty(),
-                        formattedFrom = formatPhoneNumber(safeCallData.from ?: safeCallData.getLocalParty()),
+                        direction = effectiveDirection,
+                        to = effectiveTo,
+                        formattedTo = formatPhoneNumber(effectiveTo),
+                        from = effectiveFrom,
+                        formattedFrom = formatPhoneNumber(effectiveFrom),
                         contact = null,
                         formattedStartDate = formatStartDate(startTime),
                         duration = duration,
@@ -141,7 +156,7 @@ class CallHistoryManager(
                         localAddress = safeCallData.getLocalParty()
                     )
 
-                    log.d(TAG) { "[CALL] Adding call log: $callId | $callType | ${duration}s | ${safeCallData.direction}" }
+                    log.d(TAG) { "[CALL] Adding call log: $callId | $callType | ${duration}s | $effectiveDirection" }
 
                     // [OK] Verificar si ya existe
                     val existingIndex = _callLogs.indexOfFirst { it.id == callId }
@@ -168,8 +183,16 @@ class CallHistoryManager(
                     // Actualizar Flow
                     _callLogsFlow.value = _callLogs.toList()
 
-                    // Persistir en BD
-                    saveCallLogToDatabase(callLog, safeCallData, startTime, finalEndTime)
+                    // Persistir en BD con los datos corregidos para que la dirección
+                    // quede correcta también al releer desde la base de datos.
+                    val callDataForDb = if (isCallback)
+                        safeCallData.copy(
+                            direction = CallDirections.OUTGOING,
+                            to = effectiveTo,
+                            from = effectiveFrom
+                        )
+                    else safeCallData
+                    saveCallLogToDatabase(callLog, callDataForDb, startTime, finalEndTime)
 
                     // Mantener límite
                     if (_callLogs.size > RECENT_CALLS_LIMIT) {

@@ -84,6 +84,16 @@ class CallManager(
     }
 
     /**
+     * Registra una llamada conectada que fue cortada por el extremo remoto (BYE remoto).
+     * Se llama desde SipMessageHandler ANTES de marcar el estado como ENDED, para evitar
+     * que handleWebRtcClosed() omita el registro porque el estado ya es ENDED.
+     */
+    fun registerRemoteHangup(callData: CallData) {
+        log.d(TAG) { "Registering remote hangup for call: ${callData.callId}" }
+        registerCallInHistory(callData, CallState.STREAMS_RUNNING)
+    }
+
+    /**
      * Determinar tipo de llamada con logica precisa
      */
     private fun determineCallType(callData: CallData, finalState: CallState): CallTypes {
