@@ -1233,7 +1233,7 @@ class SipCoreManager private constructor(
     }
 
     // Métodos de llamadas (delegados a CallManager)
-    fun makeCall(phoneNumber: String, sipName: String, domain: String) {
+    fun makeCall(phoneNumber: String, sipName: String, domain: String, recordCall: Boolean = false) {
         val accountKey = "$sipName@$domain"
         val accountInfo = activeAccounts[accountKey] ?: run {
             log.e(tag = TAG) { "Account not found: $accountKey" }
@@ -1242,11 +1242,11 @@ class SipCoreManager private constructor(
         }
 
         currentAccountInfo = accountInfo
-        callManager?.makeCall(phoneNumber, accountInfo)
+        callManager?.makeCall(phoneNumber, accountInfo, recordCall = recordCall)
     }
 
     fun endCall(callId: String? = null) = callManager?.endCall(callId)
-    fun acceptCall(callId: String? = null) = callManager?.acceptCall(callId)
+    fun acceptCall(callId: String? = null, recordCall: Boolean = false) = callManager?.acceptCall(callId, recordCall)
     fun declineCall(callId: String? = null) = callManager?.declineCall(callId)
     fun rejectCall(callId: String? = null) = callManager?.declineCall(callId)
     fun holdCall(callId: String? = null) = callManager?.holdCall(callId)

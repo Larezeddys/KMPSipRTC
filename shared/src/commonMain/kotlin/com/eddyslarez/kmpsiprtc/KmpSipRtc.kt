@@ -1355,6 +1355,7 @@ class KmpSipRtc private constructor() {
      */
     fun makeCall(
         phoneNumber: String,
+        recordCall: Boolean = false,
         username: String? = null,
         domain: String? = null
     ) {
@@ -1370,8 +1371,8 @@ class KmpSipRtc private constructor() {
             throw SipLibraryException("No domain available for making call")
         }
 
-        log.d(tag = TAG) { "Making call to $phoneNumber from $finalUsername@$finalDomain" }
-        sipCoreManager?.makeCall(phoneNumber, finalUsername, finalDomain)
+        log.d(tag = TAG) { "Making call to $phoneNumber from $finalUsername@$finalDomain (record=$recordCall)" }
+        sipCoreManager?.makeCall(phoneNumber, finalUsername, finalDomain, recordCall)
     }
 
     /**
@@ -2192,15 +2193,15 @@ class KmpSipRtc private constructor() {
      * @throws SipLibraryException si la libreria no esta inicializada
      * @throws IllegalArgumentException si no se encuentra la llamada
      */
-    fun acceptCallById(callId: String) {
+    fun acceptCallById(callId: String, recordCall: Boolean = false) {
         checkInitialized()
         val call = MultiCallManager.getCall(callId)
         if (call == null) {
             log.w(tag = TAG) { "Call not found: $callId" }
             throw IllegalArgumentException("Call not found: $callId")
         }
-        log.d(tag = TAG) { "Accepting call by ID: $callId" }
-        sipCoreManager?.acceptCall(callId)
+        log.d(tag = TAG) { "Accepting call by ID: $callId (record=$recordCall)" }
+        sipCoreManager?.acceptCall(callId, recordCall)
     }
 
     /** Acepta la unica llamada activa. Lanza si hay 0 o mas de 1 llamada. */
