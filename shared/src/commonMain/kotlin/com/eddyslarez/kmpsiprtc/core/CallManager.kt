@@ -31,6 +31,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlin.concurrent.Volatile
 import kotlin.time.ExperimentalTime
 
 class CallManager(
@@ -51,7 +52,8 @@ class CallManager(
     // Flag para suprimir handleWebRtcClosed/Connected durante recreación intencional
     // de PeerConnection (multi-llamada). Sin esto, el evento CLOSED dispara el registro
     // de la llamada entrante como MISSED antes de que se pueda contestar.
-    @Volatile private var isResettingPeerConnection = false
+    @Volatile
+    private var isResettingPeerConnection = false
 
     // Conjunto de callIds cuya PeerConnection fue cerrada al aceptar otra llamada en multi-línea.
     // Cuando se reanude una de estas llamadas, hay que recrear la PC aunque no haya otras llamadas
@@ -755,6 +757,18 @@ class CallManager(
 
                 val resumeSdp: String
                 if (needsPCRecreation) {
+                    // Al cerrar la PC compartida, todas las demás llamadas activas/pausadas
+                    // también quedan sin PC válida. Registrarlas para que su próximo resume
+                    // también recree la PC (caso auto-resume tras BYE remoto de la llamada activa).
+                    val otherCalls = MultiCallManager.getActiveCalls()
+                        .filter { it.callId != targetCallData.callId }
+                    if (otherCalls.isNotEmpty()) {
+                        resetPCMutex.withLock {
+                            otherCalls.forEach { callsWithResetPC.add(it.callId) }
+                        }
+                        log.d(tag = TAG) { "PC cerrada: registrando ${otherCalls.size} llamada(s) para recreación futura: ${otherCalls.map { it.callId }}" }
+                    }
+
                     log.d(tag = TAG) { "Recreando PeerConnection para resumir ${targetCallData.callId} (hasOtherCalls=$hasOtherCalls, pcWasReset=$pcWasReset)" }
                     // Suprimir handleWebRtcClosed durante el cierre intencional de la PC
                     isResettingPeerConnection = true
