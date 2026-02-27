@@ -78,7 +78,22 @@ class DesktopPeerConnectionController(
     fun createNewPeerConnection() {
         log.d(TAG) { "Creating new PeerConnection" }
 
+        // Limpiar recursos del PeerConnection anterior antes de crear uno nuevo.
+        // Evita acumulación de audio tracks al cambiar entre llamadas múltiples veces.
+        try {
+            peerConnection?.senders?.forEach { sender ->
+                try { peerConnection?.removeTrack(sender) } catch (_: Throwable) {}
+            }
+        } catch (_: Throwable) {}
         peerConnection?.close()
+        peerConnection = null
+
+        // Disponer el audio track anterior para liberar recursos del ADM
+        try {
+            localAudioTrack?.setEnabled(false)
+            localAudioTrack?.dispose()
+        } catch (_: Throwable) {}
+        localAudioTrack = null
 
         val factory = peerConnectionFactory
             ?: throw IllegalStateException("Factory not initialized")

@@ -40,11 +40,18 @@ class CallManager(
     private val messageHandler: SipMessageHandler
 ) {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val callHoldManager = CallHoldManager(webRtcManager)
+    // Un CallHoldManager por llamada para soportar multi-línea correctamente
+    private val callHoldManagers = mutableMapOf<String, CallHoldManager>()
+    private val holdManagersMutex = Mutex()
     private val dtmfQueue = mutableListOf<DtmfRequest>()
     private var isDtmfProcessing = false
     private val dtmfMutex = Mutex()
     private var matrixManager: MatrixManager? = null
+
+    // Flag para suprimir handleWebRtcClosed/Connected durante recreación intencional
+    // de PeerConnection (multi-llamada). Sin esto, el evento CLOSED dispara el registro
+    // de la llamada entrante como MISSED antes de que se pueda contestar.
+    @Volatile private var isResettingPeerConnection = false
 
     fun setMatrixManager(manager: MatrixManager) {
         this.matrixManager = manager
@@ -274,14 +281,16 @@ class CallManager(
             return
         }
 
-        val callState = CallStateManager.getCurrentState()
+        // Usar estado específico de la llamada (no el global) para soportar multi-línea
+        val perCallState = MultiCallManager.getCallState(callData.callId)?.state
+            ?: CallStateManager.getCurrentState().state
 
-        if (!callState.isActive()) {
-            log.w(tag = TAG) { "No active call to end" }
+        if (perCallState == CallState.IDLE || perCallState == CallState.ENDED || perCallState == CallState.ERROR) {
+            log.w(tag = TAG) { "Call ${callData.callId} already ended, state: $perCallState" }
             return
         }
 
-        val currentState = callState.state
+        val currentState = perCallState
         log.d(tag = TAG) { "Ending SIP call: ${callData.callId}, state: $currentState" }
 
         audioManager.stopAllRingtones()
@@ -291,60 +300,74 @@ class CallManager(
         scope.launch {
             try {
                 when (currentState) {
-                    CallState.CONNECTED, CallState.STREAMS_RUNNING, CallState.PAUSED -> {
+                    CallState.CONNECTED, CallState.STREAMS_RUNNING,
+                    CallState.PAUSED, CallState.PAUSING, CallState.RESUMING -> {
                         log.d(tag = TAG) { "Sending BYE" }
                         messageHandler.sendBye(accountInfo, callData)
-                        // Registrar como exitosa
                         registerCallInHistory(callData, CallState.STREAMS_RUNNING)
                     }
 
                     CallState.OUTGOING_INIT, CallState.OUTGOING_PROGRESS, CallState.OUTGOING_RINGING -> {
                         log.d(tag = TAG) { "Sending CANCEL" }
                         messageHandler.sendCancel(accountInfo, callData)
-                        // Registrar como abortada
                         registerCallInHistory(callData, currentState)
                     }
 
                     CallState.INCOMING_RECEIVED -> {
                         log.d(tag = TAG) { "Sending DECLINE" }
                         messageHandler.sendDeclineResponse(accountInfo, callData)
-                        // Registrar como perdida (no contestada)
                         registerCallInHistory(callData, CallState.INCOMING_RECEIVED)
                     }
 
                     else -> {
                         messageHandler.sendBye(accountInfo, callData)
-                        // Registrar con estado actual
                         registerCallInHistory(callData, currentState)
                     }
                 }
 
-                // Detener grabacion si estaba activa
+                // Limpiar hold manager de esta llamada específica
+                holdManagersMutex.withLock { callHoldManagers.remove(callData.callId) }
+
+                // Detener grabación solo si es esta llamada la que grababa
                 if (webRtcManager.isRecordingCall()) {
                     log.d(TAG) { "Stopping recording for call ${callData.callId}" }
                     val result = webRtcManager.stopCallRecording()
                     result?.mixedFile?.let { file ->
-                        log.d(TAG) { "Saved mixed recording: ${file}" }
+                        log.d(TAG) { "Saved mixed recording: $file" }
                         saveRecordingMetadata(callData.callId, file)
                     }
                 }
 
                 delay(500)
-                audioManager.dispose()
-
-                delay(500)
                 CallStateManager.callEnded(callData.callId)
-                sipCoreManager.notifyCallStateChanged(CallState.ENDED)
 
-                accountInfo.resetCallState()
-                sipCoreManager.handleCallTermination()
+                // Verificar si quedan llamadas activas DESPUÉS de marcar esta como terminada
+                val remainingCalls = MultiCallManager.getActiveCalls()
+                    .filter { it.callId != callData.callId }
 
-                log.d(tag = TAG) { "Call cleanup completed" }
+                if (remainingCalls.isEmpty()) {
+                    // Última llamada: liberar todos los recursos de audio/WebRTC y notificar UI
+                    log.d(tag = TAG) { "Last call ended, disposing audio resources" }
+                    delay(500)
+                    audioManager.dispose()
+                    sipCoreManager.notifyCallStateChanged(CallState.ENDED)
+                    accountInfo.resetCallState()
+                    sipCoreManager.handleCallTermination()
+                } else {
+                    // Quedan otras llamadas activas: NO disponer audio/PeerConnection
+                    log.d(tag = TAG) { "Still ${remainingCalls.size} call(s) active, keeping audio alive" }
+                    sipCoreManager.notifyCallStateChanged(CallState.ENDED)
+                    // Notificar solo el cambio de esta llamada, sin cerrar la UI
+                }
+
+                log.d(tag = TAG) { "Call cleanup completed for ${callData.callId}" }
 
             } catch (e: Exception) {
                 log.e(tag = TAG) { "Error during cleanup: ${e.message}" }
                 audioManager.stopAllRingtones()
-                accountInfo.resetCallState()
+                if (MultiCallManager.getActiveCalls().none { it.callId != callData.callId }) {
+                    accountInfo.resetCallState()
+                }
             }
         }
     }
@@ -420,10 +443,12 @@ class CallManager(
             return
         }
 
-        val callState = CallStateManager.getCurrentState()
-
-        if (callState.state != CallState.INCOMING_RECEIVED) {
-            log.w(tag = TAG) { "Cannot accept - invalid state: ${callState.state}" }
+        // Usar estado PER-LLAMADA (no el estado global) para soportar multi-línea.
+        // El estado global puede estar en PAUSING/PAUSED (por el hold de otra llamada)
+        // mientras que esta llamada específica sigue en INCOMING_RECEIVED.
+        val perCallState = MultiCallManager.getCallState(callData.callId)?.state
+        if (perCallState != CallState.INCOMING_RECEIVED) {
+            log.w(tag = TAG) { "Cannot accept - estado inválido para llamada ${callData.callId}: $perCallState" }
             return
         }
 
@@ -469,7 +494,26 @@ class CallManager(
                 // Delay para que audio session se estabilice
                 delay(500)
 
-                // PASO 3: Crear Answer SDP
+                // PASO 2.5: En multi-línea, la PeerConnection activa pertenece a otra llamada
+                // (call1 en hold) y tiene ICE candidatos distintos al endpoint de media de call2.
+                // Cerrarla garantiza que createAnswer crea una PeerConnection limpia para call2,
+                // evitando la pérdida de audio causada por re-negociación ICE fallida.
+                val hasOtherActiveCalls = MultiCallManager.getActiveCalls()
+                    .any { it.callId != callData.callId }
+                if (hasOtherActiveCalls) {
+                    log.d(tag = TAG) { "Multi-llamada: reiniciando PeerConnection para ${callData.callId}" }
+                    // Suprimir handleWebRtcClosed durante el cierre intencional para que
+                    // call2 no quede registrada como MISSED antes de conectarse.
+                    isResettingPeerConnection = true
+                    try {
+                        webRtcManager.closePeerConnection()
+                        delay(300)
+                    } finally {
+                        isResettingPeerConnection = false
+                    }
+                }
+
+                // PASO 3: Crear Answer SDP (con PeerConnection limpia para multi-llamada)
                 val answerSdp = audioManager.createAnswer(remoteSdp)
                 callData.localSdp = answerSdp
 
@@ -631,11 +675,13 @@ class CallManager(
             accountInfo.currentCallData.value
         } ?: return
 
-        val currentState = CallStateManager.getCurrentState()
-        if (currentState.state != CallState.STREAMS_RUNNING &&
-            currentState.state != CallState.CONNECTED
+        // Usar estado específico de la llamada (no el estado global) para soportar multi-línea
+        val targetState = MultiCallManager.getCallState(targetCallData.callId)?.state
+            ?: CallStateManager.getCurrentState().state
+        if (targetState != CallState.STREAMS_RUNNING &&
+            targetState != CallState.CONNECTED
         ) {
-            log.w(tag = TAG) { "Cannot hold call in current state: ${currentState.state}" }
+            log.w(tag = TAG) { "Cannot hold call ${targetCallData.callId} in state: $targetState" }
             return
         }
 
@@ -644,7 +690,10 @@ class CallManager(
                 CallStateManager.startHold(targetCallData.callId)
                 sipCoreManager.notifyCallStateChanged(CallState.PAUSING)
 
-                callHoldManager.holdCall()?.let { holdSdp ->
+                val holdManager = holdManagersMutex.withLock {
+                    callHoldManagers.getOrPut(targetCallData.callId) { CallHoldManager(webRtcManager) }
+                }
+                holdManager.holdCall(targetCallData.localSdp.takeIf { it.isNotBlank() })?.let { holdSdp ->
                     targetCallData.localSdp = holdSdp
                     targetCallData.isOnHold = true
                     messageHandler.sendReInvite(accountInfo, targetCallData, holdSdp)
@@ -667,9 +716,11 @@ class CallManager(
             accountInfo.currentCallData.value
         } ?: return
 
-        val currentState = CallStateManager.getCurrentState()
-        if (currentState.state != CallState.PAUSED) {
-            log.w(tag = TAG) { "Cannot resume call in current state: ${currentState.state}" }
+        // Usar estado específico de la llamada (no el estado global) para soportar multi-línea
+        val targetState = MultiCallManager.getCallState(targetCallData.callId)?.state
+            ?: CallStateManager.getCurrentState().state
+        if (targetState != CallState.PAUSED) {
+            log.w(tag = TAG) { "Cannot resume call ${targetCallData.callId} in state: $targetState" }
             return
         }
 
@@ -678,12 +729,49 @@ class CallManager(
                 CallStateManager.startResume(targetCallData.callId)
                 sipCoreManager.notifyCallStateChanged(CallState.RESUMING)
 
-                callHoldManager.resumeCall()?.let { resumeSdp ->
-                    targetCallData.localSdp = resumeSdp
-                    targetCallData.isOnHold = false
-                    messageHandler.sendReInvite(accountInfo, targetCallData, resumeSdp)
+                // Multi-llamada: la PC activa pertenece a la otra llamada (la que estaba
+                // activa mientras esta estaba en hold). Hay que cerrarla y recrearla con
+                // ICE/DTLS frescos para el endpoint de esta llamada.
+                // Sin otras llamadas: reutilizar PC existente, solo cambiar direccion SDP.
+                val hasOtherCalls = MultiCallManager.getActiveCalls()
+                    .any { it.callId != targetCallData.callId }
 
-                    delay(1000)
+                val resumeSdp: String
+                if (hasOtherCalls) {
+                    log.d(tag = TAG) { "Multi-llamada: recreando PeerConnection para resumir ${targetCallData.callId}" }
+                    // Suprimir handleWebRtcClosed durante el cierre intencional de la PC
+                    isResettingPeerConnection = true
+                    try {
+                        webRtcManager.closePeerConnection()
+                        delay(300)
+                    } finally {
+                        isResettingPeerConnection = false
+                    }
+                    // createOffer: crea nueva PC + inicia audioController + retorna SDP con ICE
+                    resumeSdp = audioManager.createOffer()
+                } else {
+                    val holdManager = holdManagersMutex.withLock {
+                        callHoldManagers.getOrPut(targetCallData.callId) { CallHoldManager(webRtcManager) }
+                    }
+                    resumeSdp = holdManager.resumeCall(
+                        targetCallData.localSdp.takeIf { it.isNotBlank() }
+                    ) ?: run {
+                        log.e(tag = TAG) { "No se pudo obtener SDP de resume para ${targetCallData.callId}" }
+                        return@launch
+                    }
+                }
+
+                targetCallData.isOnHold = false
+                targetCallData.localSdp = resumeSdp
+                messageHandler.sendReInvite(accountInfo, targetCallData, resumeSdp)
+
+                // callResumed se llamará desde handle200OKForReInvite cuando llegue el 200 OK.
+                // Este delay es solo fallback en caso de que el 200 OK tarde más de 2s.
+                delay(2000)
+                val currentPerCallState = MultiCallManager.getCallState(targetCallData.callId)?.state
+                if (currentPerCallState == CallState.RESUMING) {
+                    log.w(tag = TAG) { "Resume timeout: forcing callResumed para ${targetCallData.callId}" }
+                    webRtcManager.setAudioEnabled(true)
                     CallStateManager.callResumed(targetCallData.callId)
                     sipCoreManager.notifyCallStateChanged(CallState.STREAMS_RUNNING)
                 }
@@ -782,10 +870,16 @@ class CallManager(
     }
 
     /**
-     * handleWebRtcConnected - con guard para llamadas Matrix
+     * handleWebRtcConnected - con guard para llamadas Matrix y recreación intencional de PC
      */
     @OptIn(ExperimentalTime::class)
     fun handleWebRtcConnected() {
+        // Guard: ignorar eventos durante recreación intencional de PeerConnection
+        if (isResettingPeerConnection) {
+            log.d(TAG) { "handleWebRtcConnected: ignorando evento durante recreación de PC" }
+            return
+        }
+
         // Guard: si la llamada activa es Matrix, el estado ya fue manejado por MatrixManager
         val activeCallData = sipCoreManager.currentAccountInfo?.currentCallData?.value
             ?: MultiCallManager.getAllCalls().firstOrNull()
@@ -804,10 +898,18 @@ class CallManager(
     }
 
     /**
-     * handleWebRtcClosed - con guard para llamadas Matrix
+     * handleWebRtcClosed - con guard para llamadas Matrix y recreación intencional de PC
      * Solo para llamadas YA conectadas. Para llamadas perdidas, el registro ya se hizo en endCall/declineCall
      */
     fun handleWebRtcClosed() {
+        // Guard: ignorar eventos durante recreación intencional de PeerConnection.
+        // En multi-llamada cerramos la PC explícitamente para recrearla con ICE frescos;
+        // ese evento CLOSED NO debe tratarse como fin de llamada.
+        if (isResettingPeerConnection) {
+            log.d(TAG) { "handleWebRtcClosed: ignorando evento durante recreación de PC" }
+            return
+        }
+
         // Guard: si la llamada activa es Matrix, el estado ya fue manejado por MatrixManager
         val activeCallData = sipCoreManager.currentAccountInfo?.currentCallData?.value
             ?: MultiCallManager.getAllCalls().firstOrNull()

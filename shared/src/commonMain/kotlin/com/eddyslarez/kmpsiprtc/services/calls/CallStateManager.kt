@@ -91,8 +91,16 @@ internal object CallStateManager {
             return@synchronized false
         }
 
-        // Validación estricta para prevenir estados duplicados
-        if (currentStateInfo.state == newState &&
+        // En multi-línea, usar el estado PER-LLAMADA para validaciones.
+        // El estado global puede ser de otra llamada (ej: PAUSING por hold de llamada 1)
+        // mientras esta llamada específica tiene un estado diferente (INCOMING_RECEIVED).
+        val perCallState = if (callId.isNotEmpty()) {
+            MultiCallManager.getCallState(callId)?.state
+        } else null
+        val effectiveFromState = perCallState ?: currentStateInfo.state
+
+        // Validación estricta para prevenir estados duplicados (usando estado per-llamada)
+        if (effectiveFromState == newState &&
             currentStateInfo.callId == callId &&
             currentStateInfo.errorReason == errorReason &&
             !forceUpdate
@@ -114,15 +122,15 @@ internal object CallStateManager {
             return@synchronized false
         }
 
-        // Validar transición
+        // Validar transición usando estado per-llamada para soportar multi-línea correctamente
         if (!forceUpdate && !CallStateTransitionValidator.isValidTransition(
-                currentStateInfo.state,
+                effectiveFromState,
                 newState,
                 direction
             )
         ) {
             log.w(tag = "CallStateManager") {
-                "Invalid state transition: ${currentStateInfo.state} -> $newState for $direction call"
+                "Invalid state transition: $effectiveFromState -> $newState for $direction call (global: ${currentStateInfo.state})"
             }
 
             // Permitir solo transiciones críticas de emergencia
@@ -353,14 +361,33 @@ internal object CallStateManager {
     }
 
     /**
-     * Limpieza completa de una llamada
+     * Limpieza completa de una llamada.
+     * Si quedan otras llamadas activas, transfiere el tracking a la siguiente en lugar de
+     * resetear a IDLE (lo cual borraría todas las llamadas con clearAllCalls).
      */
     private fun cleanupCall(callId: String) {
         MultiCallManager.removeCall(callId)
 
-        // Si es la llamada actual, resetear a IDLE
         if (currentCallId == callId) {
-            forceResetToIdle()
+            val remainingCalls = MultiCallManager.getActiveCalls()
+            if (remainingCalls.isEmpty()) {
+                forceResetToIdle()
+            } else {
+                // Quedan otras llamadas activas: transferir tracking sin borrarlas
+                val nextCall = remainingCalls.first()
+                currentCallId = nextCall.callId
+                val nextState = MultiCallManager.getCallState(nextCall.callId)?.state
+                    ?: CallState.STREAMS_RUNNING
+                log.d(tag = "CallStateManager") {
+                    "Switching tracking to remaining call: ${nextCall.callId} state: $nextState"
+                }
+                updateCallState(
+                    newState = nextState,
+                    callId = nextCall.callId,
+                    direction = nextCall.direction,
+                    forceUpdate = true
+                )
+            }
         }
     }
 
@@ -440,44 +467,47 @@ internal object CallStateManager {
     fun startHold(callId: String) {
         if (!isInitialized) return
 
-        val currentState = getCurrentState()
-        if (currentState.state != CallState.STREAMS_RUNNING && currentState.state != CallState.CONNECTED) {
-            log.w(tag = "CallStateManager") { "Cannot hold call in state: ${currentState.state}" }
+        // Usar estado específico de la llamada para soportar multi-línea
+        val perCallState = MultiCallManager.getCallState(callId)?.state
+        val effectiveState = perCallState ?: getCurrentState().state
+        if (effectiveState != CallState.STREAMS_RUNNING && effectiveState != CallState.CONNECTED) {
+            log.w(tag = "CallStateManager") { "Cannot hold call $callId in state: $effectiveState" }
             return
         }
 
         updateCallState(
             newState = CallState.PAUSING,
-            callId = callId
+            callId = callId,
+            forceUpdate = true
         )
     }
 
     fun callOnHold(callId: String) {
         if (!isInitialized) return
 
-        val currentState = getCurrentState()
-        if (currentState.state != CallState.PAUSING) {
-            log.w(tag = "CallStateManager") { "Invalid transition to PAUSED from: ${currentState.state}" }
-        }
-
+        // forceUpdate para permitir la transición aunque el estado global sea diferente (multi-línea)
         updateCallState(
             newState = CallState.PAUSED,
-            callId = callId
+            callId = callId,
+            forceUpdate = true
         )
     }
 
     fun startResume(callId: String) {
         if (!isInitialized) return
 
-        val currentState = getCurrentState()
-        if (currentState.state != CallState.PAUSED) {
-            log.w(tag = "CallStateManager") { "Cannot resume call in state: ${currentState.state}" }
+        // Usar estado específico de la llamada para soportar multi-línea
+        val perCallState = MultiCallManager.getCallState(callId)?.state
+        val effectiveState = perCallState ?: getCurrentState().state
+        if (effectiveState != CallState.PAUSED) {
+            log.w(tag = "CallStateManager") { "Cannot resume call $callId in state: $effectiveState" }
             return
         }
 
         updateCallState(
             newState = CallState.RESUMING,
-            callId = callId
+            callId = callId,
+            forceUpdate = true
         )
     }
     /**
@@ -486,14 +516,11 @@ internal object CallStateManager {
     fun callResumed(callId: String) {
         if (!isInitialized) return
 
-        val currentState = getCurrentState()
-        if (currentState.state != CallState.RESUMING) {
-            log.w(tag = "CallStateManager") { "Invalid transition to STREAMS_RUNNING from: ${currentState.state}" }
-        }
-
+        // forceUpdate para permitir la transición aunque el estado global sea diferente (multi-línea)
         updateCallState(
             newState = CallState.STREAMS_RUNNING,
-            callId = callId
+            callId = callId,
+            forceUpdate = true
         )
     }
 

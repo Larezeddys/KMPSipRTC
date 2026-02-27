@@ -1525,8 +1525,19 @@ class KmpSipRtc private constructor() {
             try {
                 val account = sipCoreManager?.currentAccountInfo ?: return@mapNotNull null
                 val allActiveCalls = MultiCallManager.getActiveCalls()
-                val isCurrentCall = allActiveCalls.size == 1 &&
-                        allActiveCalls.first().callId == callData.callId
+                val callState = CallStateManager.getStateForCall(callData.callId)?.state
+                // Con una sola llamada activa, es la "actual" si no está terminada.
+                // Con varias llamadas, la "actual" es la que está STREAMS_RUNNING/CONNECTED
+                // (la otra estará PAUSED). Esto permite que GetCurrentSipCallUseCase encuentre
+                // la llamada correcta después de un intercambio.
+                val isCurrentCall = when {
+                    allActiveCalls.size <= 1 ->
+                        allActiveCalls.firstOrNull()?.callId == callData.callId &&
+                        callState != CallState.ENDED && callState != CallState.ERROR &&
+                        callState != CallState.ENDING && callState != CallState.IDLE
+                    else ->
+                        callState == CallState.STREAMS_RUNNING || callState == CallState.CONNECTED
+                }
 
                 CallInfo(
                     callId = callData.callId,
@@ -1540,7 +1551,7 @@ class KmpSipRtc private constructor() {
                     isMuted = sipCoreManager?.webRtcManager?.isMuted() ?: false,
                     localAccount = account.username,
                     codec = null,
-                    state = CallStateManager.getStateForCall(callData.callId)?.state,
+                    state = callState,
                     isCurrentCall = isCurrentCall
                 )
             } catch (e: Exception) {

@@ -10,25 +10,27 @@ internal class CallHoldManager(private val webRtcManager: WebRtcManager) {
 
     /**
      * Puts a call on hold by modifying the SDP.
+     * @param fallbackSdp SDP de respaldo si WebRTC no tiene localDescription (típico en desktop).
      * @return el SDP modificado para hold, o null en caso de error.
      */
-    suspend fun holdCall(): String? {
+    suspend fun holdCall(fallbackSdp: String? = null): String? {
         try {
             if (isCallOnHold) return originalLocalSdp
 
-            val currentSdp = webRtcManager.getLocalDescription() ?: return null
+            val currentSdp = webRtcManager.getLocalDescription() ?: fallbackSdp ?: return null
             originalLocalSdp = currentSdp
 
             val holdSdp = modifySdpForHold(currentSdp)
-            val result = webRtcManager.applyModifiedSdp(holdSdp)
 
-            if (result) {
-                webRtcManager.setAudioEnabled(false)
-                isCallOnHold = true
-                logInfo("Call placed on hold successfully")
-                return holdSdp
-            }
-            return null
+            // Intentar aplicar SDP modificado en WebRTC (no crítico: el RE-INVITE SIP es
+            // lo que Asterisk usa para activar hold music). NO llamamos setAudioEnabled porque
+            // con multi-llamada un único WebRtcManager compartido apagaría el audio de todas
+            // las llamadas simultáneamente.
+            webRtcManager.applyModifiedSdp(holdSdp)
+
+            isCallOnHold = true
+            logInfo("Call placed on hold successfully")
+            return holdSdp
         } catch (e: Exception) {
             logError("Error putting call on hold: ${e.message}")
             return null
@@ -37,23 +39,23 @@ internal class CallHoldManager(private val webRtcManager: WebRtcManager) {
 
     /**
      * Resumes a call that was previously on hold.
+     * @param fallbackSdp SDP de respaldo si originalLocalSdp y WebRTC no tienen SDP.
      * @return el SDP modificado para resume, o null en caso de error.
      */
-    suspend fun resumeCall(): String? {
+    suspend fun resumeCall(fallbackSdp: String? = null): String? {
         try {
             if (!isCallOnHold) return originalLocalSdp
 
-            val baseSdp = originalLocalSdp ?: webRtcManager.getLocalDescription() ?: return null
+            val baseSdp = originalLocalSdp ?: webRtcManager.getLocalDescription() ?: fallbackSdp ?: return null
             val resumeSdp = modifySdpForResume(baseSdp)
-            val result = webRtcManager.applyModifiedSdp(resumeSdp)
 
-            if (result) {
-                webRtcManager.setAudioEnabled(true)
-                isCallOnHold = false
-                logInfo("Call resumed successfully")
-                return resumeSdp
-            }
-            return null
+            // Intentar aplicar SDP modificado en WebRTC. No llamamos setAudioEnabled para
+            // no interferir con otras llamadas activas que comparten el mismo WebRtcManager.
+            webRtcManager.applyModifiedSdp(resumeSdp)
+
+            isCallOnHold = false
+            logInfo("Call resumed successfully")
+            return resumeSdp
         } catch (e: Exception) {
             logError("Error resuming call: ${e.message}")
             return null

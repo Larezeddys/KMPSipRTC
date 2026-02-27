@@ -59,6 +59,22 @@ class AndroidCallRecorder() : CallRecorder {
     private var outputDir: File? = null
     private var currentCallId: String? = null
 
+    @Volatile
+    private var localNumber: String = ""
+    @Volatile
+    private var remoteNumber: String = ""
+    @Volatile
+    private var audioChunkListener: AudioChunkListener? = null
+
+    private fun sanitizeNumber(number: String): String =
+        number.replace("+", "").replace(":", "-").replace("/", "-").replace(" ", "")
+
+    private fun buildFilePrefix(callId: String): String {
+        val local = sanitizeNumber(localNumber)
+        val remote = sanitizeNumber(remoteNumber)
+        return if (local.isNotEmpty() && remote.isNotEmpty()) "${local}_to_${remote}" else callId
+    }
+
     // Listener para streaming en tiempo real (PCM crudo)
     private var audioStreamListener: AudioStreamListener? = null
 
@@ -78,6 +94,10 @@ class AndroidCallRecorder() : CallRecorder {
 
     override fun setAudioStreamListener(listener: AudioStreamListener?) {
         audioStreamListener = listener
+    }
+
+    override fun setAudioChunkListener(listener: AudioChunkListener?) {
+        audioChunkListener = listener
     }
 
     /**
@@ -115,8 +135,10 @@ class AndroidCallRecorder() : CallRecorder {
         log.d(TAG) { "✅ Audio capture started" }
     }
 
-    override fun startRecording(callId: String) {
-        // Método legacy - solo grabación
+    override fun startRecording(callId: String, localNumber: String, remoteNumber: String) {
+        this.localNumber = localNumber
+        this.remoteNumber = remoteNumber
+        // Solo grabación
         startAudioCapture(callId, AudioConfig(enableRecording = true, enableStreaming = false))
     }
 
@@ -173,6 +195,8 @@ class AndroidCallRecorder() : CallRecorder {
                             synchronized(localAudioBuffer) {
                                 localAudioBuffer.add(chunk)
                             }
+                            // Emitir chunk para transcripción
+                            audioChunkListener?.onLocalChunk(chunk, SAMPLE_RATE)
                         }
 
                         // Enviar al listener de streaming (solo si está habilitado)
@@ -224,6 +248,9 @@ class AndroidCallRecorder() : CallRecorder {
 
         // Normalizar a mono 16-bit PCM
         val normalized = normalizeToMono16bit(audioData, channels, bitsPerSample)
+
+        // Emitir chunk para transcripción en tiempo real
+        audioChunkListener?.onRemoteChunk(normalized, sampleRate)
 
         // Guardar para archivo final (solo si está habilitado)
         if (currentConfig.enableRecording) {
@@ -304,12 +331,15 @@ class AndroidCallRecorder() : CallRecorder {
             val callId = currentCallId ?: "unknown"
             val timestamp = System.currentTimeMillis()
 
-            val localFile = saveAudioToFile(localAudioBuffer, "${callId}_local_${timestamp}.wav", SAMPLE_RATE)
-            val remoteFile = saveAudioToFile(remoteAudioBuffer, "${callId}_remote_${timestamp}.wav", remoteSampleRate)
-            val mixedFile = mixAndSaveAudio(localAudioBuffer, remoteAudioBuffer, "${callId}_mixed_${timestamp}.wav")
+            val prefix = buildFilePrefix(callId)
+            val localFile = saveAudioToFile(localAudioBuffer, "${prefix}_local_${timestamp}.wav", SAMPLE_RATE)
+            val remoteFile = saveAudioToFile(remoteAudioBuffer, "${prefix}_remote_${timestamp}.wav", remoteSampleRate)
+            val mixedFile = mixAndSaveAudio(localAudioBuffer, remoteAudioBuffer, "${prefix}_mixed_${timestamp}.wav")
 
             localAudioBuffer.clear()
             remoteAudioBuffer.clear()
+            localNumber = ""
+            remoteNumber = ""
             currentCallId = null
 
             log.d(TAG) { "✅ Recording stopped and saved" }
@@ -320,6 +350,7 @@ class AndroidCallRecorder() : CallRecorder {
             return@withContext RecordingResult(localFile?.path, remoteFile?.path, mixedFile?.path)
         } else {
             // Solo streaming, no hay archivos que guardar
+
             localAudioBuffer.clear()
             remoteAudioBuffer.clear()
             currentCallId = null
@@ -327,6 +358,23 @@ class AndroidCallRecorder() : CallRecorder {
             log.d(TAG) { "✅ Streaming stopped (no files saved)" }
             return@withContext RecordingResult(null, null, null)
         }
+    }
+
+    override suspend fun forceFlushAndSave(): RecordingResult? = withContext(Dispatchers.IO) {
+        if (!isRecording) return@withContext null
+        val callId = currentCallId ?: return@withContext null
+        val timestamp = System.currentTimeMillis()
+
+        val localCopy = synchronized(localAudioBuffer) { localAudioBuffer.toList() }
+        val remoteCopy = synchronized(remoteAudioBuffer) { remoteAudioBuffer.toList() }
+
+        val prefix = buildFilePrefix(callId)
+        val localFile = saveAudioToFile(localCopy, "${prefix}_local_${timestamp}.wav", SAMPLE_RATE)
+        val remoteFile = saveAudioToFile(remoteCopy, "${prefix}_remote_${timestamp}.wav", remoteSampleRate)
+        val mixedFile = mixAndSaveAudio(localCopy, remoteCopy, "${prefix}_mixed_${timestamp}.wav")
+
+        log.d(TAG) { "⚡ forceFlushAndSave: local=${localFile?.absolutePath}, remote=${remoteFile?.absolutePath}" }
+        RecordingResult(localFile?.path, remoteFile?.path, mixedFile?.path)
     }
 
     override fun isRecording(): Boolean = isRecording
@@ -397,6 +445,7 @@ class AndroidCallRecorder() : CallRecorder {
         localAudioBuffer.clear()
         remoteAudioBuffer.clear()
         audioStreamListener = null
+        audioChunkListener = null
     }
 
     // ==================== GUARDADO DE ARCHIVOS ====================

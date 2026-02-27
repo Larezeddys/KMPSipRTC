@@ -58,6 +58,12 @@ class IosCallRecorder : CallRecorder {
     private var audioEngine: AVAudioEngine? = null
     private var currentCallId: String? = null
 
+    @Volatile
+    private var localNumber: String = ""
+    @Volatile
+    private var remoteNumber: String = ""
+    private var audioChunkListener: AudioChunkListener? = null
+
     // Directorio de salida
     private val outputDir: String by lazy {
         val documentsPath = NSSearchPathForDirectoriesInDomains(
@@ -80,7 +86,18 @@ class IosCallRecorder : CallRecorder {
         recordingsPath
     }
 
-    override fun startRecording(callId: String) {
+    private fun sanitizeNumber(number: String): String =
+        number.replace("+", "").replace(":", "-").replace("/", "-").replace(" ", "")
+
+    private fun buildFilePrefix(callId: String): String {
+        val local = sanitizeNumber(localNumber)
+        val remote = sanitizeNumber(remoteNumber)
+        return if (local.isNotEmpty() && remote.isNotEmpty()) "${local}_to_${remote}" else callId
+    }
+
+    override fun startRecording(callId: String, localNumber: String, remoteNumber: String) {
+        this.localNumber = localNumber
+        this.remoteNumber = remoteNumber
         if (isRecording) {
             log.w(TAG) { "⚠️ Recording already in progress" }
             return
@@ -171,6 +188,8 @@ class IosCallRecorder : CallRecorder {
                         localAudioBuffer.add(byteArray)
                     }
                 }
+                // Emitir chunk para transcripción en tiempo real
+                audioChunkListener?.onLocalChunk(byteArray, SAMPLE_RATE.toInt())
             }
 
             // Enviar al listener si está haciendo streaming
@@ -215,13 +234,16 @@ class IosCallRecorder : CallRecorder {
         val remoteCopy = remoteBufferMutex.withLock { remoteAudioBuffer.toList() }
 
         // Guardar archivos - local usa SAMPLE_RATE del mic, remote usa remoteSampleRate detectado
-        val localFile = saveAudioToFile(localCopy, "${callId}_local_${timestamp}.wav", SAMPLE_RATE.toInt())
-        val remoteFile = saveAudioToFile(remoteCopy, "${callId}_remote_${timestamp}.wav", remoteSampleRate)
-        val mixedFile = mixAndSaveAudio(localCopy, remoteCopy, "${callId}_mixed_${timestamp}.wav")
+        val prefix = buildFilePrefix(callId)
+        val localFile = saveAudioToFile(localCopy, "${prefix}_local_${timestamp}.wav", SAMPLE_RATE.toInt())
+        val remoteFile = saveAudioToFile(remoteCopy, "${prefix}_remote_${timestamp}.wav", remoteSampleRate)
+        val mixedFile = mixAndSaveAudio(localCopy, remoteCopy, "${prefix}_mixed_${timestamp}.wav")
 
         // Limpiar buffers
         localBufferMutex.withLock { localAudioBuffer.clear() }
         remoteBufferMutex.withLock { remoteAudioBuffer.clear() }
+        localNumber = ""
+        remoteNumber = ""
         currentCallId = null
 
         log.d(TAG) { "✅ Recording stopped and saved" }
@@ -229,6 +251,23 @@ class IosCallRecorder : CallRecorder {
         log.d(TAG) { "   Remote: $remoteFile" }
         log.d(TAG) { "   Mixed: $mixedFile" }
 
+        RecordingResult(localFile, remoteFile, mixedFile)
+    }
+
+    override suspend fun forceFlushAndSave(): RecordingResult? = withContext(Dispatchers.Default) {
+        if (!isRecording) return@withContext null
+        val callId = currentCallId ?: return@withContext null
+        val timestamp = NSDate().timeIntervalSince1970.toLong() * 1000
+
+        val localCopy = localBufferMutex.withLock { localAudioBuffer.toList() }
+        val remoteCopy = remoteBufferMutex.withLock { remoteAudioBuffer.toList() }
+
+        val prefix = buildFilePrefix(callId)
+        val localFile = saveAudioToFile(localCopy, "${prefix}_local_${timestamp}.wav", SAMPLE_RATE.toInt())
+        val remoteFile = saveAudioToFile(remoteCopy, "${prefix}_remote_${timestamp}.wav", remoteSampleRate)
+        val mixedFile = mixAndSaveAudio(localCopy, remoteCopy, "${prefix}_mixed_${timestamp}.wav")
+
+        log.d(TAG) { "⚡ forceFlushAndSave: local=$localFile, remote=$remoteFile, mixed=$mixedFile" }
         RecordingResult(localFile, remoteFile, mixedFile)
     }
 
@@ -245,6 +284,9 @@ class IosCallRecorder : CallRecorder {
 
         // Normalizar a mono 16-bit PCM
         val normalized = normalizeToMono16bit(audioData, channels, bitsPerSample)
+
+        // Emitir chunk para transcripción en tiempo real
+        audioChunkListener?.onRemoteChunk(normalized, sampleRate)
 
         // Guardar en buffer si está grabando
         if (isRecording) {
@@ -322,6 +364,10 @@ class IosCallRecorder : CallRecorder {
 
     override fun setAudioStreamListener(listener: AudioStreamListener?) {
         audioStreamListener = listener
+    }
+
+    override fun setAudioChunkListener(listener: AudioChunkListener?) {
+        audioChunkListener = listener
     }
 
     override fun startStreaming(callId: String) {
@@ -425,6 +471,7 @@ class IosCallRecorder : CallRecorder {
         isRecording = false
         isStreamingActive = false
         audioStreamListener = null
+        audioChunkListener = null
         audioEngine?.stop()
         audioEngine = null
         recordingJob?.cancel()

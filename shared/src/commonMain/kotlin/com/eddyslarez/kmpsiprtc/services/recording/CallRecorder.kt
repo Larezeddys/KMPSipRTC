@@ -10,14 +10,23 @@ interface CallRecorder {
     /**
      * Iniciar grabación de llamada
      * @param callId Identificador único de la llamada
+     * @param localNumber Número local (propio) para nombre de archivo legible
+     * @param remoteNumber Número remoto (del peer) para nombre de archivo legible
      */
-    fun startRecording(callId: String)
+    fun startRecording(callId: String, localNumber: String = "", remoteNumber: String = "")
 
     /**
      * Detener grabación y guardar archivos
      * @return RecordingResult con las rutas de los archivos guardados
      */
     suspend fun stopRecording(): RecordingResult
+
+    /**
+     * Guardar lo que hay en buffer sin detener la grabación.
+     * Útil cuando el remoto cuelga antes de que se llame stopRecording().
+     * @return RecordingResult con las rutas guardadas, o null si no hay grabación activa
+     */
+    suspend fun forceFlushAndSave(): RecordingResult?
 
     /**
      * Capturar audio remoto (del peer)
@@ -92,6 +101,22 @@ interface CallRecorder {
      * Verificar si el streaming está activo
      */
     fun isStreaming(): Boolean
+
+    // ==================== CHUNKS PARA TRANSCRIPCIÓN ====================
+
+    /**
+     * Configurar listener para recibir chunks de audio (para transcripción en tiempo real)
+     * @param listener Listener que recibirá los chunks PCM16, o null para desregistrar
+     */
+    fun setAudioChunkListener(listener: AudioChunkListener?)
+}
+
+/**
+ * Listener para recibir chunks de audio durante la grabación (usado para transcripción real-time)
+ */
+interface AudioChunkListener {
+    fun onLocalChunk(pcm16Data: ByteArray, sampleRate: Int)
+    fun onRemoteChunk(pcm16Data: ByteArray, sampleRate: Int)
 }
 
 /**

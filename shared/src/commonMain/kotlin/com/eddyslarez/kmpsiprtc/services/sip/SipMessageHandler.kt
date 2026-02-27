@@ -183,15 +183,27 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
         lines: List<String>,
         accountInfo: AccountInfo
     ) {
-        val callData = accountInfo.currentCallData.value ?: return
+        // Extraer Call-ID del mensaje SIP para identificar correctamente la llamada en multi-línea.
+        // En multi-línea, accountInfo.currentCallData puede apuntar a otra llamada distinta
+        // a la que generó esta respuesta 200 OK.
+        val messageCallId = SipMessageParser.extractCallId(lines.joinToString("\r\n"))
+        val callData = if (messageCallId.isNotEmpty()) {
+            MultiCallManager.getCall(messageCallId) ?: accountInfo.currentCallData.value ?: return
+        } else {
+            accountInfo.currentCallData.value ?: return
+        }
+
         val cseqHeader = SipMessageParser.extractHeader(lines, "CSeq")
-        val isReInvite = cseqHeader.contains("INVITE") &&
-                CallStateManager.getCurrentState().let { state ->
-                    state.state == CallState.PAUSING ||
-                            state.state == CallState.RESUMING ||
-                            state.state == CallState.STREAMS_RUNNING ||
-                            state.state == CallState.PAUSED
-                }
+        // Usar estado PER-LLAMADA para determinar si es re-INVITE.
+        // El estado global puede reflejar otra llamada (ej: PAUSING de call1 mientras
+        // procesamos respuesta de call2), causando detección incorrecta de re-INVITE.
+        val perCallStateForIsReInvite = MultiCallManager.getCallState(callData.callId)?.state
+        val isReInvite = cseqHeader.contains("INVITE") && (
+                perCallStateForIsReInvite == CallState.PAUSING ||
+                perCallStateForIsReInvite == CallState.RESUMING ||
+                perCallStateForIsReInvite == CallState.STREAMS_RUNNING ||
+                perCallStateForIsReInvite == CallState.PAUSED
+        )
         when (statusCode) {
             100 -> {
                 log.d(tag = TAG) { "Received 100 Trying for ${if (isReInvite) "re-INVITE" else "INVITE"}" }
@@ -291,39 +303,72 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
         callData: CallData
     ) {
         try {
-            log.d(tag = TAG) { "Processing 200 OK for re-INVITE" }
+            log.d(tag = TAG) { "Processing 200 OK for re-INVITE (callId: ${callData.callId})" }
 
             val remoteSdp = SipMessageParser.extractSdpContent(lines.joinToString("\r\n"))
-            val currentState = CallStateManager.getCurrentState()
+            // Usar estado PER-LLAMADA para determinar si este 200 OK es para hold o resume.
+            // El estado global (getCurrentState) puede corresponder a otra llamada en multi-línea,
+            // causando que se llame callOnHold/callResumed en la llamada equivocada.
+            val perCallState = MultiCallManager.getCallState(callData.callId)?.state
 
             // Enviar ACK para re-INVITE
             val ack = SipMessageBuilder.buildAckMessage(accountInfo, callData)
             sendViaSharedWebSocket(ack)
 
-            // Determinar si es hold o resume basado en SDP
-            val isRemoteOnHold = SipMessageParser.isSdpOnHold(remoteSdp)
-
-            when (currentState.state) {
+            when (perCallState) {
                 CallState.PAUSING -> {
+                    // Marcar INMEDIATAMENTE como PAUSED para que los 200 OK retransmitidos
+                    // no reentren en este branch y dupliquen la transición de estado.
+                    MultiCallManager.updateCallState(callData.callId, CallState.PAUSED)
+
                     scope.launch {
-                        // Completar transición a hold
+                        // Completar transición a hold para esta llamada específica
                         CallStateManager.callOnHold(callData.callId)
                         sipCoreManager.notifyCallStateChanged(CallState.PAUSED)
-                        log.d(tag = TAG) { "Call successfully put on hold" }
+                        log.d(tag = TAG) { "Call ${callData.callId} successfully put on hold" }
                     }
                 }
 
                 CallState.RESUMING -> {
+                    // Marcar INMEDIATAMENTE como STREAMS_RUNNING en MultiCallManager para que
+                    // los 200 OK retransmitidos por el servidor caigan en el branch else.
+                    MultiCallManager.updateCallState(callData.callId, CallState.STREAMS_RUNNING)
+
                     scope.launch {
-                        // Completar transición a resume
+                        // Multi-llamada: la PC fue recreada en resumeCall() con createOffer(),
+                        // por lo que esta en estado have-local-offer y setRemoteDescription(ANSWER)
+                        // completara la negociacion ICE/DTLS con el endpoint de esta llamada.
+                        // Hold/resume simple: la PC esta en stable, setRemoteDescription falla;
+                        // lo capturamos y continuamos (solo necesitamos setAudioEnabled).
+                        if (remoteSdp.isNotBlank()) {
+                            try {
+                                sipCoreManager.webRtcManager.setRemoteDescription(
+                                    remoteSdp,
+                                    com.eddyslarez.kmpsiprtc.data.models.SdpType.ANSWER
+                                )
+                                log.d(tag = TAG) { "setRemoteDescription aplicado para resume ${callData.callId}" }
+                            } catch (e: Exception) {
+                                // Esperado cuando la PC está en estado stable (fix multi-llamada)
+                                log.w(tag = TAG) { "setRemoteDescription omitido en resume (PC en stable): ${e.message}" }
+                            }
+                        }
+                        // Siempre re-habilitar audio: el track fue desactivado por alguna parte
+                        // del ciclo hold, y la PC sigue activa con la conexión ICE/DTLS intacta.
+                        try {
+                            sipCoreManager.webRtcManager.setAudioEnabled(true)
+                            log.d(tag = TAG) { "Audio re-habilitado para llamada reanudada ${callData.callId}" }
+                        } catch (e: Exception) {
+                            log.e(tag = TAG) { "Error habilitando audio en resume: ${e.message}" }
+                        }
+                        // Completar transición a resume para esta llamada específica
                         CallStateManager.callResumed(callData.callId)
                         sipCoreManager.notifyCallStateChanged(CallState.STREAMS_RUNNING)
-                        log.d(tag = TAG) { "Call successfully resumed" }
+                        log.d(tag = TAG) { "Call ${callData.callId} successfully resumed" }
                     }
                 }
 
                 else -> {
-                    log.w(tag = TAG) { "Unexpected re-INVITE 200 OK in state: ${currentState.state}" }
+                    log.w(tag = TAG) { "Unexpected re-INVITE 200 OK in state: $perCallState for call ${callData.callId}" }
                 }
             }
 
@@ -619,16 +664,22 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             sendViaSharedWebSocket(okResponse)
             log.d(tag = TAG) { "[OK] 200 OK sent for BYE" }
 
-            // Obtener callData
-            accountInfo.currentCallData.value?.let { callData ->
-                log.d(tag = TAG) { "Processing BYE for call: ${callData.callId}" }
+            // Extraer Call-ID para identificar la llamada correcta en multi-línea.
+            // accountInfo.currentCallData puede apuntar a otra llamada activa distinta.
+            val byeCallId = SipMessageParser.extractCallId(lines.joinToString("\r\n"))
+            val callData = if (byeCallId.isNotEmpty()) {
+                MultiCallManager.getCall(byeCallId) ?: accountInfo.currentCallData.value
+            } else {
+                accountInfo.currentCallData.value
+            }
+
+            if (callData != null) {
+                log.d(tag = TAG) { "[BYE] Processing BYE for call: ${callData.callId}" }
 
                 // Registrar en historial ANTES de cambiar el estado a ENDED.
-                // handleWebRtcClosed() no puede hacerlo porque para cuando se dispara,
-                // el estado ya es ENDED y wasConnected = false.
                 sipCoreManager.callManager?.registerRemoteHangup(callData)
 
-                // Actualizar estado
+                // Actualizar estado de ESTA llamada específica
                 CallStateManager.callEnded(callData.callId, sipReason = "Remote hangup")
                 sipCoreManager.notifyCallStateChanged(CallState.ENDED)
 
@@ -636,26 +687,32 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 val accountKey = "${accountInfo.username}@${accountInfo.domain}"
                 sipCoreManager.notifyCallEndedForSpecificAccount(accountKey)
 
-                // [OK] LIMPIEZA ASÍNCRONA PERO RÁPIDA
+                // LIMPIEZA ASÍNCRONA — solo disponer WebRTC si no quedan otras llamadas activas
                 scope.launch {
                     try {
-                        // Limpiar WebRTC
-                        sipCoreManager.webRtcManager.dispose()
                         delay(200)
 
-                        // Limpiar AccountInfo
-                        accountInfo.resetCallState()
-
-                        // Limpiar MultiCallManager
+                        // Limpiar MultiCallManager PRIMERO
                         MultiCallManager.removeCall(callData.callId)
 
-                        log.d(tag = TAG) { "[OK] BYE cleanup completed" }
+                        // Verificar si quedan llamadas activas antes de disponer WebRTC.
+                        // En multi-línea NO se debe disponer WebRTC si otra llamada sigue activa.
+                        val remainingActiveCalls = MultiCallManager.getActiveCalls()
+                        if (remainingActiveCalls.isEmpty()) {
+                            log.d(tag = TAG) { "[BYE] No more active calls — disposing WebRTC" }
+                            sipCoreManager.webRtcManager.dispose()
+                            accountInfo.resetCallState()
+                        } else {
+                            log.d(tag = TAG) { "[BYE] ${remainingActiveCalls.size} call(s) still active — keeping WebRTC alive" }
+                        }
+
+                        log.d(tag = TAG) { "[OK] BYE cleanup completed for ${callData.callId}" }
                     } catch (e: Exception) {
                         log.e(tag = TAG) { "Error in BYE cleanup: ${e.message}" }
                     }
                 }
-            } ?: run {
-                log.w(tag = TAG) { "[WARN] No call data found for BYE" }
+            } else {
+                log.w(tag = TAG) { "[WARN] No call data found for BYE (Call-ID: $byeCallId)" }
             }
 
         } catch (e: Exception) {
@@ -677,11 +734,13 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             // [OK] Detener ringtones inmediatamente
             sipCoreManager.audioManager.stopAllRingtones()
 
-            // Extraer callId
-            val callId = accountInfo.currentCallData.value?.callId
-
-            // Obtener callData (desde accountInfo o MultiCallManager)
-            val callData = accountInfo.currentCallData.value ?: callId?.let { MultiCallManager.getCall(it) }
+            // Extraer Call-ID del CANCEL para identificar la llamada correcta en multi-línea
+            val cancelCallId = SipMessageParser.extractCallId(lines.joinToString("\r\n"))
+            val callData = if (cancelCallId.isNotEmpty()) {
+                MultiCallManager.getCall(cancelCallId) ?: accountInfo.currentCallData.value
+            } else {
+                accountInfo.currentCallData.value
+            }
 
             if (callData == null) {
                 log.w(tag = TAG) { "[ERROR] No call data for CANCEL" }
@@ -742,13 +801,26 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
     private fun handleAckRequest(lines: List<String>, accountInfo: AccountInfo) {
         log.d(tag = TAG) { "Handling ACK request" }
 
-        // ACK confirma que la llamada está establecida
-        accountInfo.currentCallData.value?.let { callData ->
-            if (CallStateManager.getCurrentState().state == CallState.CONNECTED) {
-                // Transición a streams running
-                CallStateManager.streamsRunning(callData.callId)
-                sipCoreManager.notifyCallStateChanged(CallState.STREAMS_RUNNING)
-            }
+        // Extraer Call-ID para identificar la llamada correcta en multi-línea.
+        // En multi-línea, accountInfo.currentCallData puede apuntar a otra llamada.
+        val messageCallId = SipMessageParser.extractCallId(lines.joinToString("\r\n"))
+        val callData = if (messageCallId.isNotEmpty()) {
+            MultiCallManager.getCall(messageCallId) ?: accountInfo.currentCallData.value
+        } else {
+            accountInfo.currentCallData.value
+        } ?: return
+
+        // ACK confirma que la llamada está establecida — usar estado PER-LLAMADA.
+        // El estado global puede ser de otra llamada (ej: PAUSED por call1 en hold),
+        // bloqueando la transición CONNECTED → STREAMS_RUNNING de call2.
+        val perCallState = MultiCallManager.getCallState(callData.callId)?.state
+        if (perCallState == CallState.CONNECTED) {
+            // Transición a streams running para esta llamada específica
+            CallStateManager.streamsRunning(callData.callId)
+            sipCoreManager.notifyCallStateChanged(CallState.STREAMS_RUNNING)
+            log.d(tag = TAG) { "Call ${callData.callId} reached STREAMS_RUNNING via ACK" }
+        } else {
+            log.d(tag = TAG) { "ACK received for call ${callData.callId} in state $perCallState (no transition needed)" }
         }
     }
 

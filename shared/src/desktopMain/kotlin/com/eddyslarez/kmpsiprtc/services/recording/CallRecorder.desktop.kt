@@ -62,6 +62,22 @@ class DesktopCallRecorder : CallRecorder {
     private var targetDataLine: TargetDataLine? = null
     private var currentCallId: String? = null
 
+    @Volatile
+    private var localNumber: String = ""
+    @Volatile
+    private var remoteNumber: String = ""
+    @Volatile
+    private var audioChunkListener: AudioChunkListener? = null
+
+    private fun sanitizeNumber(number: String): String =
+        number.replace("+", "").replace(":", "-").replace("/", "-").replace(" ", "")
+
+    private fun buildFilePrefix(callId: String): String {
+        val local = sanitizeNumber(localNumber)
+        val remote = sanitizeNumber(remoteNumber)
+        return if (local.isNotEmpty() && remote.isNotEmpty()) "${local}_to_${remote}" else callId
+    }
+
     // Directorio de salida
     private val outputDir: File by lazy {
         val userHome = System.getProperty("user.home")
@@ -70,7 +86,9 @@ class DesktopCallRecorder : CallRecorder {
         }
     }
 
-    override fun startRecording(callId: String) {
+    override fun startRecording(callId: String, localNumber: String, remoteNumber: String) {
+        this.localNumber = localNumber
+        this.remoteNumber = remoteNumber
         if (isRecording) {
             log.w(TAG) { "⚠️ Recording already in progress" }
             return
@@ -127,6 +145,8 @@ class DesktopCallRecorder : CallRecorder {
                             synchronized(localAudioBuffer) {
                                 localAudioBuffer.add(chunk)
                             }
+                            // Emitir chunk para transcripción
+                            audioChunkListener?.onLocalChunk(chunk, SAMPLE_RATE.toInt())
                         }
 
                         // Enviar al listener si está haciendo streaming
@@ -182,13 +202,16 @@ class DesktopCallRecorder : CallRecorder {
         log.d(TAG) { "  Remote callbacks: $remoteCallbackCount, raw bytes: $remoteTotalBytes" }
 
         // Guardar archivos - local usa SAMPLE_RATE del mic, remote usa remoteSampleRate detectado
-        val localFile = saveAudioToFile(localAudioBuffer, "${callId}_local_${timestamp}.wav", SAMPLE_RATE.toInt())
-        val remoteFile = saveAudioToFile(remoteAudioBuffer, "${callId}_remote_${timestamp}.wav", remoteSampleRate)
-        val mixedFile = mixAndSaveAudio(localAudioBuffer, remoteAudioBuffer, "${callId}_mixed_${timestamp}.wav")
+        val prefix = buildFilePrefix(callId)
+        val localFile = saveAudioToFile(localAudioBuffer, "${prefix}_local_${timestamp}.wav", SAMPLE_RATE.toInt())
+        val remoteFile = saveAudioToFile(remoteAudioBuffer, "${prefix}_remote_${timestamp}.wav", remoteSampleRate)
+        val mixedFile = mixAndSaveAudio(localAudioBuffer, remoteAudioBuffer, "${prefix}_mixed_${timestamp}.wav")
 
         // Limpiar buffers
         localAudioBuffer.clear()
         remoteAudioBuffer.clear()
+        localNumber = ""
+        remoteNumber = ""
         currentCallId = null
 
         log.d(TAG) { "✅ Recording stopped and saved" }
@@ -196,6 +219,23 @@ class DesktopCallRecorder : CallRecorder {
         log.d(TAG) { "   Remote: ${remoteFile?.absolutePath}" }
         log.d(TAG) { "   Mixed: ${mixedFile?.absolutePath}" }
 
+        RecordingResult(localFile?.path, remoteFile?.path, mixedFile?.path)
+    }
+
+    override suspend fun forceFlushAndSave(): RecordingResult? = withContext(Dispatchers.IO) {
+        if (!isRecording) return@withContext null
+        val callId = currentCallId ?: return@withContext null
+        val timestamp = System.currentTimeMillis()
+
+        val localCopy = synchronized(localAudioBuffer) { localAudioBuffer.toList() }
+        val remoteCopy = synchronized(remoteAudioBuffer) { remoteAudioBuffer.toList() }
+
+        val prefix = buildFilePrefix(callId)
+        val localFile = saveAudioToFile(localCopy, "${prefix}_local_${timestamp}.wav", SAMPLE_RATE.toInt())
+        val remoteFile = saveAudioToFile(remoteCopy, "${prefix}_remote_${timestamp}.wav", remoteSampleRate)
+        val mixedFile = mixAndSaveAudio(localCopy, remoteCopy, "${prefix}_mixed_${timestamp}.wav")
+
+        log.d(TAG) { "⚡ forceFlushAndSave: local=${localFile?.absolutePath}, remote=${remoteFile?.absolutePath}" }
         RecordingResult(localFile?.path, remoteFile?.path, mixedFile?.path)
     }
 
@@ -222,6 +262,9 @@ class DesktopCallRecorder : CallRecorder {
 
         // Normalizar a mono 16-bit PCM
         val normalized = normalizeToMono16bit(audioData, channels, bitsPerSample)
+
+        // Emitir chunk para transcripción en tiempo real
+        audioChunkListener?.onRemoteChunk(normalized, sampleRate)
 
         // Guardar en buffer si está grabando
         if (isRecording) {
@@ -295,6 +338,10 @@ class DesktopCallRecorder : CallRecorder {
 
     override fun setAudioStreamListener(listener: AudioStreamListener?) {
         audioStreamListener = listener
+    }
+
+    override fun setAudioChunkListener(listener: AudioChunkListener?) {
+        audioChunkListener = listener
     }
 
     override fun startStreaming(callId: String) {
@@ -377,6 +424,7 @@ class DesktopCallRecorder : CallRecorder {
         isRecording = false
         isStreamingActive = false
         audioStreamListener = null
+        audioChunkListener = null
         targetDataLine?.stop()
         targetDataLine?.close()
         targetDataLine = null
