@@ -21,7 +21,7 @@ import java.nio.ByteOrder
  * Implementación de CallRecorder para Android con streaming a OpenAI Realtime API
  */
 class AndroidCallRecorder() : CallRecorder {
-    private val TAG = "AndroidC`allRecorder"
+    private val TAG = "AndroidCallRecorder"
     private val context: Context = getApplication()
 
     // Configuración de audio
@@ -451,11 +451,6 @@ class AndroidCallRecorder() : CallRecorder {
     // ==================== GUARDADO DE ARCHIVOS ====================
 
     private fun saveAudioToFile(audioBuffer: List<ByteArray>, fileName: String, sampleRate: Int = SAMPLE_RATE): File? {
-        if (audioBuffer.isEmpty()) {
-            log.w(TAG) { "⚠️ Empty audio buffer for $fileName" }
-            return null
-        }
-
         return try {
             val file = File(outputDir, fileName)
             val totalAudioLen = audioBuffer.sumOf { it.size }
@@ -480,11 +475,6 @@ class AndroidCallRecorder() : CallRecorder {
         remoteBuffer: List<ByteArray>,
         fileName: String
     ): File? {
-        if (localBuffer.isEmpty() && remoteBuffer.isEmpty()) {
-            log.w(TAG) { "⚠️ Both buffers are empty" }
-            return null
-        }
-
         return try {
             val file = File(outputDir, fileName)
             val localSamples = bufferToSamples(localBuffer)
@@ -585,7 +575,7 @@ class AndroidCallRecorder() : CallRecorder {
         header[29] = ((byteRate shr 8) and 0xff).toByte()
         header[30] = ((byteRate shr 16) and 0xff).toByte()
         header[31] = ((byteRate shr 24) and 0xff).toByte()
-        header[32] = (2 * 16 / 8).toByte()
+        header[32] = (channels * 16 / 8).toByte()
         header[33] = 0
         header[34] = 16
         header[35] = 0

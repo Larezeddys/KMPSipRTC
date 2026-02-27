@@ -437,11 +437,6 @@ class DesktopCallRecorder : CallRecorder {
     // ==================== GUARDADO DE ARCHIVOS ====================
 
     private fun saveAudioToFile(audioBuffer: List<ByteArray>, fileName: String, sampleRate: Int = SAMPLE_RATE.toInt()): File? {
-        if (audioBuffer.isEmpty()) {
-            log.w(TAG) { "⚠️ Empty audio buffer for $fileName" }
-            return null
-        }
-
         return try {
             val file = File(outputDir, fileName)
             val totalAudioLen = audioBuffer.sumOf { it.size }
@@ -466,11 +461,6 @@ class DesktopCallRecorder : CallRecorder {
         remoteBuffer: List<ByteArray>,
         fileName: String
     ): File? {
-        if (localBuffer.isEmpty() && remoteBuffer.isEmpty()) {
-            log.w(TAG) { "⚠️ Both buffers are empty" }
-            return null
-        }
-
         return try {
             val file = File(outputDir, fileName)
             val localSamples = bufferToSamples(localBuffer)

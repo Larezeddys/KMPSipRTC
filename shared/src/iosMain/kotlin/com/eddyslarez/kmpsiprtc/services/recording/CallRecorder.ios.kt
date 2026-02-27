@@ -4,20 +4,12 @@ import com.eddyslarez.kmpsiprtc.data.models.RecordingResult
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 import com.eddyslarez.kmpsiprtc.utils.Lock
-import kotlinx.cinterop.*
-import kotlinx.coroutines.*
 import com.eddyslarez.kmpsiprtc.utils.synchronized
+import kotlinx.cinterop.*
 import platform.AVFAudio.*
 import platform.Foundation.*
-import platform.darwin.NSObject
-import kotlin.concurrent.Volatile
 import kotlinx.coroutines.*
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import platform.AVFAudio.*
-import platform.Foundation.*
-import kotlin.experimental.ExperimentalNativeApi
-import kotlin.native.concurrent.freeze
+import kotlin.concurrent.Volatile
 
 /**
  * Implementación de CallRecorder para iOS
@@ -39,9 +31,9 @@ class IosCallRecorder : CallRecorder {
     @Volatile
     private var remoteSampleRate: Int = 48000
 
-    // ✅ Mutexes para sincronización thread-safe
-    private val localBufferMutex = Mutex()
-    private val remoteBufferMutex = Mutex()
+    // Locks simples para callbacks de audio de alta frecuencia
+    private val localBufferLock = Lock()
+    private val remoteBufferLock = Lock()
 
     // Listener para streaming en tiempo real
     private var audioStreamListener: AudioStreamListener? = null
@@ -108,11 +100,9 @@ class IosCallRecorder : CallRecorder {
         currentCallId = callId
         isRecording = true
 
-        // Limpiar buffers anteriores (no necesita mutex aquí porque isRecording es false)
-        runBlocking {
-            localBufferMutex.withLock { localAudioBuffer.clear() }
-            remoteBufferMutex.withLock { remoteAudioBuffer.clear() }
-        }
+        // Limpiar buffers anteriores
+        synchronized(localBufferLock) { localAudioBuffer.clear() }
+        synchronized(remoteBufferLock) { remoteAudioBuffer.clear() }
 
         // Iniciar captura del micrófono
         startMicrophoneCapture()
@@ -144,10 +134,7 @@ class IosCallRecorder : CallRecorder {
                     format = format
                 ) { buffer, _ ->
                     buffer?.let {
-                        // ✅ Capturar en coroutine para poder usar suspend
-                        recordingScope.launch {
-                            captureAudioBuffer(it)
-                        }
+                        captureAudioBuffer(it)
                     }
                 }
 
@@ -163,7 +150,7 @@ class IosCallRecorder : CallRecorder {
         }
     }
 
-    private suspend fun captureAudioBuffer(buffer: AVAudioPCMBuffer) {
+    private fun captureAudioBuffer(buffer: AVAudioPCMBuffer) {
         if (!isRecording && !isStreamingActive) return
 
         try {
@@ -183,10 +170,8 @@ class IosCallRecorder : CallRecorder {
 
             // Guardar en buffer si está grabando
             if (isRecording) {
-                localBufferMutex.withLock {
-                    if (isRecording) {
-                        localAudioBuffer.add(byteArray)
-                    }
+                synchronized(localBufferLock) {
+                    localAudioBuffer.add(byteArray)
                 }
                 // Emitir chunk para transcripción en tiempo real
                 audioChunkListener?.onLocalChunk(byteArray, SAMPLE_RATE.toInt())
@@ -230,8 +215,8 @@ class IosCallRecorder : CallRecorder {
         val timestamp = NSDate().timeIntervalSince1970.toLong() * 1000
 
         // Copiar buffers de forma segura antes de guardar
-        val localCopy = localBufferMutex.withLock { localAudioBuffer.toList() }
-        val remoteCopy = remoteBufferMutex.withLock { remoteAudioBuffer.toList() }
+        val localCopy = synchronized(localBufferLock) { localAudioBuffer.toList() }
+        val remoteCopy = synchronized(remoteBufferLock) { remoteAudioBuffer.toList() }
 
         // Guardar archivos - local usa SAMPLE_RATE del mic, remote usa remoteSampleRate detectado
         val prefix = buildFilePrefix(callId)
@@ -240,8 +225,8 @@ class IosCallRecorder : CallRecorder {
         val mixedFile = mixAndSaveAudio(localCopy, remoteCopy, "${prefix}_mixed_${timestamp}.wav")
 
         // Limpiar buffers
-        localBufferMutex.withLock { localAudioBuffer.clear() }
-        remoteBufferMutex.withLock { remoteAudioBuffer.clear() }
+        synchronized(localBufferLock) { localAudioBuffer.clear() }
+        synchronized(remoteBufferLock) { remoteAudioBuffer.clear() }
         localNumber = ""
         remoteNumber = ""
         currentCallId = null
@@ -259,8 +244,8 @@ class IosCallRecorder : CallRecorder {
         val callId = currentCallId ?: return@withContext null
         val timestamp = NSDate().timeIntervalSince1970.toLong() * 1000
 
-        val localCopy = localBufferMutex.withLock { localAudioBuffer.toList() }
-        val remoteCopy = remoteBufferMutex.withLock { remoteAudioBuffer.toList() }
+        val localCopy = synchronized(localBufferLock) { localAudioBuffer.toList() }
+        val remoteCopy = synchronized(remoteBufferLock) { remoteAudioBuffer.toList() }
 
         val prefix = buildFilePrefix(callId)
         val localFile = saveAudioToFile(localCopy, "${prefix}_local_${timestamp}.wav", SAMPLE_RATE.toInt())
@@ -290,12 +275,8 @@ class IosCallRecorder : CallRecorder {
 
         // Guardar en buffer si está grabando
         if (isRecording) {
-            recordingScope.launch {
-                remoteBufferMutex.withLock {
-                    if (isRecording) {
-                        remoteAudioBuffer.add(normalized)
-                    }
-                }
+            synchronized(remoteBufferLock) {
+                remoteAudioBuffer.add(normalized)
             }
         }
 
@@ -477,20 +458,13 @@ class IosCallRecorder : CallRecorder {
         recordingJob?.cancel()
         recordingScope.cancel()
 
-        runBlocking {
-            localBufferMutex.withLock { localAudioBuffer.clear() }
-            remoteBufferMutex.withLock { remoteAudioBuffer.clear() }
-        }
+        synchronized(localBufferLock) { localAudioBuffer.clear() }
+        synchronized(remoteBufferLock) { remoteAudioBuffer.clear() }
     }
 
     // ==================== GUARDADO DE ARCHIVOS ====================
 
     private fun saveAudioToFile(audioBuffer: List<ByteArray>, fileName: String, sampleRate: Int = SAMPLE_RATE.toInt()): String? {
-        if (audioBuffer.isEmpty()) {
-            log.w(TAG) { "⚠️ Empty audio buffer for $fileName" }
-            return null
-        }
-
         return try {
             val filePath = "$outputDir/$fileName"
             val totalAudioLen = audioBuffer.sumOf { it.size }
@@ -527,11 +501,6 @@ class IosCallRecorder : CallRecorder {
         remoteBuffer: List<ByteArray>,
         fileName: String
     ): String? {
-        if (localBuffer.isEmpty() && remoteBuffer.isEmpty()) {
-            log.w(TAG) { "⚠️ Both buffers are empty" }
-            return null
-        }
-
         return try {
             val filePath = "$outputDir/$fileName"
 
