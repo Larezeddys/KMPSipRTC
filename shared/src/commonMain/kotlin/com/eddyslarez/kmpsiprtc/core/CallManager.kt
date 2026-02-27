@@ -53,6 +53,12 @@ class CallManager(
     // de la llamada entrante como MISSED antes de que se pueda contestar.
     @Volatile private var isResettingPeerConnection = false
 
+    // Conjunto de callIds cuya PeerConnection fue cerrada al aceptar otra llamada en multi-línea.
+    // Cuando se reanude una de estas llamadas, hay que recrear la PC aunque no haya otras llamadas
+    // activas en ese momento (p.ej. auto-resume tras BYE remoto de la llamada activa).
+    private val callsWithResetPC = mutableSetOf<String>()
+    private val resetPCMutex = Mutex()
+
     fun setMatrixManager(manager: MatrixManager) {
         this.matrixManager = manager
     }
@@ -498,10 +504,16 @@ class CallManager(
                 // (call1 en hold) y tiene ICE candidatos distintos al endpoint de media de call2.
                 // Cerrarla garantiza que createAnswer crea una PeerConnection limpia para call2,
                 // evitando la pérdida de audio causada por re-negociación ICE fallida.
-                val hasOtherActiveCalls = MultiCallManager.getActiveCalls()
-                    .any { it.callId != callData.callId }
+                val otherActiveCalls = MultiCallManager.getActiveCalls()
+                    .filter { it.callId != callData.callId }
+                val hasOtherActiveCalls = otherActiveCalls.isNotEmpty()
                 if (hasOtherActiveCalls) {
                     log.d(tag = TAG) { "Multi-llamada: reiniciando PeerConnection para ${callData.callId}" }
+                    // Registrar qué llamadas tienen su PC cerrada: al reanudarlas después
+                    // (incluso si la otra llamada ya terminó) se forzará recreación de PC.
+                    resetPCMutex.withLock {
+                        otherActiveCalls.forEach { callsWithResetPC.add(it.callId) }
+                    }
                     // Suprimir handleWebRtcClosed durante el cierre intencional para que
                     // call2 no quede registrada como MISSED antes de conectarse.
                     isResettingPeerConnection = true
@@ -729,16 +741,21 @@ class CallManager(
                 CallStateManager.startResume(targetCallData.callId)
                 sipCoreManager.notifyCallStateChanged(CallState.RESUMING)
 
-                // Multi-llamada: la PC activa pertenece a la otra llamada (la que estaba
-                // activa mientras esta estaba en hold). Hay que cerrarla y recrearla con
-                // ICE/DTLS frescos para el endpoint de esta llamada.
-                // Sin otras llamadas: reutilizar PC existente, solo cambiar direccion SDP.
+                // Necesidad de recrear la PC:
+                // (A) Hay otras llamadas activas: la PC activa pertenece a otra llamada → recrear.
+                // (B) La PC de esta llamada fue cerrada al aceptar otra llamada (ver acceptSipCall),
+                //     y aunque esa otra llamada ya terminó (hasOtherCalls=false), la PC sigue muerta
+                //     → también recrear (auto-resume tras BYE remoto de la llamada activa).
                 val hasOtherCalls = MultiCallManager.getActiveCalls()
                     .any { it.callId != targetCallData.callId }
+                val pcWasReset = resetPCMutex.withLock {
+                    callsWithResetPC.remove(targetCallData.callId)
+                }
+                val needsPCRecreation = hasOtherCalls || pcWasReset
 
                 val resumeSdp: String
-                if (hasOtherCalls) {
-                    log.d(tag = TAG) { "Multi-llamada: recreando PeerConnection para resumir ${targetCallData.callId}" }
+                if (needsPCRecreation) {
+                    log.d(tag = TAG) { "Recreando PeerConnection para resumir ${targetCallData.callId} (hasOtherCalls=$hasOtherCalls, pcWasReset=$pcWasReset)" }
                     // Suprimir handleWebRtcClosed durante el cierre intencional de la PC
                     isResettingPeerConnection = true
                     try {
@@ -749,6 +766,13 @@ class CallManager(
                     }
                     // createOffer: crea nueva PC + inicia audioController + retorna SDP con ICE
                     resumeSdp = audioManager.createOffer()
+                    // Resetear el holdManager para esta llamada: al haber recreado la PC,
+                    // el estado interno de isCallOnHold quedó obsoleto. Sin este reset, el
+                    // próximo holdCall() retorna el SDP antiguo en lugar del SDP actualizado,
+                    // enviando a=sendrecv en el RE-INVITE de hold y rompiendo la pausa.
+                    holdManagersMutex.withLock {
+                        callHoldManagers.remove(targetCallData.callId)
+                    }
                 } else {
                     val holdManager = holdManagersMutex.withLock {
                         callHoldManagers.getOrPut(targetCallData.callId) { CallHoldManager(webRtcManager) }

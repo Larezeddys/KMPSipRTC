@@ -70,17 +70,16 @@ object CallDataNormalizer {
 
     /**
      * Detecta si una URI de destino corresponde a una sesión callback WebSocket.
-     * Condiciones:
-     * - Contiene dominio `.invalid`, O
-     * - Contiene `transport=ws` y el usuario no es un número de teléfono válido
+     * Indicador definitivo: dominio `.invalid` (RFC 2606 / RFC 7118) usado por
+     * Asterisk para direcciones de sesión WebSocket transitorias.
+     *
+     * La condición `transport=ws` fue eliminada porque producía falsos positivos:
+     * llamadas entrantes regulares de extensiones cortas (ej. "1001", 4 dígitos)
+     * pasaban por WebSocket con `transport=ws` en la URI y no coincidían con
+     * PHONE_REGEX (5+ dígitos), siendo incorrectamente clasificadas como callback.
      */
     private fun detectCallback(toUri: String): Boolean {
-        if (toUri.contains(".invalid", ignoreCase = true)) return true
-        if (toUri.contains("transport=ws", ignoreCase = true)) {
-            val user = SIP_USER_REGEX.find(toUri)?.groupValues?.get(1).orEmpty()
-            if (!user.matches(PHONE_REGEX)) return true
-        }
-        return false
+        return toUri.contains(".invalid", ignoreCase = true)
     }
 
     /**

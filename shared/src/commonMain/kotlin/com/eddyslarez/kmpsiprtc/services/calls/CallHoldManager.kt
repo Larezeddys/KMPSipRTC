@@ -17,7 +17,10 @@ internal class CallHoldManager(private val webRtcManager: WebRtcManager) {
         try {
             if (isCallOnHold) return originalLocalSdp
 
-            val currentSdp = webRtcManager.getLocalDescription() ?: fallbackSdp ?: return null
+            // Preferir fallbackSdp (localSdp almacenado por CallManager) sobre
+            // getLocalDescription(), ya que en multi-llamada la PC activa puede
+            // pertenecer a otra llamada y getLocalDescription() retornaría su SDP.
+            val currentSdp = fallbackSdp ?: webRtcManager.getLocalDescription() ?: return null
             originalLocalSdp = currentSdp
 
             val holdSdp = modifySdpForHold(currentSdp)
