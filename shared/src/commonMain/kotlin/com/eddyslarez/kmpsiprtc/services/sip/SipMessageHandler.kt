@@ -311,8 +311,22 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             // causando que se llame callOnHold/callResumed en la llamada equivocada.
             val perCallState = MultiCallManager.getCallState(callData.callId)?.state
 
-            // Enviar ACK para re-INVITE
-            val ack = SipMessageBuilder.buildAckMessage(accountInfo, callData)
+            // Enviar ACK para re-INVITE.
+            // CRÍTICO: el CSeq del ACK debe coincidir exactamente con el del 200 OK, NO con el
+            // cseq global. En multi-llamada, el cseq global puede haber avanzado (otro re-INVITE
+            // fue enviado concurrentemente) antes de que llegue este 200 OK, causando que el
+            // servidor rechace el ACK y retransmita el 200 OK indefinidamente.
+            val responseCSeq = SipMessageParser.extractHeader(lines, "CSeq")
+                .trim().split(" ").firstOrNull()?.toIntOrNull() ?: accountInfo.cseq
+            val responseContact = SipMessageParser.extractUriFromContact(
+                SipMessageParser.extractHeader(lines, "Contact")
+            ).takeIf { it.isNotBlank() }
+            log.d(tag = TAG) { "ACK para re-INVITE: CSeq=$responseCSeq, Contact=$responseContact" }
+            val ack = SipMessageBuilder.buildAckMessage(
+                accountInfo, callData,
+                explicitCSeq = responseCSeq,
+                explicitRequestUri = responseContact
+            )
             sendViaSharedWebSocket(ack)
 
             when (perCallState) {

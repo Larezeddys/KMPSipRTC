@@ -36,7 +36,7 @@ object CallDataNormalizer {
 
         // Detectar callback por el rawToUri o el campo to actual
         val rawTo = callData.rawToUri ?: callData.to
-        val isCallback = detectCallback(rawTo)
+        val isCallback = detectCallback(rawTo, callData)
 
         if (!isCallback) return callData
 
@@ -78,8 +78,19 @@ object CallDataNormalizer {
      * pasaban por WebSocket con `transport=ws` en la URI y no coincidían con
      * PHONE_REGEX (5+ dígitos), siendo incorrectamente clasificadas como callback.
      */
-    private fun detectCallback(toUri: String): Boolean {
-        return toUri.contains(".invalid", ignoreCase = true)
+    private fun detectCallback(toUri: String, callData: CallData): Boolean {
+        // `.invalid` solo indica sesión WebSocket y también aparece en llamadas
+        // entrantes normales. No alcanza para clasificar callback.
+        if (!toUri.contains(".invalid", ignoreCase = true)) return false
+
+        // Señal fuerte de callback: P-Asserted-Identity trae número real, mientras
+        // que `From` no es un número telefónico o difiere del número real.
+        val assertedNumber = extractPhoneNumber(callData.assertedIdentity)
+        val fromNumber = extractPhoneNumber(callData.rawFromUri) ?: extractPhoneNumber(callData.from)
+
+        if (assertedNumber == null) return false
+
+        return fromNumber == null || fromNumber != assertedNumber
     }
 
     /**

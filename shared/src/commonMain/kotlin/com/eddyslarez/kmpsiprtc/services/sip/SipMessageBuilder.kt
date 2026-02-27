@@ -306,19 +306,48 @@ object SipMessageBuilder {
     /**
      * Build ACK message
      */
-    fun buildAckMessage(accountInfo: AccountInfo, callData: CallData): String {
-        val target = callData.to
-        val uri = "sip:${target}@${accountInfo.domain}"
+    fun buildAckMessage(
+        accountInfo: AccountInfo,
+        callData: CallData,
+        // En re-INVITE multi-llamada el cseq global puede haber avanzado antes de que llegue
+        // el 200 OK, por lo que el ACK debe usar el CSeq EXACTO del 200 OK, no el global.
+        explicitCSeq: Int? = null,
+        // El Request-URI del ACK para re-INVITE debe ser el Contact del 200 OK (RFC 3261 §17.1.1.3)
+        explicitRequestUri: String? = null
+    ): String {
+        val defaultUri = when (callData.direction) {
+            CallDirections.OUTGOING -> "sip:${callData.to}@${accountInfo.domain}"
+            CallDirections.INCOMING -> {
+                callData.remoteContactUri
+                    ?.takeIf { it.isNotBlank() }
+                    ?: "sip:${callData.from}@${accountInfo.domain}"
+            }
+        }
+        val requestUri = explicitRequestUri ?: defaultUri
+        val cseq = explicitCSeq ?: accountInfo.cseq
+
+        val fromTag = when (callData.direction) {
+            CallDirections.OUTGOING -> callData.inviteFromTag
+            CallDirections.INCOMING -> callData.toTag ?: callData.inviteToTag
+        }
+        val toUri = when (callData.direction) {
+            CallDirections.OUTGOING -> "sip:${callData.to}@${accountInfo.domain}"
+            CallDirections.INCOMING -> "sip:${callData.from}@${accountInfo.domain}"
+        }
+        val toTag = when (callData.direction) {
+            CallDirections.OUTGOING -> callData.inviteToTag
+            CallDirections.INCOMING -> callData.fromTag ?: callData.inviteFromTag
+        }
 
         return buildString {
-            append("ACK $uri $SIP_VERSION\r\n")
+            append("ACK $requestUri $SIP_VERSION\r\n")
             // ✅ CORREGIDO: Via usa localContactHost
             append("Via: $SIP_VERSION/$SIP_TRANSPORT ${accountInfo.localContactHost};branch=z9hG4bK${generateId()}\r\n")
             append("Max-Forwards: $MAX_FORWARDS\r\n")
-            append("From: <sip:${accountInfo.username}@${accountInfo.domain}>;tag=${callData.inviteFromTag}\r\n")
-            append("To: <$uri>;tag=${callData.inviteToTag}\r\n")
+            append("From: <sip:${accountInfo.username}@${accountInfo.domain}>;tag=$fromTag\r\n")
+            append("To: <$toUri>;tag=$toTag\r\n")
             append("Call-ID: ${callData.callId}\r\n")
-            append("CSeq: ${accountInfo.cseq} ACK\r\n")
+            append("CSeq: $cseq ACK\r\n")
             append("Content-Length: 0\r\n\r\n")
         }
     }
