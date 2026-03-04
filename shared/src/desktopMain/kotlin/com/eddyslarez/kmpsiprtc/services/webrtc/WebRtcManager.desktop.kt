@@ -191,6 +191,16 @@ class DesktopWebRtcManager : WebRtcManager {
         }
     }
 
+    override fun setRemoteAudioEnabled(enabled: Boolean) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.setRemoteAudioEnabled(enabled)
+    }
+
+    override fun isRemoteAudioEnabled(): Boolean {
+        if (!::peerConnectionController.isInitialized) return true
+        return peerConnectionController.isRemoteAudioEnabled()
+    }
+
     override fun setActiveAudioRoute(audioUnitType: AudioUnitTypes): Boolean {
         return if (::audioController.isInitialized) {
             audioController.setActiveRoute(audioUnitType)
@@ -412,6 +422,28 @@ class DesktopWebRtcManager : WebRtcManager {
 
     override fun setListener(listener: WebRtcEventListener?) {
         this.webRtcEventListener = listener
+    }
+
+    // ==================== INYECCIÓN DE AUDIO PARA TRADUCCIÓN ====================
+
+    override fun setLocalAudioEnabled(enabled: Boolean) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.setLocalAudioEnabled(enabled)
+    }
+
+    override fun isLocalAudioEnabled(): Boolean {
+        if (!::peerConnectionController.isInitialized) return true
+        return peerConnectionController.isLocalAudioEnabled()
+    }
+
+    override fun injectLocalAudio(pcmData: ByteArray, sampleRate: Int, channels: Int, bitsPerSample: Int) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.injectLocalAudio(pcmData, sampleRate, channels, bitsPerSample)
+    }
+
+    override fun injectRemoteAudio(pcmData: ByteArray, sampleRate: Int, channels: Int, bitsPerSample: Int) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.injectRemoteAudio(pcmData, sampleRate, channels, bitsPerSample)
     }
 
     // ==================== PRIVATE HELPERS ====================

@@ -22,6 +22,8 @@ data class SipAccountEntity @OptIn(ExperimentalTime::class) constructor(
     val userAgent: String? = null,
     val pushToken: String? = null,
     val pushProvider: String? = null,
+    val incomingRingtoneUri: String? = null,
+    val outgoingRingtoneUri: String? = null,
     val registrationState: RegistrationState = RegistrationState.NONE,
     val lastRegistrationTime: Long = 0L,
     val registrationExpiry: Long = 0L,

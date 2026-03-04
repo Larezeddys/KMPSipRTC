@@ -77,6 +77,8 @@ interface WebRtcManager {
 
     fun setMuted(muted: Boolean)
     fun isMuted(): Boolean
+    fun setRemoteAudioEnabled(enabled: Boolean)
+    fun isRemoteAudioEnabled(): Boolean
     fun getLocalDescription(): String?
     fun diagnoseAudioIssues(): String
     fun prepareAudioForCall()
@@ -144,6 +146,57 @@ interface WebRtcManager {
      * Verificar si el streaming de audio está activo
      */
     fun isAudioStreaming(): Boolean
+
+    // ==================== INYECCIÓN DE AUDIO PARA TRADUCCIÓN ====================
+
+    /**
+     * Habilitar o deshabilitar el audio local (micrófono) que se envía al peer remoto.
+     * Cuando se deshabilita, el micrófono real se silencia en el pipeline de WebRTC
+     * pero el streaming/captura de audio local continúa funcionando para poder
+     * enviar el audio al servidor de traducción.
+     *
+     * Diferencia con setMuted(): setMuted() es para el usuario (mute manual),
+     * setLocalAudioEnabled() es para el sistema de traducción (reemplazar mic con audio traducido).
+     *
+     * @param enabled true = audio del micrófono real se envía al remoto (normal),
+     *                false = micrófono silenciado en WebRTC (para inyectar audio traducido)
+     */
+    fun setLocalAudioEnabled(enabled: Boolean)
+
+    /**
+     * Verificar si el audio local está habilitado
+     */
+    fun isLocalAudioEnabled(): Boolean
+
+    /**
+     * Inyectar datos de audio PCM que se enviarán al peer remoto en lugar del micrófono.
+     * Solo funciona cuando setLocalAudioEnabled(false) ha sido llamado previamente.
+     *
+     * El audio inyectado reemplaza completamente lo que el remoto escucha.
+     * Se usa para enviar el audio traducido por IA al otro participante de la llamada.
+     *
+     * @param pcmData Audio PCM 16-bit little-endian, mono
+     * @param sampleRate Frecuencia de muestreo del audio (ej: 24000)
+     * @param channels Número de canales (normalmente 1 = mono)
+     * @param bitsPerSample Bits por muestra (normalmente 16)
+     */
+    fun injectLocalAudio(pcmData: ByteArray, sampleRate: Int, channels: Int = 1, bitsPerSample: Int = 16)
+
+    /**
+     * Inyectar datos de audio PCM que se reproducirán localmente (en el speaker del usuario)
+     * en lugar del audio remoto original.
+     * Solo funciona cuando setRemoteAudioEnabled(false) ha sido llamado previamente.
+     *
+     * Se usa para reproducir la voz traducida del participante remoto.
+     * Nota: En la mayoría de plataformas esto se maneja via TranslationAudioPlayer
+     * directamente, pero esta API permite inyección a nivel de WebRTC si es necesario.
+     *
+     * @param pcmData Audio PCM 16-bit little-endian, mono
+     * @param sampleRate Frecuencia de muestreo del audio (ej: 24000)
+     * @param channels Número de canales (normalmente 1 = mono)
+     * @param bitsPerSample Bits por muestra (normalmente 16)
+     */
+    fun injectRemoteAudio(pcmData: ByteArray, sampleRate: Int, channels: Int = 1, bitsPerSample: Int = 16)
 }
 interface WebRtcEventListener {
     /**

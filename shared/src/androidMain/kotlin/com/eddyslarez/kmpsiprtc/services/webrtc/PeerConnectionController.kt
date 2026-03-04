@@ -15,6 +15,9 @@ import kotlinx.coroutines.*
 import org.webrtc.*
 import org.webrtc.audio.AudioDeviceModule
 import org.webrtc.audio.JavaAudioDeviceModule
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -36,8 +39,25 @@ class PeerConnectionController(
     private var localAudioSource: AudioSource? = null
     private var audioDeviceModule: AudioDeviceModule? = null
     private var isMuted = false
+    @Volatile
+    private var remoteAudioEnabled = true
     private var currentConnectionState = WebRtcConnectionState.DISCONNECTED
     private var remoteAudioCapture: AudioTrackCapture? = null
+
+    // === INYECCIÓN DE AUDIO PARA TRADUCCIÓN ===
+    // Buffer FIFO para audio traducido que reemplazará al mic
+    private val localInjectionBuffer = ConcurrentLinkedQueue<ByteArray>()
+    // Flag que indica si la inyección de audio local está activa
+    @Volatile
+    private var localAudioInjectionActive = false
+    // Flag que indica si el audio local está habilitado
+    @Volatile
+    private var localAudioEnabled = true
+    // Sample rate del ADM de Android para resampleo
+    @Volatile
+    private var admSampleRate = 48000
+    // Referencia al JavaAudioDeviceModule para control del AudioRecord
+    private var javaAudioDeviceModule: JavaAudioDeviceModule? = null
 
     private val eglBase = EglBase.create()
 //    private var localAudioRecorder: AudioTrackRecorder? = null
@@ -100,7 +120,7 @@ class PeerConnectionController(
             log.d(TAG) { "Remote track added" }
             val track = receiver?.track()
             if (track is AudioTrack) {
-                track.setEnabled(true)
+                track.setEnabled(remoteAudioEnabled)
                 remoteAudioTrack = track
 
                 // ✅ NUEVO: Configurar captura de audio remoto
@@ -144,9 +164,40 @@ class PeerConnectionController(
                 .setUseHardwareNoiseSuppressor(true)
                 .setUseStereoInput(true)
                 .setUseStereoOutput(true)
+                .setAudioBufferCallback { buffer, sampleRate, channels, bitsPerSample, frames, timestamp ->
+                    // Este callback intercepta los datos del micrófono ANTES de enviarlos a WebRTC.
+                    // Cuando la inyección está activa, reemplazamos el contenido del buffer
+                    // con audio traducido del queue de inyección.
+                    admSampleRate = sampleRate
+                    if (localAudioInjectionActive) {
+                        val injectedData = localInjectionBuffer.poll()
+                        if (injectedData != null) {
+                            // Reemplazar contenido del buffer con audio traducido
+                            buffer.clear()
+                            val bytesToCopy = minOf(injectedData.size, buffer.remaining())
+                            buffer.put(injectedData, 0, bytesToCopy)
+                            // Si el buffer es más grande que los datos inyectados, rellenar con silencio
+                            while (buffer.hasRemaining()) {
+                                buffer.put(0)
+                            }
+                            buffer.rewind()
+                        } else {
+                            // Sin datos traducidos disponibles: enviar silencio
+                            val silenceSize = buffer.remaining()
+                            buffer.clear()
+                            for (i in 0 until silenceSize) {
+                                buffer.put(0)
+                            }
+                            buffer.rewind()
+                        }
+                    }
+                    // Retornar timestamp sin cambios
+                    timestamp
+                }
                 .createAudioDeviceModule()
 
             audioDeviceModule = audioModule
+            javaAudioDeviceModule = audioModule
 
             val options = PeerConnectionFactory.Options().apply {
                 disableEncryption = false
@@ -534,6 +585,125 @@ class PeerConnectionController(
     }
 
     fun isMuted(): Boolean = isMuted
+
+    fun setRemoteAudioEnabled(enabled: Boolean) {
+        remoteAudioEnabled = enabled
+        try {
+            remoteAudioTrack?.setEnabled(enabled)
+        } catch (e: Exception) {
+            log.e(TAG) { "Error setting remote audio enabled: ${e.message}" }
+        }
+    }
+
+    fun isRemoteAudioEnabled(): Boolean = remoteAudioEnabled
+
+    // ==================== INYECCIÓN DE AUDIO PARA TRADUCCIÓN ====================
+
+    /**
+     * Habilitar/deshabilitar el audio local (micrófono) que se envía al peer remoto.
+     * Cuando se deshabilita, el AudioBufferCallback reemplaza los datos del mic
+     * con audio del buffer de inyección (o silencio).
+     */
+    fun setLocalAudioEnabled(enabled: Boolean) {
+        if (localAudioEnabled == enabled) return
+        localAudioEnabled = enabled
+        localAudioInjectionActive = !enabled
+
+        log.d(TAG) { "setLocalAudioEnabled: $enabled (injection: $localAudioInjectionActive)" }
+
+        if (!enabled) {
+            // Limpiar buffer para empezar limpio
+            localInjectionBuffer.clear()
+            log.d(TAG) { "✅ Local audio injection activated via AudioBufferCallback" }
+        } else {
+            localInjectionBuffer.clear()
+            log.d(TAG) { "✅ Local audio injection deactivated - mic restored" }
+        }
+    }
+
+    fun isLocalAudioEnabled(): Boolean = localAudioEnabled
+
+    /**
+     * Inyecta datos de audio PCM que se enviarán al peer remoto.
+     * Los datos deben ser PCM 16-bit little-endian.
+     * El resampleo se maneja automáticamente por el AudioBufferCallback
+     * ya que los datos se copian al buffer del ADM que opera al sampleRate nativo.
+     *
+     * NOTA: Para Android, el audio se inyecta via el AudioBufferCallback del
+     * JavaAudioDeviceModule. Los datos se ponen en un queue y el callback
+     * los lee cuando el ADM necesita más audio.
+     *
+     * @param pcmData Audio PCM 16-bit LE
+     * @param sampleRate Frecuencia de muestreo (ej: 24000)
+     * @param channels Número de canales (1 = mono)
+     * @param bitsPerSample Bits por muestra (16)
+     */
+    fun injectLocalAudio(pcmData: ByteArray, sampleRate: Int, channels: Int, bitsPerSample: Int) {
+        if (!localAudioInjectionActive) return
+
+        try {
+            // Si el sampleRate no coincide con el del ADM, resamplear
+            if (sampleRate != admSampleRate) {
+                val resampled = resamplePcm(pcmData, sampleRate, admSampleRate, channels, bitsPerSample)
+                localInjectionBuffer.offer(resampled)
+            } else {
+                localInjectionBuffer.offer(pcmData.copyOf())
+            }
+
+            // Limitar el tamaño del buffer para evitar latencia acumulada
+            while (localInjectionBuffer.size > 50) {
+                localInjectionBuffer.poll()
+            }
+        } catch (e: Exception) {
+            log.e(TAG) { "Error injecting local audio: ${e.message}" }
+        }
+    }
+
+    /**
+     * Inyecta audio remoto traducido. En Android, la reproducción de audio traducido
+     * se maneja via TranslationAudioPlayer (AudioTrack de Android directo al speaker).
+     * Este método es un placeholder por simetría con la interfaz.
+     */
+    fun injectRemoteAudio(pcmData: ByteArray, sampleRate: Int, channels: Int, bitsPerSample: Int) {
+        // En Android, la reproducción de audio traducido se maneja via TranslationAudioPlayer
+        // (android.media.AudioTrack directo al speaker).
+    }
+
+    /**
+     * Resampleo lineal simple de PCM 16-bit
+     */
+    private fun resamplePcm(
+        input: ByteArray, fromRate: Int, toRate: Int, channels: Int, bitsPerSample: Int
+    ): ByteArray {
+        if (fromRate == toRate) return input.copyOf()
+
+        val bytesPerSample = bitsPerSample / 8
+        val frameSize = bytesPerSample * channels
+        val inputFrames = input.size / frameSize
+        val outputFrames = (inputFrames.toLong() * toRate / fromRate).toInt()
+        val output = ByteArray(outputFrames * frameSize)
+
+        val inBuf = ByteBuffer.wrap(input).order(ByteOrder.LITTLE_ENDIAN)
+        val outBuf = ByteBuffer.wrap(output).order(ByteOrder.LITTLE_ENDIAN)
+
+        val ratio = fromRate.toDouble() / toRate.toDouble()
+
+        for (i in 0 until outputFrames) {
+            val srcPos = i * ratio
+            val srcIdx = srcPos.toInt().coerceIn(0, inputFrames - 1)
+            val nextIdx = (srcIdx + 1).coerceIn(0, inputFrames - 1)
+            val frac = srcPos - srcIdx
+
+            for (ch in 0 until channels) {
+                val s0 = inBuf.getShort((srcIdx * frameSize + ch * bytesPerSample)).toInt()
+                val s1 = inBuf.getShort((nextIdx * frameSize + ch * bytesPerSample)).toInt()
+                val interpolated = (s0 + (s1 - s0) * frac).toInt().coerceIn(-32768, 32767).toShort()
+                outBuf.putShort(interpolated)
+            }
+        }
+
+        return output
+    }
 
     // ==================== DTMF ====================
 

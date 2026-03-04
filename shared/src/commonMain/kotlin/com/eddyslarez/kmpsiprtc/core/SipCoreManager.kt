@@ -331,6 +331,35 @@ class SipCoreManager private constructor(
      */
     fun isAudioStreaming() = webRtcManager.isAudioStreaming()
 
+    fun setRemoteAudioEnabled(enabled: Boolean) = webRtcManager.setRemoteAudioEnabled(enabled)
+
+    fun isRemoteAudioEnabled() = webRtcManager.isRemoteAudioEnabled()
+
+    // ==================== INYECCIÓN DE AUDIO PARA TRADUCCIÓN ====================
+
+    /**
+     * Habilitar/deshabilitar el audio local (micrófono) que se envía al peer remoto.
+     * Cuando se deshabilita, el micrófono se silencia en WebRTC y el audio traducido
+     * puede inyectarse via injectLocalAudio().
+     */
+    fun setLocalAudioEnabled(enabled: Boolean) = webRtcManager.setLocalAudioEnabled(enabled)
+
+    fun isLocalAudioEnabled() = webRtcManager.isLocalAudioEnabled()
+
+    /**
+     * Inyectar audio PCM traducido que se enviará al peer remoto.
+     * Solo funciona cuando setLocalAudioEnabled(false) ha sido llamado.
+     */
+    fun injectLocalAudio(pcmData: ByteArray, sampleRate: Int, channels: Int = 1, bitsPerSample: Int = 16) =
+        webRtcManager.injectLocalAudio(pcmData, sampleRate, channels, bitsPerSample)
+
+    /**
+     * Inyectar audio PCM traducido para reproducción local (speaker).
+     * Solo funciona cuando setRemoteAudioEnabled(false) ha sido llamado.
+     */
+    fun injectRemoteAudio(pcmData: ByteArray, sampleRate: Int, channels: Int = 1, bitsPerSample: Int = 16) =
+        webRtcManager.injectRemoteAudio(pcmData, sampleRate, channels, bitsPerSample)
+
     private fun initializeNetworkManager() {
         try {
             networkManager.initialize()
@@ -1009,6 +1038,8 @@ class SipCoreManager private constructor(
         domain: String,
         provider: String,
         token: String,
+        incomingRingtoneUri: String? = null,
+        outgoingRingtoneUri: String? = null,
         forcePushMode: Boolean = false
     ) {
         val accountKey = "$username@$domain"
@@ -1046,7 +1077,9 @@ class SipCoreManager private constructor(
                             domain = domain,
                             displayName = username,
                             pushToken = token,
-                            pushProvider = provider
+                            pushProvider = provider,
+                            incomingRingtoneUri = incomingRingtoneUri,
+                            outgoingRingtoneUri = outgoingRingtoneUri
                         )
 
                         log.d(tag = TAG) { "[OK] Account created in DB with ID: ${dbAccount.id}" }
@@ -1267,6 +1300,32 @@ class SipCoreManager private constructor(
 
     suspend fun saveRingtoneUris(incomingUri: String?, outgoingUri: String?) =
         audioManager.saveRingtoneUris(incomingUri, outgoingUri, databaseManager)
+
+    suspend fun saveAccountRingtoneUris(
+        username: String,
+        domain: String,
+        incomingUri: String?,
+        outgoingUri: String?
+    ) {
+        databaseManager?.updateAccountRingtoneUris(
+            username = username,
+            domain = domain,
+            incomingUri = incomingUri,
+            outgoingUri = outgoingUri
+        )
+    }
+
+    suspend fun applyAccountRingtoneUris(
+        username: String,
+        domain: String,
+        preferGlobal: Boolean = true
+    ) {
+        if (preferGlobal) return
+
+        val account = databaseManager?.getSipAccountByCredentials(username, domain) ?: return
+        account.incomingRingtoneUri?.let { audioManager.saveIncomingRingtoneUri(it, databaseManager) }
+        account.outgoingRingtoneUri?.let { audioManager.saveOutgoingRingtoneUri(it, databaseManager) }
+    }
 
     // Métodos DTMF (delegados a CallManager)
     fun sendDtmf(digit: Char, duration: Int = 160) = callManager?.sendDtmf(digit, duration)

@@ -28,10 +28,9 @@ object SipMessageParser {
      */
     fun extractCallId(message: String): String {
         return try {
-            val regex = Regex("""Call-ID:\s*(.+)""", RegexOption.IGNORE_CASE)
-            val match = regex.find(message)
-            match?.groups?.get(1)?.value?.trim() ?: ""
-        } catch (e: Exception) {
+            val lines = message.lines()
+            extractHeader(lines, "Call-ID")
+        } catch (_: Exception) {
             ""
         }
     }
@@ -89,9 +88,20 @@ object SipMessageParser {
      * Extracts a specific header from message lines
      */
     fun extractHeader(lines: List<String>, headerName: String): String {
-        val header = lines.find { it.startsWith("$headerName:", ignoreCase = true) }
-            ?.substring("$headerName:".length)?.trim() ?: ""
-        return header
+        val directHeader = lines.firstOrNull { it.startsWith("$headerName:", ignoreCase = true) }
+            ?.substringAfter(':')
+            ?.trim()
+        if (!directHeader.isNullOrEmpty()) return directHeader
+
+        // Soporte de cabeceras compactas SIP (RFC 3261)
+        if (headerName.equals("Call-ID", ignoreCase = true)) {
+            val compact = lines.firstOrNull { it.startsWith("i:", ignoreCase = true) }
+                ?.substringAfter(':')
+                ?.trim()
+            if (!compact.isNullOrEmpty()) return compact
+        }
+
+        return ""
     }
 
     /**

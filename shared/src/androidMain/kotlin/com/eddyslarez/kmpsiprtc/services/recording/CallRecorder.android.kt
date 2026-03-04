@@ -69,10 +69,18 @@ class AndroidCallRecorder() : CallRecorder {
     private fun sanitizeNumber(number: String): String =
         number.replace("+", "").replace(":", "-").replace("/", "-").replace(" ", "")
 
+    private fun sanitizeCallId(callId: String): String =
+        callId.replace(Regex("[^A-Za-z0-9._-]"), "-")
+
     private fun buildFilePrefix(callId: String): String {
+        val safeCallId = sanitizeCallId(callId)
         val local = sanitizeNumber(localNumber)
         val remote = sanitizeNumber(remoteNumber)
-        return if (local.isNotEmpty() && remote.isNotEmpty()) "${local}_to_${remote}" else callId
+        return if (local.isNotEmpty() && remote.isNotEmpty()) {
+            "${safeCallId}__${local}_to_${remote}"
+        } else {
+            safeCallId
+        }
     }
 
     // Listener para streaming en tiempo real (PCM crudo)

@@ -37,6 +37,8 @@ class IosPeerConnectionController(
 
     // Audio state
     private var isMuted = false
+    @Volatile
+    private var remoteAudioEnabled = true
     private var audioSessionConfigured = false
     private var microphonePermissionGranted = false
     private var audioTrackCreationRetries = 0
@@ -159,7 +161,7 @@ class IosPeerConnectionController(
             val track = event.receiver.track
             if (track is AudioStreamTrack) {
                 remoteAudioTrack = track
-                remoteAudioTrack?.enabled = true
+                remoteAudioTrack?.enabled = remoteAudioEnabled
 
                 // Configurar captura de audio remoto
                 setupRemoteAudioCapture(track)
@@ -339,6 +341,87 @@ class IosPeerConnectionController(
     }
 
     fun isMuted(): Boolean = isMuted
+
+    fun setRemoteAudioEnabled(enabled: Boolean) {
+        remoteAudioEnabled = enabled
+        runCatching {
+            remoteAudioTrack?.enabled = enabled
+        }
+    }
+
+    fun isRemoteAudioEnabled(): Boolean = remoteAudioEnabled
+
+    // ==================== INYECCIÓN DE AUDIO PARA TRADUCCIÓN ====================
+
+    // Flag que indica si el audio local está habilitado
+    @Volatile
+    private var localAudioEnabled = true
+    // Flag que indica si la inyección de audio local está activa
+    @Volatile
+    private var localAudioInjectionActive = false
+
+    /**
+     * Habilitar/deshabilitar el audio local (micrófono) que se envía al peer remoto.
+     * Cuando se deshabilita, el track del mic se silencia en WebRTC.
+     * El audio traducido se inyecta via injectLocalAudio().
+     *
+     * NOTA iOS: Actualmente la inyección en el pipeline de WebRTC se implementa
+     * silenciando el track local. Para inyectar audio traducido al remoto,
+     * se necesita acceso al RTCAudioSource nativo (fase 2).
+     * El audio del micrófono sigue siendo capturado por el CallRecorder/AudioStreamListener
+     * para enviar al servidor de traducción.
+     */
+    fun setLocalAudioEnabled(enabled: Boolean) {
+        if (localAudioEnabled == enabled) return
+        localAudioEnabled = enabled
+        localAudioInjectionActive = !enabled
+
+        log.d(TAG) { "setLocalAudioEnabled: $enabled (injection: $localAudioInjectionActive)" }
+
+        if (!enabled) {
+            // Silenciar el track local en WebRTC (el remoto no escucha nada del mic)
+            // IMPORTANTE: No usar setMuted() porque eso es para control del usuario
+            localAudioTrack?.enabled = false
+            log.d(TAG) { "✅ Local audio injection activated - mic muted in WebRTC" }
+        } else {
+            // Restaurar el track local
+            localAudioTrack?.enabled = !isMuted
+            localAudioInjectionActive = false
+            log.d(TAG) { "✅ Local audio injection deactivated - mic restored" }
+        }
+    }
+
+    fun isLocalAudioEnabled(): Boolean = localAudioEnabled
+
+    /**
+     * Inyecta datos de audio PCM que se enviarán al peer remoto.
+     *
+     * NOTA iOS: En la implementación actual, el audio traducido NO se inyecta
+     * directamente en el pipeline de WebRTC (requiere acceso al RTCAudioSource nativo).
+     * El audio se almacena en buffer para una futura implementación con interop nativo.
+     *
+     * TODO: Implementar acceso al RTCAudioSource nativo via Kotlin/Native interop
+     * para llamar a pushBuffer() y enviar el audio traducido al peer remoto.
+     */
+    fun injectLocalAudio(pcmData: ByteArray, sampleRate: Int, channels: Int, bitsPerSample: Int) {
+        if (!localAudioInjectionActive) return
+        // TODO: Implementar inyección real via RTCAudioSource nativo
+        // Por ahora el mic está silenciado y el audio traducido se pierde.
+        // La implementación completa requiere:
+        // 1. Obtener RTCPeerConnectionFactory nativo
+        // 2. Crear RTCAudioSource con audioSourceWithConstraints
+        // 3. Usar RTCRtpSender.replaceTrack() para reemplazar el track
+        // 4. Llamar audioSource.pushBuffer(CMSampleBuffer) con los datos PCM
+        log.d(TAG) { "injectLocalAudio: ${pcmData.size} bytes @ ${sampleRate}Hz (iOS injection pending full implementation)" }
+    }
+
+    /**
+     * Inyecta audio remoto traducido para reproducción local.
+     * En iOS, la reproducción se maneja via TranslationAudioPlayer (AVAudioEngine).
+     */
+    fun injectRemoteAudio(pcmData: ByteArray, sampleRate: Int, channels: Int, bitsPerSample: Int) {
+        // En iOS, la reproducción de audio traducido se maneja via TranslationAudioPlayer
+    }
 
     // ==================== DTMF ====================
 

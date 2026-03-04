@@ -38,6 +38,7 @@ import com.eddyslarez.kmpsiprtc.data.models.SipError
 import com.eddyslarez.kmpsiprtc.data.models.HealthReport
 import com.eddyslarez.kmpsiprtc.data.models.ComponentHealth
 import com.eddyslarez.kmpsiprtc.data.models.HealthStatus
+import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 /**
  * KmpSipRtc - Biblioteca principal para gestión de llamadas SIP/WebRTC
  *
@@ -1255,6 +1256,8 @@ class KmpSipRtc private constructor() {
         domain: String,
         pushToken: String? = null,
         pushProvider: String? = null,
+        incomingRingtoneUri: String? = null,
+        outgoingRingtoneUri: String? = null,
         forcePushMode: Boolean = false,
         onComplete: ((Result<Unit>) -> Unit)? = null
     ) {
@@ -1269,6 +1272,8 @@ class KmpSipRtc private constructor() {
                     domain = domain,
                     provider = pushProvider ?: "",
                     token = pushToken ?: "",
+                    incomingRingtoneUri = incomingRingtoneUri,
+                    outgoingRingtoneUri = outgoingRingtoneUri,
                     forcePushMode = forcePushMode
                 )
                 onComplete?.invoke(Result.success(Unit))
@@ -1778,6 +1783,52 @@ class KmpSipRtc private constructor() {
         }
     }
 
+    fun saveAccountRingtoneUris(
+        username: String,
+        domain: String,
+        incomingUri: String?,
+        outgoingUri: String?,
+        onComplete: ((Result<Unit>) -> Unit)? = null
+    ) {
+        checkInitialized()
+        internalScope.launch {
+            try {
+                sipCoreManager?.saveAccountRingtoneUris(
+                    username = username,
+                    domain = domain,
+                    incomingUri = incomingUri,
+                    outgoingUri = outgoingUri
+                )
+                onComplete?.invoke(Result.success(Unit))
+            } catch (e: Exception) {
+                log.e(tag = TAG) { "Error saving account ringtone URIs: ${e.message}" }
+                onComplete?.invoke(Result.failure(e))
+            }
+        }
+    }
+
+    fun applyAccountRingtoneUris(
+        username: String,
+        domain: String,
+        preferGlobal: Boolean = true,
+        onComplete: ((Result<Unit>) -> Unit)? = null
+    ) {
+        checkInitialized()
+        internalScope.launch {
+            try {
+                sipCoreManager?.applyAccountRingtoneUris(
+                    username = username,
+                    domain = domain,
+                    preferGlobal = preferGlobal
+                )
+                onComplete?.invoke(Result.success(Unit))
+            } catch (e: Exception) {
+                log.e(tag = TAG) { "Error applying account ringtone URIs: ${e.message}" }
+                onComplete?.invoke(Result.failure(e))
+            }
+        }
+    }
+
     // === API PÚBLICA - DTMF ===
 
     /**
@@ -2128,9 +2179,20 @@ class KmpSipRtc private constructor() {
         domain: String,
         pushToken: String? = null,
         pushProvider: String? = null,
+        incomingRingtoneUri: String? = null,
+        outgoingRingtoneUri: String? = null,
         forcePushMode: Boolean = false
     ): Result<Unit> = suspendCancellableCoroutine { cont ->
-        registerAccount(username, password, domain, pushToken, pushProvider, forcePushMode) { result ->
+        registerAccount(
+            username = username,
+            password = password,
+            domain = domain,
+            pushToken = pushToken,
+            pushProvider = pushProvider,
+            incomingRingtoneUri = incomingRingtoneUri,
+            outgoingRingtoneUri = outgoingRingtoneUri,
+            forcePushMode = forcePushMode
+        ) { result ->
             cont.resume(result) {}
         }
     }
@@ -2971,6 +3033,97 @@ class KmpSipRtc private constructor() {
      */
     fun declineCall(handle: CallHandle) {
         declineCallById(handle.callId)
+    }
+
+    // ==================== STREAMING DE AUDIO EN TIEMPO REAL ====================
+
+    /**
+     * Configura un listener para recibir audio PCM crudo en tiempo real.
+     * Permite enviar audio de la llamada a un servidor externo (ej: traducción IA).
+     * @param listener Listener que recibirá los datos, o null para desregistrar
+     */
+    fun setAudioStreamListener(listener: AudioStreamListener?) {
+        sipCoreManager?.setAudioStreamListener(listener)
+    }
+
+    /**
+     * Inicia el streaming de audio en tiempo real para una llamada activa.
+     * Independiente del sistema de grabación a archivo.
+     * @param callId Identificador único de la llamada
+     */
+    fun startAudioStreaming(callId: String) {
+        sipCoreManager?.startAudioStreaming(callId)
+    }
+
+    /**
+     * Detiene el streaming de audio en tiempo real.
+     */
+    fun stopAudioStreaming() {
+        sipCoreManager?.stopAudioStreaming()
+    }
+
+    /**
+     * Verifica si el streaming de audio está activo.
+     * @return true si el streaming está en curso
+     */
+    fun isAudioStreaming(): Boolean {
+        return sipCoreManager?.isAudioStreaming() ?: false
+    }
+
+    fun setRemoteAudioEnabled(enabled: Boolean) {
+        sipCoreManager?.setRemoteAudioEnabled(enabled)
+    }
+
+    fun isRemoteAudioEnabled(): Boolean {
+        return sipCoreManager?.isRemoteAudioEnabled() ?: true
+    }
+
+    // ==================== INYECCIÓN DE AUDIO PARA TRADUCCIÓN ====================
+
+    /**
+     * Habilitar/deshabilitar el audio local (micrófono) que se envía al peer remoto.
+     * Cuando se deshabilita, el micrófono se silencia en WebRTC y el audio traducido
+     * puede inyectarse via injectLocalAudio().
+     * @param enabled true para habilitar el micrófono original, false para silenciarlo
+     */
+    fun setLocalAudioEnabled(enabled: Boolean) {
+        sipCoreManager?.setLocalAudioEnabled(enabled)
+    }
+
+    /**
+     * Verifica si el audio local (micrófono) está habilitado.
+     * @return true si el micrófono original está activo
+     */
+    fun isLocalAudioEnabled(): Boolean {
+        return sipCoreManager?.isLocalAudioEnabled() ?: true
+    }
+
+    /**
+     * Inyecta audio PCM traducido que se enviará al peer remoto en lugar del micrófono.
+     * Solo funciona cuando setLocalAudioEnabled(false) ha sido llamado previamente.
+     * El audio se resamples automáticamente a 48kHz si es necesario.
+     *
+     * @param pcmData Datos PCM crudos (16-bit signed, little-endian)
+     * @param sampleRate Tasa de muestreo del audio (ej: 24000 para audio de OpenAI Realtime API)
+     * @param channels Número de canales (default 1 = mono)
+     * @param bitsPerSample Bits por muestra (default 16)
+     */
+    fun injectLocalAudio(pcmData: ByteArray, sampleRate: Int, channels: Int = 1, bitsPerSample: Int = 16) {
+        sipCoreManager?.injectLocalAudio(pcmData, sampleRate, channels, bitsPerSample)
+    }
+
+    /**
+     * Inyecta audio PCM traducido para reproducción local (speaker/auricular).
+     * Solo funciona cuando setRemoteAudioEnabled(false) ha sido llamado previamente.
+     * Este audio reemplaza la voz original del interlocutor remoto con la traducción.
+     *
+     * @param pcmData Datos PCM crudos (16-bit signed, little-endian)
+     * @param sampleRate Tasa de muestreo del audio (ej: 24000 para audio de OpenAI Realtime API)
+     * @param channels Número de canales (default 1 = mono)
+     * @param bitsPerSample Bits por muestra (default 16)
+     */
+    fun injectRemoteAudio(pcmData: ByteArray, sampleRate: Int, channels: Int = 1, bitsPerSample: Int = 16) {
+        sipCoreManager?.injectRemoteAudio(pcmData, sampleRate, channels, bitsPerSample)
     }
 }
 

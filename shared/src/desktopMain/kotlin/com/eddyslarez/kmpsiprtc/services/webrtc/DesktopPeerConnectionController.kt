@@ -14,6 +14,7 @@ import dev.onvoid.webrtc.*
 import dev.onvoid.webrtc.media.*
 import dev.onvoid.webrtc.media.audio.*
 import kotlinx.coroutines.*
+import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
@@ -31,7 +32,28 @@ class DesktopPeerConnectionController(
     private var peerConnection: RTCPeerConnection? = null
     private var audioDeviceModule: AudioDeviceModule? = null
     private var localAudioTrack: AudioTrack? = null
+    private var remoteAudioTrack: AudioTrack? = null
     private var dtmfSender: RTCDtmfSender? = null
+
+    // === INYECCIÓN DE AUDIO PARA TRADUCCIÓN ===
+    // CustomAudioSource permite inyectar PCM directamente como fuente de audio
+    private var customAudioSource: CustomAudioSource? = null
+    // Track creado desde el CustomAudioSource para reemplazar el mic real
+    private var injectionAudioTrack: AudioTrack? = null
+    // AudioResampler para convertir 24kHz→48kHz (el ADM de WebRTC opera a 48kHz)
+    private var audioResampler: AudioResampler? = null
+    // Flag que indica si la inyección de audio local está activa
+    @Volatile
+    private var localAudioInjectionActive = false
+    // Flag que indica si el audio local (mic) está habilitado en WebRTC
+    @Volatile
+    private var localAudioEnabled = true
+    // Referencia al sender de audio para poder hacer replaceTrack()
+    private var audioSender: RTCRtpSender? = null
+    // Buffer para audio remoto inyectado (traducido)
+    private val remoteInjectionBuffer = ConcurrentLinkedQueue<ByteArray>()
+    @Volatile
+    private var remoteAudioInjectionActive = false
 
     // Recording
     private val callRecorder: CallRecorder by lazy { createCallRecorder() }
@@ -39,6 +61,8 @@ class DesktopPeerConnectionController(
 
     // State
     private var isMuted = false
+    @Volatile
+    private var remoteAudioEnabled = true
     @Volatile
     private var currentConnectionState = WebRtcConnectionState.DISCONNECTED
 
@@ -148,6 +172,10 @@ class DesktopPeerConnectionController(
                 log.d(TAG) { "Remote track received" }
                 val track = transceiver.receiver?.track
                 if (track?.kind == "audio") {
+                    (track as? AudioTrack)?.let { audioTrack ->
+                        remoteAudioTrack = audioTrack
+                        audioTrack.setEnabled(remoteAudioEnabled)
+                    }
                     // Configurar captura de audio remoto
                     setupRemoteAudioCapture(track)
                     onRemoteAudioTrack()
@@ -180,6 +208,7 @@ class DesktopPeerConnectionController(
             localAudioTrack = factory.createAudioTrack("audio0", audioSource)
 
             val sender = pc.addTrack(localAudioTrack, listOf("stream0"))
+            audioSender = sender  // Guardar referencia al sender para replaceTrack()
             dtmfSender = sender.dtmfSender
 
             log.d(TAG) { "✅ Local audio track added" }
@@ -187,6 +216,169 @@ class DesktopPeerConnectionController(
             log.e(TAG) { "Error adding local audio track: ${e.message}" }
             e.printStackTrace()
         }
+    }
+
+    // ==================== INYECCIÓN DE AUDIO PARA TRADUCCIÓN ====================
+
+    /**
+     * Habilitar/deshabilitar el audio local (micrófono) que se envía al peer remoto.
+     * Cuando se deshabilita, se reemplaza el track del mic con un CustomAudioSource
+     * que acepta PCM inyectado via injectLocalAudio().
+     */
+    fun setLocalAudioEnabled(enabled: Boolean) {
+        if (localAudioEnabled == enabled) return
+        localAudioEnabled = enabled
+
+        log.d(TAG) { "setLocalAudioEnabled: $enabled" }
+
+        if (!enabled) {
+            // Activar inyección: crear CustomAudioSource y reemplazar el track del mic
+            activateLocalAudioInjection()
+        } else {
+            // Desactivar inyección: restaurar el track original del mic
+            deactivateLocalAudioInjection()
+        }
+    }
+
+    fun isLocalAudioEnabled(): Boolean = localAudioEnabled
+
+    /**
+     * Activa la inyección de audio local reemplazando el track del mic real
+     * con un CustomAudioSource que acepta datos PCM via pushAudio().
+     */
+    private fun activateLocalAudioInjection() {
+        try {
+            val factory = peerConnectionFactory ?: run {
+                log.e(TAG) { "Cannot activate injection: factory is null" }
+                return
+            }
+            val sender = audioSender ?: run {
+                log.e(TAG) { "Cannot activate injection: audioSender is null" }
+                return
+            }
+
+            // Crear CustomAudioSource (fuente programática de audio)
+            customAudioSource = CustomAudioSource()
+
+            // Crear un nuevo AudioTrack basado en el CustomAudioSource
+            injectionAudioTrack = factory.createAudioTrack("injection0", customAudioSource)
+            injectionAudioTrack?.setEnabled(true)
+
+            // Reemplazar el track del mic real con el de inyección en el sender RTP
+            sender.replaceTrack(injectionAudioTrack)
+
+            localAudioInjectionActive = true
+            log.d(TAG) { "✅ Local audio injection activated - mic replaced with CustomAudioSource" }
+        } catch (e: Exception) {
+            log.e(TAG) { "Error activating local audio injection: ${e.message}" }
+            e.printStackTrace()
+            // Fallback: simplemente deshabilitar el track
+            localAudioTrack?.setEnabled(false)
+        }
+    }
+
+    /**
+     * Desactiva la inyección de audio local y restaura el track original del mic.
+     */
+    private fun deactivateLocalAudioInjection() {
+        try {
+            val sender = audioSender ?: return
+
+            // Restaurar el track original del mic
+            if (localAudioTrack != null) {
+                sender.replaceTrack(localAudioTrack)
+                localAudioTrack?.setEnabled(!isMuted)
+            }
+
+            // Limpiar recursos de inyección
+            localAudioInjectionActive = false
+
+            try {
+                injectionAudioTrack?.setEnabled(false)
+                injectionAudioTrack?.dispose()
+            } catch (_: Throwable) {}
+            injectionAudioTrack = null
+
+            try {
+                customAudioSource?.dispose()
+            } catch (_: Throwable) {}
+            customAudioSource = null
+
+            try {
+                audioResampler?.dispose()
+            } catch (_: Throwable) {}
+            audioResampler = null
+
+            log.d(TAG) { "✅ Local audio injection deactivated - mic restored" }
+        } catch (e: Exception) {
+            log.e(TAG) { "Error deactivating local audio injection: ${e.message}" }
+            e.printStackTrace()
+        }
+    }
+
+    /**
+     * Inyecta datos de audio PCM que se enviarán al peer remoto.
+     * Los datos deben ser PCM 16-bit little-endian mono.
+     * Se resamplea automáticamente si el sampleRate difiere de 48kHz.
+     *
+     * @param pcmData Audio PCM 16-bit LE mono
+     * @param sampleRate Frecuencia de muestreo (ej: 24000)
+     * @param channels Número de canales (1 = mono)
+     * @param bitsPerSample Bits por muestra (16)
+     */
+    fun injectLocalAudio(pcmData: ByteArray, sampleRate: Int, channels: Int, bitsPerSample: Int) {
+        if (!localAudioInjectionActive) return
+        val source = customAudioSource ?: return
+
+        try {
+            val targetSampleRate = 48000
+            val data: ByteArray
+            val actualSampleRate: Int
+            val frames: Int
+
+            if (sampleRate != targetSampleRate) {
+                // Resamplear al sample rate del WebRTC (48kHz)
+                if (audioResampler == null) {
+                    audioResampler = AudioResampler(sampleRate, targetSampleRate, channels)
+                }
+
+                val inputFrames = pcmData.size / (channels * (bitsPerSample / 8))
+                val outputFrames = (inputFrames.toLong() * targetSampleRate / sampleRate).toInt()
+                val outputBytes = outputFrames * channels * (bitsPerSample / 8)
+                val outputBuffer = ByteArray(outputBytes)
+
+                val resampledFrames = audioResampler!!.resample(
+                    pcmData, pcmData.size,
+                    outputBuffer, outputBytes,
+                    inputFrames
+                )
+
+                data = outputBuffer
+                actualSampleRate = targetSampleRate
+                frames = resampledFrames
+            } else {
+                data = pcmData
+                actualSampleRate = sampleRate
+                frames = pcmData.size / (channels * (bitsPerSample / 8))
+            }
+
+            // Enviar al CustomAudioSource que lo inyecta en el pipeline de WebRTC
+            source.pushAudio(data, bitsPerSample, actualSampleRate, channels, frames)
+        } catch (e: Exception) {
+            log.e(TAG) { "Error injecting local audio: ${e.message}" }
+        }
+    }
+
+    /**
+     * Inyecta audio remoto traducido para reproducción local (speaker).
+     * Nota: Para Desktop, la reproducción se maneja normalmente via TranslationAudioPlayer
+     * usando SourceDataLine. Este método es un fallback si se necesita inyección a nivel WebRTC.
+     */
+    fun injectRemoteAudio(pcmData: ByteArray, sampleRate: Int, channels: Int, bitsPerSample: Int) {
+        // En Desktop, la reproducción de audio traducido se maneja via TranslationAudioPlayer
+        // (SourceDataLine directo al speaker). No necesitamos inyectar en el pipeline de WebRTC.
+        // Este método existe por simetría con la interfaz pero delega al player externo.
+        remoteInjectionBuffer.offer(pcmData)
     }
 
     // ==================== SDP OPERATIONS ====================
@@ -352,6 +544,15 @@ class DesktopPeerConnectionController(
 
     fun isMuted(): Boolean = isMuted
 
+    fun setRemoteAudioEnabled(enabled: Boolean) {
+        remoteAudioEnabled = enabled
+        runCatching {
+            remoteAudioTrack?.setEnabled(enabled)
+        }
+    }
+
+    fun isRemoteAudioEnabled(): Boolean = remoteAudioEnabled
+
     // ==================== DTMF ====================
 
     fun sendDtmf(tones: String, duration: Int, gap: Int): Boolean {
@@ -468,6 +669,7 @@ class DesktopPeerConnectionController(
 
         peerConnection?.close()
         peerConnection = null
+        remoteAudioTrack = null
         currentConnectionState = WebRtcConnectionState.DISCONNECTED
 
         log.d(TAG) { "✅ PeerConnection closed" }
@@ -478,6 +680,27 @@ class DesktopPeerConnectionController(
 
         remoteAudioCapture?.stopCapture()
         remoteAudioCapture = null
+
+        // Limpiar recursos de inyección de audio
+        localAudioInjectionActive = false
+        remoteAudioInjectionActive = false
+        remoteInjectionBuffer.clear()
+
+        try {
+            injectionAudioTrack?.setEnabled(false)
+            injectionAudioTrack?.dispose()
+        } catch (_: Throwable) {}
+        injectionAudioTrack = null
+
+        try {
+            customAudioSource?.dispose()
+        } catch (_: Throwable) {}
+        customAudioSource = null
+
+        try {
+            audioResampler?.dispose()
+        } catch (_: Throwable) {}
+        audioResampler = null
 
         try {
             localAudioTrack?.setEnabled(false)
@@ -496,12 +719,16 @@ class DesktopPeerConnectionController(
             log.w(TAG) { "Error removing senders: ${e.message}" }
         }
 
+        audioSender = null
+
         try {
             peerConnection?.close()
             peerConnection = null
         } catch (e: Throwable) {
             log.w(TAG) { "Error closing peer connection: ${e.message}" }
         }
+
+        remoteAudioTrack = null
 
         Thread.sleep(200)
 

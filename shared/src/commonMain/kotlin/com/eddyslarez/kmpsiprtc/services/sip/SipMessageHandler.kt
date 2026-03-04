@@ -640,6 +640,21 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             val tryingResponse = SipMessageBuilder.buildTryingResponse(accountInfo, normalizedCallData)
             sendViaSharedWebSocket(tryingResponse)
 
+            // Aplicar ringtone por cuenta ANTES de reproducir audio de llamada entrante.
+            // Esto evita la carrera donde empieza sonando el ringtone global y recién después
+            // se actualiza el ringtone específico al llegar callbacks de capa superior.
+            runCatching {
+                sipCoreManager.applyAccountRingtoneUris(
+                    username = accountInfo.username,
+                    domain = accountInfo.domain,
+                    preferGlobal = false,
+                )
+            }.onFailure { error ->
+                log.w(tag = TAG) {
+                    "[INVITE] No se pudo aplicar ringtone por cuenta ${accountInfo.username}@${accountInfo.domain}: ${error.message}"
+                }
+            }
+
             scope.launch {
                 delay(100)
                 val ringingResponse = SipMessageBuilder.buildRingingResponse(accountInfo, normalizedCallData)
@@ -689,6 +704,20 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
 
             if (callData != null) {
                 log.d(tag = TAG) { "[BYE] Processing BYE for call: ${callData.callId}" }
+
+                // Finalizar grabación si la llamada activa estaba siendo grabada.
+                // Sin esto, cuando el remoto cuelga no se persiste el archivo final.
+                if (sipCoreManager.webRtcManager.isRecordingCall()) {
+                    try {
+                        log.d(tag = TAG) { "[BYE] Stopping call recording for ${callData.callId}" }
+                        val recordingResult = sipCoreManager.webRtcManager.stopCallRecording()
+                        if (recordingResult?.mixedFile != null) {
+                            log.d(tag = TAG) { "[BYE] Recording saved: ${recordingResult.mixedFile}" }
+                        }
+                    } catch (e: Exception) {
+                        log.e(tag = TAG) { "[BYE] Error stopping recording: ${e.message}" }
+                    }
+                }
 
                 // Registrar en historial ANTES de cambiar el estado a ENDED.
                 sipCoreManager.callManager?.registerRemoteHangup(callData)
