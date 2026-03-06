@@ -27,6 +27,11 @@ class PeerConnectionController(
     private val onConnectionStateChange: (WebRtcConnectionState) -> Unit,
     private val onRemoteAudioTrack: () -> Unit
 ) {
+    private companion object {
+        private const val AI_INJECTION_TAG = "L2R_INJECT"
+        private const val AI_INJECTION_PREFIX = "L2R_INJECT"
+    }
+
     private val TAG = "PeerConnectionController"
     private val mainHandler = Handler(Looper.getMainLooper())
     private val callRecorder: CallRecorder by lazy {
@@ -47,10 +52,22 @@ class PeerConnectionController(
     // === INYECCIÓN DE AUDIO PARA TRADUCCIÓN ===
     // Buffer FIFO para audio traducido que reemplazará al mic
     private val localInjectionBuffer = ConcurrentLinkedQueue<ByteArray>()
+    // Límite de backlog (~6s a 10ms por chunk) para evitar cortes por ráfagas del servidor.
+    private val maxInjectionQueueChunks = 600
     // Estado parcial para no perder bytes cuando el callback pide menos de lo encolado
     private val localInjectionLock = Any()
     private var pendingInjectionChunk: ByteArray? = null
     private var pendingInjectionOffset = 0
+    // Acumulador para agrupar deltas pequeños antes de encolar al callback del ADM.
+    private var pendingInjectionAssemble = ByteArray(0)
+    @Volatile
+    private var injectionChunksReceived = 0L
+    @Volatile
+    private var injectionChunksConsumed = 0L
+    @Volatile
+    private var injectionUnderrunCount = 0L
+    @Volatile
+    private var injectionCalls = 0L
     // Flag que indica si la inyección de audio local está activa
     @Volatile
     private var localAudioInjectionActive = false
@@ -60,6 +77,8 @@ class PeerConnectionController(
     // Sample rate del ADM de Android para resampleo
     @Volatile
     private var admSampleRate = 48000
+    @Volatile
+    private var audioBufferCallbackLogged = false
     // Referencia al JavaAudioDeviceModule para control del AudioRecord
     private var javaAudioDeviceModule: JavaAudioDeviceModule? = null
 
@@ -168,11 +187,20 @@ class PeerConnectionController(
                 .setUseHardwareNoiseSuppressor(true)
                 .setUseStereoInput(false)
                 .setUseStereoOutput(true)
-                .setAudioBufferCallback { buffer, sampleRate, channels, bitsPerSample, frames, timestamp ->
+                .setAudioBufferCallback { buffer, audioFormat, channels, sampleRate, bytesRead, timestamp ->
                     // Este callback intercepta los datos del micrófono ANTES de enviarlos a WebRTC.
                     // Cuando la inyección está activa, reemplazamos el contenido del buffer
                     // con audio traducido del queue de inyección.
-                    admSampleRate = sampleRate
+                    if (sampleRate >= 8000) {
+                        admSampleRate = sampleRate
+                    }
+                    if (!audioBufferCallbackLogged) {
+                        audioBufferCallbackLogged = true
+                        log.i(AI_INJECTION_TAG) {
+                            "$AI_INJECTION_PREFIX audioBufferCallback: format=$audioFormat, channels=$channels, " +
+                                "sampleRate=$sampleRate, bytesRead=$bytesRead, bufferCap=${buffer.capacity()}"
+                        }
+                    }
                     if (localAudioInjectionActive) {
                         // Importante: no perder remainder cuando injectedData > buffer.remaining().
                         // Antes se descartaba la cola restante y el peer remoto recibía silencio.
@@ -191,6 +219,13 @@ class PeerConnectionController(
                                 }
 
                                 if (currentChunk == null) {
+                                    injectionUnderrunCount++
+                                    if (injectionUnderrunCount <= 3 || injectionUnderrunCount % 200L == 0L) {
+                                        log.w(AI_INJECTION_TAG) {
+                                            "$AI_INJECTION_PREFIX underrun #$injectionUnderrunCount, queue=${localInjectionBuffer.size}, " +
+                                                "received=$injectionChunksReceived, consumed=$injectionChunksConsumed"
+                                        }
+                                    }
                                     while (buffer.hasRemaining()) {
                                         buffer.put(0)
                                     }
@@ -205,6 +240,7 @@ class PeerConnectionController(
                                 if (pendingInjectionOffset >= currentChunk.size) {
                                     pendingInjectionChunk = null
                                     pendingInjectionOffset = 0
+                                    injectionChunksConsumed++
                                 }
                             }
                         }
@@ -643,6 +679,7 @@ class PeerConnectionController(
         localAudioInjectionActive = !enabled
 
         log.d(TAG) { "setLocalAudioEnabled: $enabled (injection: $localAudioInjectionActive)" }
+        log.i(AI_INJECTION_TAG) { "$AI_INJECTION_PREFIX setLocalAudioEnabled=$enabled (injectionActive=$localAudioInjectionActive)" }
 
         if (!enabled) {
             // Limpiar buffer para empezar limpio
@@ -650,15 +687,27 @@ class PeerConnectionController(
                 localInjectionBuffer.clear()
                 pendingInjectionChunk = null
                 pendingInjectionOffset = 0
+                pendingInjectionAssemble = ByteArray(0)
+                injectionChunksReceived = 0L
+                injectionChunksConsumed = 0L
+                injectionUnderrunCount = 0L
+                injectionCalls = 0L
             }
             log.d(TAG) { "✅ Local audio injection activated via AudioBufferCallback" }
+            log.i(AI_INJECTION_TAG) { "$AI_INJECTION_PREFIX activated" }
         } else {
             synchronized(localInjectionLock) {
                 localInjectionBuffer.clear()
                 pendingInjectionChunk = null
                 pendingInjectionOffset = 0
+                pendingInjectionAssemble = ByteArray(0)
+                injectionChunksReceived = 0L
+                injectionChunksConsumed = 0L
+                injectionUnderrunCount = 0L
+                injectionCalls = 0L
             }
             log.d(TAG) { "✅ Local audio injection deactivated - mic restored" }
+            log.i(AI_INJECTION_TAG) { "$AI_INJECTION_PREFIX deactivated, mic restored" }
         }
     }
 
@@ -683,6 +732,21 @@ class PeerConnectionController(
         if (!localAudioInjectionActive) return
 
         try {
+            val callIndex = synchronized(localInjectionLock) {
+                injectionCalls += 1L
+                injectionCalls
+            }
+
+            val inputBytes = pcmData.size
+            if (inputBytes == 0) {
+                if (callIndex <= 5L || callIndex % 100L == 0L) {
+                    log.w(AI_INJECTION_TAG) {
+                        "$AI_INJECTION_PREFIX injectLocalAudio #$callIndex: input vacío (sampleRate=$sampleRate, channels=$channels, bps=$bitsPerSample)"
+                    }
+                }
+                return
+            }
+
             val bytesPerSample = (bitsPerSample / 8).coerceAtLeast(1)
             val safeChannels = channels.coerceAtLeast(1)
             // Encolar en frames cortos para minimizar jitter y latencia.
@@ -695,19 +759,84 @@ class PeerConnectionController(
                 pcmData.copyOf()
             }
 
-            var offset = 0
-            while (offset < data.size) {
-                val end = minOf(offset + frameBytes, data.size)
-                localInjectionBuffer.offer(data.copyOfRange(offset, end))
-                offset = end
+            if (data.isEmpty()) {
+                log.w(AI_INJECTION_TAG) {
+                    "$AI_INJECTION_PREFIX injectLocalAudio #$callIndex: resample vacío (in=$inputBytes, sr=$sampleRate->$admSampleRate, channels=$safeChannels, bps=$bitsPerSample)"
+                }
+                return
             }
 
-            // Limitar el tamaño del buffer para evitar latencia acumulada
-            while (localInjectionBuffer.size > 50) {
-                localInjectionBuffer.poll()
+            var addedChunks = 0
+            var flushedPartial = false
+            var queueSize = 0
+            var pendingBytes = 0
+            synchronized(localInjectionLock) {
+                // Importante: los deltas del servidor pueden venir muy pequeños.
+                // Si se encolan tal cual, el callback consume pulsos cortos y luego silencio ("tic tic").
+                // Aquí agrupamos hasta frameBytes antes de publicar cada chunk.
+                if (pendingInjectionAssemble.isEmpty()) {
+                    pendingInjectionAssemble = data
+                } else {
+                    val merged = ByteArray(pendingInjectionAssemble.size + data.size)
+                    pendingInjectionAssemble.copyInto(merged, 0)
+                    data.copyInto(merged, pendingInjectionAssemble.size)
+                    pendingInjectionAssemble = merged
+                }
+
+                var offset = 0
+                while (pendingInjectionAssemble.size - offset >= frameBytes) {
+                    localInjectionBuffer.offer(pendingInjectionAssemble.copyOfRange(offset, offset + frameBytes))
+                    offset += frameBytes
+                    addedChunks++
+                }
+
+                pendingInjectionAssemble = if (offset > 0) {
+                    pendingInjectionAssemble.copyOfRange(offset, pendingInjectionAssemble.size)
+                } else {
+                    pendingInjectionAssemble
+                }
+
+                // Fallback anti-starvation:
+                // si aún no alcanzamos un frame completo pero ya hay suficiente data parcial,
+                // encolar parcial para evitar silencio continuo por underrun.
+                if (addedChunks == 0 && pendingInjectionAssemble.isNotEmpty()) {
+                    val partialFlushThreshold = (frameBytes / 4).coerceAtLeast(bytesPerSample * safeChannels * 8)
+                    if (pendingInjectionAssemble.size >= partialFlushThreshold) {
+                        localInjectionBuffer.offer(pendingInjectionAssemble.copyOf())
+                        pendingInjectionAssemble = ByteArray(0)
+                        addedChunks++
+                        flushedPartial = true
+                    }
+                }
+
+                injectionChunksReceived += addedChunks
+
+                // Limitar backlog para evitar uso excesivo de memoria sin cortar frases completas.
+                while (localInjectionBuffer.size > maxInjectionQueueChunks) {
+                    localInjectionBuffer.poll()
+                }
+
+                queueSize = localInjectionBuffer.size
+                pendingBytes = pendingInjectionAssemble.size
+            }
+
+            val shouldLog =
+                callIndex <= 5L ||
+                    callIndex % 100L == 0L ||
+                    flushedPartial ||
+                    (addedChunks == 0 && (callIndex <= 20L || callIndex % 50L == 0L))
+
+            if (shouldLog) {
+                log.i(AI_INJECTION_TAG) {
+                    "$AI_INJECTION_PREFIX injectLocalAudio #$callIndex: in=$inputBytes, out=${data.size}, " +
+                        "sr=$sampleRate->$admSampleRate, frameBytes=$frameBytes, added=$addedChunks, " +
+                        "partialFlush=$flushedPartial, pending=$pendingBytes, queue=$queueSize, " +
+                        "received=$injectionChunksReceived, consumed=$injectionChunksConsumed, underruns=$injectionUnderrunCount"
+                }
             }
         } catch (e: Exception) {
             log.e(TAG) { "Error injecting local audio: ${e.message}" }
+            log.e(AI_INJECTION_TAG) { "$AI_INJECTION_PREFIX injectLocalAudio error: ${e.message}" }
         }
     }
 
