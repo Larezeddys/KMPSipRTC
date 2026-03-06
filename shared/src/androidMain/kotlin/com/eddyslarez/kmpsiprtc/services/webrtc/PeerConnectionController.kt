@@ -47,6 +47,10 @@ class PeerConnectionController(
     // === INYECCIÓN DE AUDIO PARA TRADUCCIÓN ===
     // Buffer FIFO para audio traducido que reemplazará al mic
     private val localInjectionBuffer = ConcurrentLinkedQueue<ByteArray>()
+    // Estado parcial para no perder bytes cuando el callback pide menos de lo encolado
+    private val localInjectionLock = Any()
+    private var pendingInjectionChunk: ByteArray? = null
+    private var pendingInjectionOffset = 0
     // Flag que indica si la inyección de audio local está activa
     @Volatile
     private var localAudioInjectionActive = false
@@ -170,26 +174,41 @@ class PeerConnectionController(
                     // con audio traducido del queue de inyección.
                     admSampleRate = sampleRate
                     if (localAudioInjectionActive) {
-                        val injectedData = localInjectionBuffer.poll()
-                        if (injectedData != null) {
-                            // Reemplazar contenido del buffer con audio traducido
-                            buffer.clear()
-                            val bytesToCopy = minOf(injectedData.size, buffer.remaining())
-                            buffer.put(injectedData, 0, bytesToCopy)
-                            // Si el buffer es más grande que los datos inyectados, rellenar con silencio
+                        // Importante: no perder remainder cuando injectedData > buffer.remaining().
+                        // Antes se descartaba la cola restante y el peer remoto recibía silencio.
+                        buffer.clear()
+                        synchronized(localInjectionLock) {
                             while (buffer.hasRemaining()) {
-                                buffer.put(0)
+                                val currentChunk = when {
+                                    pendingInjectionChunk != null && pendingInjectionOffset < pendingInjectionChunk!!.size -> {
+                                        pendingInjectionChunk!!
+                                    }
+                                    else -> {
+                                        pendingInjectionChunk = localInjectionBuffer.poll()
+                                        pendingInjectionOffset = 0
+                                        pendingInjectionChunk
+                                    }
+                                }
+
+                                if (currentChunk == null) {
+                                    while (buffer.hasRemaining()) {
+                                        buffer.put(0)
+                                    }
+                                    break
+                                }
+
+                                val available = currentChunk.size - pendingInjectionOffset
+                                val bytesToCopy = minOf(available, buffer.remaining())
+                                buffer.put(currentChunk, pendingInjectionOffset, bytesToCopy)
+                                pendingInjectionOffset += bytesToCopy
+
+                                if (pendingInjectionOffset >= currentChunk.size) {
+                                    pendingInjectionChunk = null
+                                    pendingInjectionOffset = 0
+                                }
                             }
-                            buffer.rewind()
-                        } else {
-                            // Sin datos traducidos disponibles: enviar silencio
-                            val silenceSize = buffer.remaining()
-                            buffer.clear()
-                            for (i in 0 until silenceSize) {
-                                buffer.put(0)
-                            }
-                            buffer.rewind()
                         }
+                        buffer.rewind()
                     }
                     // Retornar timestamp sin cambios
                     timestamp
@@ -627,10 +646,18 @@ class PeerConnectionController(
 
         if (!enabled) {
             // Limpiar buffer para empezar limpio
-            localInjectionBuffer.clear()
+            synchronized(localInjectionLock) {
+                localInjectionBuffer.clear()
+                pendingInjectionChunk = null
+                pendingInjectionOffset = 0
+            }
             log.d(TAG) { "✅ Local audio injection activated via AudioBufferCallback" }
         } else {
-            localInjectionBuffer.clear()
+            synchronized(localInjectionLock) {
+                localInjectionBuffer.clear()
+                pendingInjectionChunk = null
+                pendingInjectionOffset = 0
+            }
             log.d(TAG) { "✅ Local audio injection deactivated - mic restored" }
         }
     }
@@ -656,12 +683,23 @@ class PeerConnectionController(
         if (!localAudioInjectionActive) return
 
         try {
+            val bytesPerSample = (bitsPerSample / 8).coerceAtLeast(1)
+            val safeChannels = channels.coerceAtLeast(1)
+            // Encolar en frames cortos para minimizar jitter y latencia.
+            val frameBytes = ((admSampleRate * safeChannels * bytesPerSample) / 100).coerceAtLeast(bytesPerSample)
+
             // Si el sampleRate no coincide con el del ADM, resamplear
-            if (sampleRate != admSampleRate) {
-                val resampled = resamplePcm(pcmData, sampleRate, admSampleRate, channels, bitsPerSample)
-                localInjectionBuffer.offer(resampled)
+            val data = if (sampleRate != admSampleRate) {
+                resamplePcm(pcmData, sampleRate, admSampleRate, safeChannels, bitsPerSample)
             } else {
-                localInjectionBuffer.offer(pcmData.copyOf())
+                pcmData.copyOf()
+            }
+
+            var offset = 0
+            while (offset < data.size) {
+                val end = minOf(offset + frameBytes, data.size)
+                localInjectionBuffer.offer(data.copyOfRange(offset, end))
+                offset = end
             }
 
             // Limitar el tamaño del buffer para evitar latencia acumulada
