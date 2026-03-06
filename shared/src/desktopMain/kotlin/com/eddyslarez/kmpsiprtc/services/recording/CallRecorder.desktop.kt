@@ -282,12 +282,22 @@ class DesktopCallRecorder : CallRecorder {
         }
 
         // Enviar al listener si está haciendo streaming
+        if (remoteCallbackCount == 1 || remoteCallbackCount % 500 == 0) {
+            println("[CallRecorder] captureRemoteAudio #$remoteCallbackCount: isStreamingActive=$isStreamingActive, audioStreamListener=${if (audioStreamListener != null) "SET" else "NULL"}")
+        }
         if (isStreamingActive && audioStreamListener != null) {
             try {
+                if (remoteCallbackCount == 1) {
+                    println("[CallRecorder] CALLING onRemoteAudioData on listener: ${audioStreamListener!!::class.simpleName}")
+                }
                 audioStreamListener?.onRemoteAudioData(
                     normalized, sampleRate, 1, 16
                 )
+                if (remoteCallbackCount == 1) {
+                    println("[CallRecorder] onRemoteAudioData RETURNED OK")
+                }
             } catch (e: Exception) {
+                println("[CallRecorder] onRemoteAudioData EXCEPTION: ${e::class.simpleName}: ${e.message}")
                 log.e(TAG) { "Error sending remote audio stream: ${e.message}" }
                 audioStreamListener?.onStreamError(e.message ?: "Error sending remote audio")
             }
@@ -345,6 +355,7 @@ class DesktopCallRecorder : CallRecorder {
     // ==================== STREAMING EN TIEMPO REAL ====================
 
     override fun setAudioStreamListener(listener: AudioStreamListener?) {
+        println("[CallRecorder] setAudioStreamListener: ${if (listener != null) "SET" else "NULL"} (was ${if (audioStreamListener != null) "SET" else "NULL"})")
         audioStreamListener = listener
     }
 
@@ -354,13 +365,16 @@ class DesktopCallRecorder : CallRecorder {
 
     override fun startStreaming(callId: String) {
         if (isStreamingActive) {
-            log.w(TAG) { "⚠️ Streaming already in progress" }
+            log.w(TAG) { "Streaming already in progress" }
             return
         }
 
-        log.d(TAG) { "🎙️ Starting audio streaming for: $callId" }
+        log.d(TAG) { "Starting audio streaming for: $callId" }
+        println("[CallRecorder] startStreaming: audioStreamListener=${if (audioStreamListener != null) "SET" else "NULL"}, isRecording=$isRecording")
         currentCallId = callId
         isStreamingActive = true
+        remoteCallbackCount = 0
+        remoteFirstCallbackLogged = false
 
         // Iniciar captura del micrófono si no está ya capturando
         if (!isRecording) {

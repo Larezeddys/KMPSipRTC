@@ -345,7 +345,11 @@ class IosPeerConnectionController(
     fun setRemoteAudioEnabled(enabled: Boolean) {
         remoteAudioEnabled = enabled
         runCatching {
+            // En iOS, track.enabled = false solo detiene el rendering al speaker
+            // pero los sinks siguen recibiendo datos (a diferencia de Desktop webrtc-java).
+            // Por lo tanto, podemos usarlo directamente para silenciar durante traducción.
             remoteAudioTrack?.enabled = enabled
+            log.d(TAG) { "setRemoteAudioEnabled($enabled)" }
         }
     }
 
@@ -379,10 +383,11 @@ class IosPeerConnectionController(
         log.d(TAG) { "setLocalAudioEnabled: $enabled (injection: $localAudioInjectionActive)" }
 
         if (!enabled) {
-            // Silenciar el track local en WebRTC (el remoto no escucha nada del mic)
-            // IMPORTANTE: No usar setMuted() porque eso es para control del usuario
-            localAudioTrack?.enabled = false
-            log.d(TAG) { "✅ Local audio injection activated - mic muted in WebRTC" }
+            // iOS: NO silenciar el mic porque injectLocalAudio() aún no está implementado.
+            // Si silenciamos, el remoto escucha silencio total (peor UX).
+            // Dejar el mic activo: el remoto escucha la voz original mientras
+            // el CallRecorder sigue capturando audio para traducción de texto.
+            log.d(TAG) { "⚠️ Local audio injection requested but not available on iOS - mic stays active" }
         } else {
             // Restaurar el track local
             localAudioTrack?.enabled = !isMuted
@@ -506,6 +511,8 @@ class IosPeerConnectionController(
     fun stopStreaming() {
         log.d(TAG) { "🛑 Stopping audio streaming" }
         callRecorder.stopStreaming()
+        // Restaurar estado de audio al detener streaming
+        runCatching { remoteAudioTrack?.enabled = remoteAudioEnabled }
         if (!callRecorder.isRecording()) {
             remoteAudioCapture?.stopCapture()
         }

@@ -127,6 +127,13 @@ class SipCoreManager private constructor(
 
     fun userAgent(): String = config.userAgent
 
+    /**
+     * Indica si el entorno de push es produccion o debug.
+     * Se usa en el Contact header: ;pn-production=true/false
+     * Requerido por OpenSIPS para enrutar el push correctamente.
+     */
+    val pushProduction: Boolean get() = config.pushProduction
+
     fun getDefaultDomain(): String? = currentAccountInfo?.domain
 
     private fun getFirstRegisteredAccount(): AccountInfo? {

@@ -18,31 +18,44 @@ class DesktopAudioTrackCapture(
     @Volatile
     private var isCapturing = false
     @Volatile
-    private var firstCallbackLogged = false
+    private var sinkCallbackCount = 0
 
     private val sink = AudioTrackSink { data, bitsPerSample, sampleRate, channels, frames ->
+        sinkCallbackCount++
+        if (sinkCallbackCount == 1 || sinkCallbackCount % 500 == 0) {
+            println("[AudioCapture] SINK callback #$sinkCallbackCount: data=${data.size}b, rate=$sampleRate, ch=$channels, frames=$frames, isCapturing=$isCapturing")
+        }
         if (isCapturing) {
-            if (!firstCallbackLogged) {
-                firstCallbackLogged = true
-                log.d(TAG) { "RAW WebRTC AudioTrackSink: bitsPerSample=$bitsPerSample, sampleRate=$sampleRate, channels=$channels, frames=$frames, data.size=${data.size}" }
-            }
             callback.onAudioData(data, bitsPerSample, sampleRate, channels, frames, System.currentTimeMillis())
         }
     }
 
     override fun startCapture() {
-        if (isCapturing) return
+        println("[AudioCapture] startCapture() called. isCapturing=$isCapturing, audioTrack=$audioTrack")
+        if (isCapturing) {
+            println("[AudioCapture] ALREADY CAPTURING — skipping")
+            return
+        }
         isCapturing = true
-        firstCallbackLogged = false
-        audioTrack.addSink(sink)
-        log.d(TAG) { "✅ Desktop audio capture started (AudioTrackSink)" }
+        sinkCallbackCount = 0
+        try {
+            audioTrack.addSink(sink)
+            println("[AudioCapture] addSink OK. signalLevel=${try { audioTrack.getSignalLevel() } catch (_: Exception) { "ERROR" }}")
+        } catch (e: Exception) {
+            println("[AudioCapture] addSink FAILED: ${e.message}")
+            e.printStackTrace()
+        }
     }
 
     override fun stopCapture() {
+        println("[AudioCapture] stopCapture() called. isCapturing=$isCapturing, totalCallbacks=$sinkCallbackCount")
         if (!isCapturing) return
         isCapturing = false
-        audioTrack.removeSink(sink)
-        log.d(TAG) { "✅ Desktop audio capture stopped" }
+        try {
+            audioTrack.removeSink(sink)
+        } catch (e: Exception) {
+            println("[AudioCapture] removeSink FAILED: ${e.message}")
+        }
     }
 
     override fun isCapturing(): Boolean = isCapturing

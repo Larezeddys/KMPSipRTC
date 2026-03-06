@@ -151,6 +151,18 @@ class AndroidCallRecorder() : CallRecorder {
     }
 
     override fun startStreaming(callId: String) {
+        // Si ya hay una grabación activa, activar el streaming en paralelo sin crear
+        // un nuevo AudioRecord — el hilo del recordingJob ya está leyendo del micrófono.
+        if (isRecording && !isStreaming) {
+            log.d(TAG) { "🎙️ Recording already active — activating streaming in parallel for: $callId" }
+            if (audioStreamListener == null) {
+                log.w(TAG) { "⚠️ Streaming enabled but no listener set!" }
+            }
+            isStreaming = true
+            currentConfig = currentConfig.copy(enableStreaming = true)
+            log.d(TAG) { "✅ Streaming activated alongside existing recording" }
+            return
+        }
         startAudioCapture(callId, AudioConfig(enableRecording = false, enableStreaming = true))
     }
 
@@ -393,6 +405,7 @@ class AndroidCallRecorder() : CallRecorder {
         if (!isStreaming) return
         log.d(TAG) { "🛑 Stopping audio streaming..." }
         isStreaming = false
+        currentConfig = currentConfig.copy(enableStreaming = false)
         // Si no está grabando tampoco, detener la captura del micrófono
         if (!isRecording) {
             recordingJob?.cancel()

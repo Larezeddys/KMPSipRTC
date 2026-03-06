@@ -1763,6 +1763,30 @@ class KmpSipRtc private constructor() {
     }
 
     /**
+     * Detiene el ringtone de llamada entrante
+     */
+    fun stopIncomingRingtone() {
+        try {
+            sipCoreManager?.audioManager?.stopRingtone()
+            log.d(tag = TAG) { "Incoming ringtone stopped" }
+        } catch (e: Exception) {
+            log.e(tag = TAG) { "Error stopping incoming ringtone: ${e.message}" }
+        }
+    }
+
+    /**
+     * Reproduce el ringtone de llamada entrante
+     */
+    fun playIncomingRingtone(syncVibration: Boolean = true) {
+        try {
+            sipCoreManager?.audioManager?.playIncomingRingtone(syncVibration)
+            log.d(tag = TAG) { "Incoming ringtone started" }
+        } catch (e: Exception) {
+            log.e(tag = TAG) { "Error playing incoming ringtone: ${e.message}" }
+        }
+    }
+
+    /**
      * Guarda ambas URIs de tonos
      */
     fun saveRingtoneUris(

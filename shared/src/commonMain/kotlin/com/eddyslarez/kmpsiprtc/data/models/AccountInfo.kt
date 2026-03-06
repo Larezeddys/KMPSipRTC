@@ -235,6 +235,21 @@ class AccountInfo(
     val authRetryCount = MutableStateFlow(0)
     val method = MutableStateFlow<String?>(null)
 
+    /**
+     * Tipo de challenge recibido del servidor (401 o 407).
+     * Determina si el header de respuesta debe ser Authorization o Proxy-Authorization.
+     * Se actualiza en cada challenge de autenticacion.
+     */
+    val lastChallengeType = MutableStateFlow(com.eddyslarez.kmpsiprtc.services.sip.AuthenticationHandler.ChallengeType.WWW_AUTHENTICATE)
+
+    /**
+     * Identificador unico de instancia para RFC 5626 (outbound) y RFC 5627 (GRUU).
+     * Persiste durante toda la vida de la aplicacion para permitir a OpenSIPS
+     * identificar este dispositivo de forma unica y reemplazar Contact correctamente
+     * cuando max_contacts=1.
+     */
+    val instanceId: String = "\"<urn:uuid:${generateUUID()}>\"" 
+
     val useWebRTCFormat = MutableStateFlow(false)
     val remoteSdp = MutableStateFlow<String?>(null)
     val iceUfrag = MutableStateFlow<String?>(null)
@@ -264,7 +279,7 @@ class AccountInfo(
         private const val MIN_CSEQ_VALUE = 1
         private const val CSEQ_RESET_THRESHOLD = MAX_CSEQ_VALUE - 1000
 
-        // ✅ NUEVO: Generadores de identificadores locales únicos por sesión WebSocket
+        // Generadores de identificadores locales unicos por sesion WebSocket
         fun generateLocalHost(): String {
             val chars = ('a'..'z')
             val random = (0..11).map { chars.random() }.joinToString("")
@@ -274,6 +289,26 @@ class AccountInfo(
         fun generateShortId(): String {
             val chars = (('a'..'z') + ('0'..'9'))
             return (0..7).map { chars.random() }.joinToString("")
+        }
+
+        /**
+         * Genera un UUID v4 compatible con RFC 4122.
+         * Usado para +sip.instance (RFC 5626) que identifica
+         * de forma unica este dispositivo ante OpenSIPS.
+         */
+        fun generateUUID(): String {
+            val hexChars = "0123456789abcdef"
+            fun randomHex(count: Int): String =
+                (1..count).map { hexChars[Random.nextInt(hexChars.length)] }.joinToString("")
+
+            // Formato: 8-4-4-4-12 con version 4 y variant bits
+            val part1 = randomHex(8)
+            val part2 = randomHex(4)
+            val part3 = "4${randomHex(3)}"                      // version 4
+            val variant = "89ab"[Random.nextInt(4)]              // variant bits
+            val part4 = "$variant${randomHex(3)}"
+            val part5 = randomHex(12)
+            return "$part1-$part2-$part3-$part4-$part5"
         }
     }
 
@@ -309,6 +344,7 @@ class AccountInfo(
         authorizationHeader.value = null
         realm.value = null
         method.value = null
+        lastChallengeType.value = com.eddyslarez.kmpsiprtc.services.sip.AuthenticationHandler.ChallengeType.WWW_AUTHENTICATE
         lastAuthReset.value = kotlin.time.Clock.System.now().toEpochMilliseconds()
         log.d(TAG) { "Auth state reset" }
     }

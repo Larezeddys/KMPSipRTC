@@ -168,14 +168,22 @@ class SharedWebSocketManager(
     }
 
     /**
-     * Registrar una cuenta usando el WebSocket compartido
+     * Registrar una cuenta usando el WebSocket compartido.
+     *
+     * CRITICO para OpenSIPS con max_contacts=1:
+     * Cuando se re-registra despues de una reconexion (nuevo WebSocket -> nuevo Contact),
+     * primero se envia UNREGISTER (Expires:0) del Contact anterior para evitar
+     * "phantom registrations" que nunca expiran.
      */
-    suspend fun registerAccount(accountInfo: AccountInfo, isBackground: Boolean = false): Boolean {
+    suspend fun registerAccount(
+        accountInfo: AccountInfo,
+        isBackground: Boolean = false,
+        skipUnregister: Boolean = false
+    ): Boolean {
         // Verificar salud del WebSocket antes de registrar
         if (!isWebSocketHealthy()) {
             log.w(tag = TAG) { "WebSocket not healthy, forcing reconnection before register" }
             forceReconnect()
-            // Esperar un poco para que se establezca la conexion
             delay(500)
             if (!isWebSocketHealthy()) {
                 log.e(tag = TAG) { "Cannot register account - WebSocket still not healthy after reconnect" }
@@ -191,6 +199,25 @@ class SharedWebSocketManager(
         return try {
             val accountKey = "${accountInfo.username}@${accountInfo.domain}"
             log.d(tag = TAG) { "Registering account via shared WebSocket: $accountKey" }
+
+            // PROBLEMA 2: Antes de re-registrar, enviar UNREGISTER si la cuenta
+            // ya estaba registrada previamente. Esto asegura que OpenSIPS
+            // (con max_contacts=1) libere el Contact anterior correctamente.
+            // No se hace en el primer registro ni cuando skipUnregister es true.
+            if (!skipUnregister && registeredAccounts.contains(accountKey) && accountInfo.isRegistered.value) {
+                log.d(tag = TAG) {
+                    "Sending UNREGISTER before re-REGISTER for $accountKey " +
+                    "(OpenSIPS max_contacts=1 cleanup)"
+                }
+                try {
+                    messageHandler.sendUnregister(accountInfo)
+                    // Esperar breve para que el servidor procese el UNREGISTER
+                    delay(300)
+                } catch (e: Exception) {
+                    log.w(tag = TAG) { "UNREGISTER before re-REGISTER failed (non-fatal): ${e.message}" }
+                    // Continuar con el registro aunque falle el UNREGISTER
+                }
+            }
 
             // Enviar REGISTER
             messageHandler.sendRegister(accountInfo, isBackground)
@@ -436,8 +463,15 @@ class SharedWebSocketManager(
         })
     }
 
+    /**
+     * Re-registra cuentas que fallaron o perdieron su registro.
+     * Despues de reconexion WebSocket, el Contact anterior ya no es valido
+     * porque la conexion cambio. Con OpenSIPS max_contacts=1, el nuevo
+     * REGISTER reemplazara al anterior automaticamente gracias al +sip.instance.
+     * No se envia UNREGISTER previo aqui porque la conexion anterior ya murio.
+     */
     private suspend fun reregisterOnlyFailedAccounts() {
-        log.d(tag = TAG) { "Re-registering ONLY failed accounts" }
+        log.d(tag = TAG) { "Re-registering failed accounts after WebSocket reconnection" }
 
         val accountsToRegister = registeredAccounts.toList().filter { accountKey ->
             val account = sipCoreManager.activeAccounts[accountKey]
@@ -465,13 +499,15 @@ class SharedWebSocketManager(
             return
         }
 
-        log.d(tag = TAG) { "Re-registering ${accountsToRegister.size} accounts" }
+        log.d(tag = TAG) { "Re-registering ${accountsToRegister.size} accounts after reconnection" }
 
         accountsToRegister.forEach { accountKey ->
             val account = sipCoreManager.activeAccounts[accountKey]
             if (account != null) {
-                delay(500) // Pequeno delay entre registros
-                registerAccount(account, sipCoreManager.isAppInBackground)
+                delay(500)
+                // skipUnregister=true: la conexion anterior murio, no podemos enviar
+                // UNREGISTER por ella. OpenSIPS reemplazara el Contact gracias a +sip.instance.
+                registerAccount(account, sipCoreManager.isAppInBackground, skipUnregister = true)
             }
         }
     }

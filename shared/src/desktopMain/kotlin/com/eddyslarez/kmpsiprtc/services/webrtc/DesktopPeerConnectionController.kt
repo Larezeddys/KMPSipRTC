@@ -326,6 +326,12 @@ class DesktopPeerConnectionController(
      * @param channels Número de canales (1 = mono)
      * @param bitsPerSample Bits por muestra (16)
      */
+    // Tamaño máximo de un frame de audio WebRTC: 10ms a 48kHz mono 16-bit = 480 frames = 960 bytes
+    // El AudioFrame nativo tiene un buffer de 3840 samples (7680 bytes), pero usamos 10ms
+    // para máxima compatibilidad y mínima latencia.
+    private val WEBRTC_FRAME_SAMPLES = 480  // 10ms @ 48kHz
+    private val WEBRTC_FRAME_BYTES = WEBRTC_FRAME_SAMPLES * 2  // 16-bit mono
+
     fun injectLocalAudio(pcmData: ByteArray, sampleRate: Int, channels: Int, bitsPerSample: Int) {
         if (!localAudioInjectionActive) return
         val source = customAudioSource ?: return
@@ -333,40 +339,58 @@ class DesktopPeerConnectionController(
         try {
             val targetSampleRate = 48000
             val data: ByteArray
-            val actualSampleRate: Int
-            val frames: Int
 
             if (sampleRate != targetSampleRate) {
-                // Resamplear al sample rate del WebRTC (48kHz)
-                if (audioResampler == null) {
-                    audioResampler = AudioResampler(sampleRate, targetSampleRate, channels)
-                }
-
-                val inputFrames = pcmData.size / (channels * (bitsPerSample / 8))
-                val outputFrames = (inputFrames.toLong() * targetSampleRate / sampleRate).toInt()
-                val outputBytes = outputFrames * channels * (bitsPerSample / 8)
-                val outputBuffer = ByteArray(outputBytes)
-
-                val resampledFrames = audioResampler!!.resample(
-                    pcmData, pcmData.size,
-                    outputBuffer, outputBytes,
-                    inputFrames
-                )
-
-                data = outputBuffer
-                actualSampleRate = targetSampleRate
-                frames = resampledFrames
+                data = resamplePcm16(pcmData, sampleRate, targetSampleRate)
             } else {
                 data = pcmData
-                actualSampleRate = sampleRate
-                frames = pcmData.size / (channels * (bitsPerSample / 8))
             }
 
-            // Enviar al CustomAudioSource que lo inyecta en el pipeline de WebRTC
-            source.pushAudio(data, bitsPerSample, actualSampleRate, channels, frames)
+            // Enviar en chunks de 10ms (480 frames a 48kHz) para no exceder
+            // el buffer del AudioFrame nativo de WebRTC (máximo 3840 samples = 7680 bytes)
+            var offset = 0
+            while (offset < data.size) {
+                val chunkBytes = minOf(WEBRTC_FRAME_BYTES, data.size - offset)
+                val chunkFrames = chunkBytes / 2  // 16-bit mono
+                val chunk = data.copyOfRange(offset, offset + chunkBytes)
+                source.pushAudio(chunk, bitsPerSample, targetSampleRate, channels, chunkFrames)
+                offset += chunkBytes
+            }
         } catch (e: Exception) {
             log.e(TAG) { "Error injecting local audio: ${e.message}" }
         }
+    }
+
+    /** Resamplea PCM16 little-endian mono con interpolación lineal */
+    private fun resamplePcm16(pcm: ByteArray, fromRate: Int, toRate: Int): ByteArray {
+        if (fromRate == toRate) return pcm
+        val bytesPerSample = 2
+        val inputFrames = pcm.size / bytesPerSample
+        val ratio = toRate.toDouble() / fromRate.toDouble()
+        val outputFrames = (inputFrames * ratio).toInt()
+        val output = ByteArray(outputFrames * bytesPerSample)
+
+        for (i in 0 until outputFrames) {
+            val srcPos = i / ratio
+            val srcIdx = srcPos.toInt()
+            val frac = srcPos - srcIdx
+
+            val s0 = if (srcIdx < inputFrames) pcm16At(pcm, srcIdx) else 0
+            val s1 = if (srcIdx + 1 < inputFrames) pcm16At(pcm, srcIdx + 1) else s0
+
+            val interpolated = (s0 + (s1 - s0) * frac).toInt().coerceIn(-32768, 32767)
+            output[i * 2] = (interpolated and 0xFF).toByte()
+            output[i * 2 + 1] = (interpolated shr 8).toByte()
+        }
+        return output
+    }
+
+    /** Lee una muestra PCM16 little-endian signed por índice de frame */
+    private fun pcm16At(buf: ByteArray, frameIdx: Int): Int {
+        val off = frameIdx * 2
+        val lo = buf[off].toInt() and 0xFF
+        val hi = buf[off + 1].toInt()
+        return (hi shl 8) or lo
     }
 
     /**
@@ -547,7 +571,22 @@ class DesktopPeerConnectionController(
     fun setRemoteAudioEnabled(enabled: Boolean) {
         remoteAudioEnabled = enabled
         runCatching {
-            remoteAudioTrack?.setEnabled(enabled)
+            val track = remoteAudioTrack ?: return@runCatching
+            if (callRecorder.isStreaming()) {
+                // Desktop: NO mute speaker ni volumen del sistema.
+                // setSpeakerMute/setSpeakerVolume afectan el endpoint de audio de Windows,
+                // silenciando TODA la salida de audio incluido JavaSound (TranslationAudioPlayer).
+                // En Desktop con un solo dispositivo de audio, no es posible silenciar
+                // selectivamente el playout de WebRTC sin afectar JavaSound.
+                // El usuario escucha ambos: audio original + voz traducida de la IA.
+                println("[WebRTC] setRemoteAudioEnabled($enabled) - no-op durante streaming (Desktop single-device)")
+                log.d(TAG) { "setRemoteAudioEnabled($enabled) - no-op (streaming activo, Desktop)" }
+                return@runCatching
+            }
+            track.setEnabled(enabled)
+            log.d(TAG) { "setRemoteAudioEnabled($enabled)" }
+        }.onFailure {
+            log.e(TAG) { "Error setRemoteAudioEnabled($enabled): ${it.message}" }
         }
     }
 
@@ -635,6 +674,7 @@ class DesktopPeerConnectionController(
 
     fun startStreaming(callId: String) {
         log.d(TAG) { "🎙️ Starting audio streaming" }
+        log.d(TAG) { "remoteAudioCapture=${if (remoteAudioCapture != null) "SET" else "NULL"}, remoteAudioTrack=${if (remoteAudioTrack != null) "SET" else "NULL"}" }
         callRecorder.startStreaming(callId)
         remoteAudioCapture?.startCapture()
         log.d(TAG) { "✅ Audio streaming started for call: $callId" }
@@ -643,6 +683,10 @@ class DesktopPeerConnectionController(
     fun stopStreaming() {
         log.d(TAG) { "🛑 Stopping audio streaming" }
         callRecorder.stopStreaming()
+        // Restaurar estado del track remoto
+        runCatching {
+            remoteAudioTrack?.setEnabled(remoteAudioEnabled)
+        }
         if (!callRecorder.isRecording()) {
             remoteAudioCapture?.stopCapture()
         }

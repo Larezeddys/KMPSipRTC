@@ -9,7 +9,26 @@ data class SipConfig(
     val pingIntervalMs: Long = 30000L,
     val pushModeConfig: PushModeConfig = PushModeConfig(),
     val incomingRingtoneUri: String? = null,
-    val outgoingRingtoneUri: String? = null
+    val outgoingRingtoneUri: String? = null,
+    /**
+     * Indica si el entorno de push es produccion (true) o desarrollo/debug (false).
+     *
+     * OpenSIPS requiere el parametro ;pn-production en el Contact header para
+     * saber como enrutar el push al proveedor correcto:
+     *   - false -> entorno de desarrollo (debug builds, APNs sandbox, RuStore staging)
+     *   - true  -> entorno de produccion (Play Store/App Store releases)
+     *
+     * Para FCM este parametro es ignorado por el servidor (el entorno esta
+     * embebido en el token), pero se envia igual para consistencia.
+     *
+     * IMPORTANTE: En desarrollo siempre usar false, de lo contrario
+     * no se recibiran notificaciones push en llamadas entrantes.
+     *
+     * Configurar segun el flavor en la app:
+     *   Debug   -> pushProduction = false
+     *   Release -> pushProduction = true
+     */
+    val pushProduction: Boolean = false
 ) {
     /**
      * Valida la configuracion y retorna una lista de errores encontrados.

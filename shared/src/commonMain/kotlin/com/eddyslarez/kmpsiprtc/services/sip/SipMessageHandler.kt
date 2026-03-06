@@ -25,6 +25,12 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
 
     private val TAG = "SipMessageHandler"
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    /**
+     * Maximo de reintentos de autenticacion para evitar loops infinitos.
+     * Si el servidor rechaza credenciales N veces seguidas, dejar de intentar.
+     */
+    private val MAX_AUTH_RETRIES = 3
     private suspend fun sendViaSharedWebSocket(message: String): Boolean {
         return sipCoreManager.sharedWebSocketManager.sendMessage(message)
     }
@@ -102,13 +108,17 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             200 -> {
                 scope.launch {
                     log.d(tag = TAG) { "Registration successful for $accountKey" }
+
+                    // Resetear contador de auth retries tras registro exitoso
+                    accountInfo.authRetryCount.value = 0
+
                     sipCoreManager.handleRegistrationSuccess(accountInfo)
 
-                    // Extraer tiempo de expiración y programar renovación per-account
+                    // Extraer tiempo de expiracion y programar renovacion per-account
                     val expiresValue = SipMessageParser.extractExpiresValue(fullResponse)
                     log.d(tag = TAG) { "Registration expires in ${expiresValue}s for $accountKey" }
 
-                    // Programar re-REGISTER automático antes del vencimiento
+                    // Programar re-REGISTER automatico antes del vencimiento
                     sipCoreManager.sharedWebSocketManager.scheduleRegistrationRenewal(
                         accountKey,
                         expiresValue
@@ -124,8 +134,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             403 -> {
                 scope.launch {
                     log.e(tag = TAG) { "Registration forbidden: $reason" }
-                    // Error grave, probablemente credenciales incorrectas o cuenta deshabilitada.
-                    // No se debe reintentar agresivamente.
+                    accountInfo.authRetryCount.value = 0
                     sipCoreManager.handleRegistrationError(
                         accountInfo,
                         "Forbidden: $reason"
@@ -133,11 +142,50 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 }
             }
 
+            423 -> {
+                // RFC 3261 Section 10.2.8: 423 Interval Too Brief
+                // El servidor rechaza nuestro Expires por ser muy corto.
+                // Debemos reintentar con el valor Min-Expires que indica el servidor.
+                scope.launch {
+                    val minExpiresHeader = lines.find {
+                        it.startsWith("Min-Expires:", ignoreCase = true)
+                    }?.substringAfter(":")?.trim()?.toIntOrNull()
+
+                    if (minExpiresHeader != null && minExpiresHeader > 0) {
+                        log.w(tag = TAG) {
+                            "423 Interval Too Brief: server requires Min-Expires=$minExpiresHeader for $accountKey. " +
+                            "Re-registering (server will enforce the value in 200 OK)."
+                        }
+                        // El servidor devolvera el Min-Expires en el Expires del 200 OK,
+                        // que sera usado por scheduleRegistrationRenewal.
+                        // Solo reintentar una vez para evitar loops.
+                        val retryCount = accountInfo.authRetryCount.value
+                        if (retryCount < MAX_AUTH_RETRIES) {
+                            accountInfo.authRetryCount.value = retryCount + 1
+                            sendRegister(accountInfo, sipCoreManager.isAppInBackground)
+                        } else {
+                            log.e(tag = TAG) { "423 retry limit reached for $accountKey" }
+                            accountInfo.authRetryCount.value = 0
+                            sipCoreManager.handleRegistrationError(
+                                accountInfo,
+                                "Interval Too Brief: server requires $minExpiresHeader"
+                            )
+                        }
+                    } else {
+                        log.e(tag = TAG) {
+                            "423 Interval Too Brief but no Min-Expires header found"
+                        }
+                        sipCoreManager.handleRegistrationError(
+                            accountInfo,
+                            "Interval Too Brief: $reason"
+                        )
+                    }
+                }
+            }
+
             in 400..499 -> {
                 scope.launch {
                     log.e(tag = TAG) { "Registration client error: $statusCode - $reason" }
-                    // Otros errores de cliente. Podrían ser temporales (e.g., 423 Interval Too Brief)
-                    // o permanentes. Por defecto, se reintenta pero con cuidado.
                     val retryAfterMs = SipMessageParser.parseRetryAfter(fullResponse)?.times(1000L)
                     sipCoreManager.handleRegistrationError(
                         accountInfo,
@@ -951,7 +999,10 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
     }
 
     /**
-     * Maneja desafío de autenticación
+     * Maneja desafio de autenticacion (401/407).
+     * Diferencia correctamente entre Authorization y Proxy-Authorization
+     * segun RFC 3261 Sections 22.1-22.3.
+     * Incluye proteccion contra loops infinitos de auth-retry.
      */
     private suspend fun handleAuthenticationChallenge(
         lines: List<String>,
@@ -959,33 +1010,58 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
         method: String
     ) {
         try {
-            log.d(tag = TAG) { "Handling authentication challenge for $method au" }
+            log.d(tag = TAG) { "Handling authentication challenge for $method" }
+
+            // PROBLEMA 7: Proteccion contra auth-retry infinito
+            val currentRetryCount = accountInfo.authRetryCount.value
+            if (currentRetryCount >= MAX_AUTH_RETRIES) {
+                log.e(tag = TAG) {
+                    "Max auth retries ($MAX_AUTH_RETRIES) reached for $method. " +
+                    "Stopping to prevent infinite loop. Possible wrong credentials."
+                }
+                accountInfo.authRetryCount.value = 0 // Reset para futuros intentos manuales
+                if (method == "REGISTER") {
+                    sipCoreManager.handleRegistrationError(
+                        accountInfo,
+                        "Authentication failed after $MAX_AUTH_RETRIES attempts"
+                    )
+                }
+                return
+            }
 
             val authData = AuthenticationHandler.extractAuthenticationData(lines)
-
-            log.d(tag = TAG) { "Handling authentication  authData ,  authData $authData" }
 
             if (authData == null) {
                 log.e(tag = TAG) { "Failed to extract authentication data" }
                 return
             }
 
-            val response =
-                AuthenticationHandler.calculateAuthResponse(accountInfo, authData, method)
-            AuthenticationHandler.updateAccountAuthInfo(accountInfo, authData, response, method)
-            log.d(tag = TAG) { "Handling authentication  response ,  response $response" }
+            // Guardar el tipo de challenge para que SipMessageBuilder use el header correcto
+            accountInfo.lastChallengeType.value = authData.challengeType
+            log.d(tag = TAG) {
+                "Challenge type: ${authData.challengeType}, qop: ${authData.qop ?: "none"}, " +
+                "stale: ${authData.stale}, retry: ${currentRetryCount + 1}/$MAX_AUTH_RETRIES"
+            }
 
-            // Reenviar request con autenticación
+            // Si nonce es stale, resetear contador (no es un fallo de credenciales)
+            if (authData.stale) {
+                accountInfo.authRetryCount.value = 0
+            } else {
+                accountInfo.authRetryCount.value = currentRetryCount + 1
+            }
+
+            val authResult =
+                AuthenticationHandler.calculateAuthResponseWithDetails(accountInfo, authData, method)
+            AuthenticationHandler.updateAccountAuthInfo(accountInfo, authData, authResult, method)
+
+            // Reenviar request con autenticacion usando el header correcto
             when (method) {
                 "REGISTER" -> {
-
                     val authenticatedRegister = SipMessageBuilder.buildAuthenticatedRegisterMessage(
-                        accountInfo,
-                        sipCoreManager.isAppInBackground
+                        accountInfo = accountInfo,
+                        isAppInBackground = sipCoreManager.isAppInBackground,
+                        pushProduction = sipCoreManager.pushProduction,
                     )
-
-                    log.d(tag = TAG) { "Handling authentication  REGISTER ,  authenticatedRegister $authenticatedRegister" }
-
                     sendViaSharedWebSocket(authenticatedRegister)
                 }
 
@@ -997,7 +1073,6 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                             callData.localSdp
                         )
                         callData.originalCallInviteMessage = authenticatedInvite
-
                         sendViaSharedWebSocket(authenticatedInvite)
                     }
                 }
@@ -1139,7 +1214,11 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             accountInfo.fromTag.value = fromTag
 
             val registerMessage = SipMessageBuilder.buildRegisterMessage(
-                accountInfo, callId, fromTag, isAppInBackground
+                accountInfo = accountInfo,
+                callId = callId,
+                fromTag = fromTag,
+                isAppInBackground = isAppInBackground,
+                pushProduction = sipCoreManager.pushProduction,
             )
 
             sendViaSharedWebSocket(registerMessage)

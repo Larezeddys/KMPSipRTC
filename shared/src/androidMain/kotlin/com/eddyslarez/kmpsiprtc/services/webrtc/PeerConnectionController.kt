@@ -162,7 +162,7 @@ class PeerConnectionController(
             val audioModule = JavaAudioDeviceModule.builder(context)
                 .setUseHardwareAcousticEchoCanceler(true)
                 .setUseHardwareNoiseSuppressor(true)
-                .setUseStereoInput(true)
+                .setUseStereoInput(false)
                 .setUseStereoOutput(true)
                 .setAudioBufferCallback { buffer, sampleRate, channels, bitsPerSample, frames, timestamp ->
                     // Este callback intercepta los datos del micrófono ANTES de enviarlos a WebRTC.
@@ -409,6 +409,11 @@ class PeerConnectionController(
     fun stopStreaming() {
         log.d(TAG) { "🛑 Stopping audio streaming" }
         callRecorder.stopStreaming()
+        // Restaurar estado de audio: volumen normal y aplicar el estado real del track
+        try {
+            remoteAudioTrack?.setVolume(1.0)
+            remoteAudioTrack?.setEnabled(remoteAudioEnabled)
+        } catch (_: Exception) {}
         if (!callRecorder.isRecording()) {
             remoteAudioCapture?.stopCapture()
         }
@@ -589,7 +594,16 @@ class PeerConnectionController(
     fun setRemoteAudioEnabled(enabled: Boolean) {
         remoteAudioEnabled = enabled
         try {
+            if (callRecorder.isStreaming()) {
+                // Durante streaming (traducción): usar setVolume en lugar de setEnabled
+                // setEnabled(false) puede detener los AudioTrackSink y romper la captura.
+                // setVolume(0.0) silencia la salida al speaker preservando los sinks.
+                remoteAudioTrack?.setVolume(if (enabled) 1.0 else 0.0)
+                log.d(TAG) { "setRemoteAudioEnabled($enabled) via setVolume (streaming activo)" }
+                return
+            }
             remoteAudioTrack?.setEnabled(enabled)
+            log.d(TAG) { "setRemoteAudioEnabled($enabled)" }
         } catch (e: Exception) {
             log.e(TAG) { "Error setting remote audio enabled: ${e.message}" }
         }

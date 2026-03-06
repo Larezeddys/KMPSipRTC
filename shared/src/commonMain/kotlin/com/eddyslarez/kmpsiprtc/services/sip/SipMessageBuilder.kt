@@ -6,16 +6,24 @@ import com.eddyslarez.kmpsiprtc.data.models.CallDirections
 import com.eddyslarez.kmpsiprtc.utils.generateId
 import com.eddyslarez.kmpsiprtc.platform.log
 object SipMessageBuilder {
-    // Constants
+    // Constantes SIP
     private const val SIP_VERSION = "SIP/2.0"
     private const val SIP_TRANSPORT = "WS"
     private const val MAX_FORWARDS = 70
-    private const val DEFAULT_EXPIRES = 604800
+    // RFC: Usar un Expires razonable. El servidor puede reducirlo en la respuesta 200 OK.
+    // El equipo OpenSIPS confirmo: "usar el Expires que nosotros enviamos".
+    // 600s (10 min) es un buen equilibrio entre tráfico y disponibilidad.
+    private const val DEFAULT_EXPIRES = 600
     private const val UNREGISTER_EXPIRES = 0
     private const val TAG = "SipMessageBuilder"
 
     /**
      * Build REGISTER message with optional push notification support
+     *
+     * @param pushProduction true = entorno de produccion (APNS produccion, RuStore produccion),
+     *                       false = sandbox/debug. Se incluye en el Contact header como
+     *                       ;pn-production=true/false cuando la app esta en background.
+     *                       Requerido por OpenSIPS para enrutar pushes correctamente.
      */
     suspend fun buildRegisterMessage(
         accountInfo: AccountInfo,
@@ -23,6 +31,7 @@ object SipMessageBuilder {
         fromTag: String,
         isAppInBackground: Boolean,
         isAuthenticated: Boolean = false,
+        pushProduction: Boolean = false,
     ): String {
         val uri = "sip:${accountInfo.domain}"
         val builder = StringBuilder()
@@ -35,7 +44,8 @@ object SipMessageBuilder {
                     "\nProvider: ${accountInfo.provider.value}" +
                     "\nUser Agent: ${accountInfo.userAgent.value}" +
                     "\nLocalContactHost: ${accountInfo.localContactHost}" +
-                    "\nLocalContactId: ${accountInfo.localContactId}"
+                    "\nLocalContactId: ${accountInfo.localContactId}" +
+                    "\nPush Production: $pushProduction"
         }
 
         val currentCSeq = accountInfo.incrementCSeq()
@@ -50,21 +60,34 @@ object SipMessageBuilder {
         builder.append("CSeq: $currentCSeq REGISTER\r\n")
         builder.append("User-Agent: ${accountInfo.userAgent.value}\r\n")
 
-        // ✅ CORREGIDO: Contact usa localContactId@localContactHost
+        // Contact header con soporte RFC 5626 (outbound) y RFC 5627 (instance-id)
         builder.append("Contact: <sip:${accountInfo.localContactId}@${accountInfo.localContactHost}")
 
         if (isAppInBackground) {
-            log.d(tag = TAG) { "Adding push notification parameters to Contact header" }
-            builder.append(";pn-prid=${accountInfo.token.value};pn-provider=${accountInfo.provider.value}")
+            log.d(tag = TAG) { "Adding push notification parameters to Contact header (pn-production=$pushProduction)" }
+            // pn-prid y pn-provider son obligatorios para push (RFC 8599)
+            // pn-production requerido por OpenSIPS: false=sandbox/debug, true=produccion
+            builder.append(";pn-prid=${accountInfo.token.value};pn-provider=${accountInfo.provider.value};pn-production=$pushProduction")
         } else {
             log.d(tag = TAG) { "Building Contact header WITHOUT push notification parameters" }
         }
 
-        builder.append(";transport=ws>;expires=$DEFAULT_EXPIRES\r\n")
+        // ;transport=ws base + ;ob (RFC 5626 outbound)
+        builder.append(";transport=ws;ob>")
+        // +sip.instance (RFC 5626) - permite a OpenSIPS identificar este dispositivo
+        // de forma unica y reemplazar Contact anterior (max_contacts=1)
+        builder.append(";+sip.instance=${accountInfo.instanceId}")
+        // Feature tag para push (RFC 8599) cuando esta en background
+        if (isAppInBackground) {
+            builder.append(";+sip.pnsreg")
+        }
+        builder.append(";expires=$DEFAULT_EXPIRES\r\n")
         builder.append("Expires: $DEFAULT_EXPIRES\r\n")
 
+        // RFC 3261: Usar Authorization para 401, Proxy-Authorization para 407
         if (isAuthenticated && accountInfo.authorizationHeader.value != null) {
-            builder.append("Authorization: ${accountInfo.authorizationHeader.value}\r\n")
+            val headerName = AuthenticationHandler.getAuthHeaderName(accountInfo.lastChallengeType.value)
+            builder.append("$headerName: ${accountInfo.authorizationHeader.value}\r\n")
         }
 
         builder.append("Content-Length: 0\r\n\r\n")
@@ -74,7 +97,7 @@ object SipMessageBuilder {
         log.d(tag = TAG) {
             "Final REGISTER message Contact header contains push params: ${
                 finalMessage.contains("pn-prid")
-            }"
+            }, pn-production=$pushProduction"
         }
 
         return finalMessage
@@ -82,36 +105,63 @@ object SipMessageBuilder {
 
     /**
      * Build authenticated REGISTER message
+     *
+     * @param pushProduction true = produccion, false = sandbox/debug.
+     *                       Se pasa directamente a buildRegisterMessage.
      */
     suspend fun buildAuthenticatedRegisterMessage(
         accountInfo: AccountInfo,
-        isAppInBackground: Boolean
+        isAppInBackground: Boolean,
+        pushProduction: Boolean = false,
     ): String {
         return buildRegisterMessage(
             accountInfo = accountInfo,
             callId = accountInfo.callId.value ?: generateId(),
             fromTag = accountInfo.fromTag.value ?: generateId(),
             isAppInBackground = isAppInBackground,
-            isAuthenticated = true
+            isAuthenticated = true,
+            pushProduction = pushProduction,
         )
     }
 
     /**
-     * Build unregister message (expires=0)
+     * Construye mensaje UNREGISTER (Expires: 0) para desregistrar el Contact.
+     * IMPORTANTE para OpenSIPS con max_contacts=1: enviar UNREGISTER antes de
+     * re-registrar desde otra conexion evita "phantom registrations".
+     * Construido directamente (no con replace) para robustez.
      */
     suspend fun buildUnregisterMessage(
         accountInfo: AccountInfo,
         callId: String,
         fromTag: String
     ): String {
-        return buildRegisterMessage(
-            accountInfo = accountInfo,
-            callId = callId,
-            fromTag = fromTag,
-            isAppInBackground = false,
-            isAuthenticated = accountInfo.authorizationHeader.value != null
-        ).replace("Expires: $DEFAULT_EXPIRES", "Expires: $UNREGISTER_EXPIRES")
-            .replace("expires=$DEFAULT_EXPIRES", "expires=$UNREGISTER_EXPIRES")
+        val uri = "sip:${accountInfo.domain}"
+        val builder = StringBuilder()
+        val currentCSeq = accountInfo.incrementCSeq()
+
+        builder.append("REGISTER $uri $SIP_VERSION\r\n")
+        builder.append("Via: $SIP_VERSION/$SIP_TRANSPORT ${accountInfo.localContactHost};branch=z9hG4bK${generateId()}\r\n")
+        builder.append("Max-Forwards: $MAX_FORWARDS\r\n")
+        builder.append("From: <sip:${accountInfo.username}@${accountInfo.domain}>;tag=$fromTag\r\n")
+        builder.append("To: <sip:${accountInfo.username}@${accountInfo.domain}>\r\n")
+        builder.append("Call-ID: $callId\r\n")
+        builder.append("CSeq: $currentCSeq REGISTER\r\n")
+        builder.append("User-Agent: ${accountInfo.userAgent.value}\r\n")
+        // Contact con * para desregistrar todos los bindings, o especifico con expires=0
+        builder.append("Contact: <sip:${accountInfo.localContactId}@${accountInfo.localContactHost};transport=ws;ob>")
+        builder.append(";+sip.instance=${accountInfo.instanceId}")
+        builder.append(";expires=$UNREGISTER_EXPIRES\r\n")
+        builder.append("Expires: $UNREGISTER_EXPIRES\r\n")
+
+        // Incluir autenticacion si esta disponible
+        if (accountInfo.authorizationHeader.value != null) {
+            val headerName = AuthenticationHandler.getAuthHeaderName(accountInfo.lastChallengeType.value)
+            builder.append("$headerName: ${accountInfo.authorizationHeader.value}\r\n")
+        }
+
+        builder.append("Content-Length: 0\r\n\r\n")
+
+        return builder.toString()
     }
 
     /**
@@ -142,15 +192,17 @@ object SipMessageBuilder {
         builder.append("To: <$uri>\r\n")
         builder.append("Call-ID: ${callData.callId}\r\n")
         builder.append("CSeq: $currentCSeq INVITE\r\n")
-        // ✅ CORREGIDO: Contact usa localContactId@localContactHost
-        builder.append("Contact: <sip:${accountInfo.localContactId}@${accountInfo.localContactHost};transport=ws>\r\n")
+        // Contact con ;ob (RFC 5626 outbound) para llamadas
+        builder.append("Contact: <sip:${accountInfo.localContactId}@${accountInfo.localContactHost};transport=ws;ob>\r\n")
 
         if (md5Hash.isNotEmpty()) {
             builder.append("X-MD5: $md5Hash\r\n")
         }
 
+        // RFC 3261: Usar Authorization para 401, Proxy-Authorization para 407
         if (isAuthenticated && accountInfo.authorizationHeader.value != null) {
-            builder.append("Authorization: ${accountInfo.authorizationHeader.value}\r\n")
+            val headerName = AuthenticationHandler.getAuthHeaderName(accountInfo.lastChallengeType.value)
+            builder.append("$headerName: ${accountInfo.authorizationHeader.value}\r\n")
         }
 
         builder.append("Content-Type: application/sdp\r\n")
@@ -386,8 +438,7 @@ object SipMessageBuilder {
             append("CSeq: ${callData.lastCSeqValue} $method\r\n")
 
             if (includeContact) {
-                // ✅ CORREGIDO: Contact usa localContactId@localContactHost
-                append("Contact: <sip:${accountInfo.localContactId}@${accountInfo.localContactHost};transport=ws>\r\n")
+                append("Contact: <sip:${accountInfo.localContactId}@${accountInfo.localContactHost};transport=ws;ob>\r\n")
             }
 
             contentType?.let {
@@ -522,8 +573,7 @@ object SipMessageBuilder {
 
         builder.append("Call-ID: ${callData.callId}\r\n")
         builder.append("CSeq: $currentCSeq INVITE\r\n")
-        // ✅ CORREGIDO: Contact usa localContactId@localContactHost
-        builder.append("Contact: <sip:${accountInfo.localContactId}@${accountInfo.localContactHost};transport=ws>\r\n")
+        builder.append("Contact: <sip:${accountInfo.localContactId}@${accountInfo.localContactHost};transport=ws;ob>\r\n")
         builder.append("Content-Type: application/sdp\r\n")
         builder.append("Content-Length: ${sdp.length}\r\n\r\n")
         builder.append(sdp)
@@ -580,8 +630,7 @@ object SipMessageBuilder {
 
                 append("Call-ID: ${callData.callId}\r\n")
                 append("CSeq: $currentCSeq INFO\r\n")
-                // ✅ CORREGIDO: Contact usa localContactId@localContactHost
-                append("Contact: <sip:${accountInfo.localContactId}@${accountInfo.localContactHost};transport=ws>\r\n")
+                append("Contact: <sip:${accountInfo.localContactId}@${accountInfo.localContactHost};transport=ws;ob>\r\n")
                 append("User-Agent: ${accountInfo.userAgent.value}\r\n")
                 append("Content-Type: application/dtmf-relay\r\n")
                 append("Content-Length: ${dtmfContent.length}\r\n")
