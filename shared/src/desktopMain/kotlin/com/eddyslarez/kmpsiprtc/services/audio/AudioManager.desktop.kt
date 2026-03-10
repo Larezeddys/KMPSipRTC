@@ -164,22 +164,25 @@ class DesktopAudioManagerImpl : AudioManager {
         return try {
             when {
                 path.startsWith("jar:") || path.startsWith("http://") || path.startsWith("https://") -> {
-                    // Usar URL directamente - AudioSystem maneja JAR URLs correctamente
-                    // y detecta el formato WAV sin problemas de mark/reset
+                    // Usar stream bufferizado para mejorar compatibilidad con SPI (p.ej. MP3)
                     val url = java.net.URL(path)
-                    AudioSystem.getAudioInputStream(url)
+                    val buffered = BufferedInputStream(url.openStream())
+                    AudioSystem.getAudioInputStream(buffered)
                 }
                 path.startsWith("/") -> {
                     // Intentar como recurso de classpath primero
                     val resourceUrl = this::class.java.getResource(path)
                     if (resourceUrl != null) {
-                        AudioSystem.getAudioInputStream(resourceUrl)
+                        val buffered = BufferedInputStream(resourceUrl.openStream())
+                        AudioSystem.getAudioInputStream(buffered)
                     } else {
-                        AudioSystem.getAudioInputStream(File(path))
+                        val buffered = BufferedInputStream(File(path).inputStream())
+                        AudioSystem.getAudioInputStream(buffered)
                     }
                 }
                 else -> {
-                    AudioSystem.getAudioInputStream(File(path))
+                    val buffered = BufferedInputStream(File(path).inputStream())
+                    AudioSystem.getAudioInputStream(buffered)
                 }
             }
         } catch (e: Exception) {

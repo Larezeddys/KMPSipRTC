@@ -141,6 +141,9 @@ kotlin {
                 implementation("dev.onvoid.webrtc:webrtc-java:0.14.0")
                 implementation("io.ktor:ktor-client-okhttp:3.3.1")
                 implementation("org.jetbrains.kotlinx:kotlinx-datetime:0.7.1")
+                implementation("com.googlecode.soundlibs:mp3spi:1.9.5.4")
+                implementation("com.googlecode.soundlibs:jlayer:1.0.1.4")
+                implementation("com.googlecode.soundlibs:tritonus-share:0.3.7.4")
 
                 val osName = System.getProperty("os.name").lowercase()
                 val osArch = System.getProperty("os.arch").lowercase()
