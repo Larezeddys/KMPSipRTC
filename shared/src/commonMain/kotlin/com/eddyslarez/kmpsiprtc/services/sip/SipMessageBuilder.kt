@@ -10,10 +10,9 @@ object SipMessageBuilder {
     private const val SIP_VERSION = "SIP/2.0"
     private const val SIP_TRANSPORT = "WS"
     private const val MAX_FORWARDS = 70
-    // RFC: Usar un Expires razonable. El servidor puede reducirlo en la respuesta 200 OK.
-    // El equipo OpenSIPS confirmo: "usar el Expires que nosotros enviamos".
-    // 600s (10 min) es un buen equilibrio entre tráfico y disponibilidad.
-    private const val DEFAULT_EXPIRES = 600
+    // Mantener registro largo para compatibilidad con modelos legacy y OpenSIPS.
+    // 259200s = 3 dias.
+    private const val DEFAULT_EXPIRES = 259200
     private const val UNREGISTER_EXPIRES = 0
     private const val TAG = "SipMessageBuilder"
 
@@ -51,7 +50,6 @@ object SipMessageBuilder {
         val currentCSeq = accountInfo.incrementCSeq()
 
         builder.append("REGISTER $uri $SIP_VERSION\r\n")
-        // ✅ CORREGIDO: Via usa localContactHost en lugar de domain
         builder.append("Via: $SIP_VERSION/$SIP_TRANSPORT ${accountInfo.localContactHost};branch=z9hG4bK${generateId()}\r\n")
         builder.append("Max-Forwards: $MAX_FORWARDS\r\n")
         builder.append("From: <sip:${accountInfo.username}@${accountInfo.domain}>;tag=$fromTag\r\n")
@@ -60,24 +58,21 @@ object SipMessageBuilder {
         builder.append("CSeq: $currentCSeq REGISTER\r\n")
         builder.append("User-Agent: ${accountInfo.userAgent.value}\r\n")
 
-        // Contact header con soporte RFC 5626 (outbound) y RFC 5627 (instance-id)
         builder.append("Contact: <sip:${accountInfo.localContactId}@${accountInfo.localContactHost}")
 
         if (isAppInBackground) {
             log.d(tag = TAG) { "Adding push notification parameters to Contact header (pn-production=$pushProduction)" }
             // pn-prid y pn-provider son obligatorios para push (RFC 8599)
-            // pn-production requerido por OpenSIPS: false=sandbox/debug, true=produccion
-            builder.append(";pn-prid=${accountInfo.token.value};pn-provider=${accountInfo.provider.value};pn-production=$pushProduction")
+            builder.append(";pn-prid=${accountInfo.token.value};pn-provider=${accountInfo.provider.value}")
+
+            builder.append(";pn-production=$pushProduction")
         } else {
             log.d(tag = TAG) { "Building Contact header WITHOUT push notification parameters" }
         }
 
-        // ;transport=ws base + ;ob (RFC 5626 outbound)
         builder.append(";transport=ws;ob>")
-        // +sip.instance (RFC 5626) - permite a OpenSIPS identificar este dispositivo
-        // de forma unica y reemplazar Contact anterior (max_contacts=1)
         builder.append(";+sip.instance=${accountInfo.instanceId}")
-        // Feature tag para push (RFC 8599) cuando esta en background
+
         if (isAppInBackground) {
             builder.append(";+sip.pnsreg")
         }
@@ -94,11 +89,18 @@ object SipMessageBuilder {
 
         val finalMessage = builder.toString()
 
+        val includesPnPrid = finalMessage.contains(";pn-prid=")
+        val includesPnProduction = finalMessage.contains(";pn-production=")
+        val contactHeader = finalMessage
+            .lineSequence()
+            .firstOrNull { it.startsWith("Contact:", ignoreCase = true) }
+            ?: "Contact: <missing>"
+
         log.d(tag = TAG) {
-            "Final REGISTER message Contact header contains push params: ${
-                finalMessage.contains("pn-prid")
-            }, pn-production=$pushProduction"
+            "Final REGISTER for ${accountInfo.username}@${accountInfo.domain}: " +
+                "pn-prid=$includesPnPrid, pn-production=$includesPnProduction"
         }
+        log.d(tag = TAG) { contactHeader }
 
         return finalMessage
     }
@@ -147,7 +149,6 @@ object SipMessageBuilder {
         builder.append("Call-ID: $callId\r\n")
         builder.append("CSeq: $currentCSeq REGISTER\r\n")
         builder.append("User-Agent: ${accountInfo.userAgent.value}\r\n")
-        // Contact con * para desregistrar todos los bindings, o especifico con expires=0
         builder.append("Contact: <sip:${accountInfo.localContactId}@${accountInfo.localContactHost};transport=ws;ob>")
         builder.append(";+sip.instance=${accountInfo.instanceId}")
         builder.append(";expires=$UNREGISTER_EXPIRES\r\n")
