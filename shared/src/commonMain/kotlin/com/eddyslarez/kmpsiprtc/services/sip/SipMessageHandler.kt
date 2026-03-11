@@ -703,11 +703,11 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 }
             }
 
-            scope.launch {
-                delay(100)
-                val ringingResponse = SipMessageBuilder.buildRingingResponse(accountInfo, normalizedCallData)
-                sendViaSharedWebSocket(ringingResponse)
+            // Enviar 180 Ringing de inmediato para que el caller reciba ringback cuanto antes.
+            val ringingResponse = SipMessageBuilder.buildRingingResponse(accountInfo, normalizedCallData)
+            sendViaSharedWebSocket(ringingResponse)
 
+            scope.launch {
                 delay(200)
                 // Solo reproducir ringtone en-app si la llamada NO viene de push.
                 // Cuando viene de push, CallKit ya presenta la UI con el ringtone del sistema.
@@ -835,12 +835,6 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
 
             if (callData == null) {
                 log.w(tag = TAG) { "[ERROR] No call data for CANCEL" }
-            } else {
-                // [OK] REGISTRAR LLAMADA PERDIDA ANTES DE RESPUESTAS
-                if (callData.direction == CallDirections.INCOMING) {
-                    log.d(tag = TAG) { "[LOG] Registering MISSED call from CANCEL: ${callData.callId}" }
-                    sipCoreManager.callManager?.registerMissedCall(callData)
-                }
             }
 
             // Enviar 200 OK para CANCEL
@@ -848,8 +842,26 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             sendViaSharedWebSocket(cancelOkResponse)
             log.d(tag = TAG) { "[OK] 200 OK sent for CANCEL" }
 
-            // Enviar 487 Request Terminated para INVITE original
+            // CANCEL solo aplica a INVITE aun no finalizado.
+            // Si la llamada ya esta CONNECTED/STREAMS_RUNNING, no debe tumbar la llamada.
             callData?.let {
+                val perCallState = MultiCallManager.getCallState(it.callId)?.state
+                val isPendingInvite = perCallState == CallState.INCOMING_RECEIVED
+
+                if (!isPendingInvite) {
+                    log.w(tag = TAG) {
+                        "[CANCEL] Ignored for call ${it.callId} in state=$perCallState (already answered or terminated)"
+                    }
+                    return@let
+                }
+
+                // Solo en estado pendiente se registra como perdida y se termina INVITE con 487.
+                if (it.direction == CallDirections.INCOMING) {
+                    log.d(tag = TAG) { "[LOG] Registering MISSED call from CANCEL: ${it.callId}" }
+                    sipCoreManager.callManager?.registerMissedCall(it)
+                }
+
+                // Enviar 487 Request Terminated para INVITE original
                 val requestTerminatedResponse =
                     SipMessageBuilder.buildRequestTerminatedResponse(accountInfo, it)
                 sendViaSharedWebSocket(requestTerminatedResponse)
