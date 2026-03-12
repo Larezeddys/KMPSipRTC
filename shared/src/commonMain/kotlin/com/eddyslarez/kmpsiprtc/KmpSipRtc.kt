@@ -1078,6 +1078,15 @@ class KmpSipRtc private constructor() {
     }
 
     /**
+     * Consulta si hay una llamada entrante de push pendiente/activa.
+     * Usado por la capa de aplicacion para evitar re-registros en FOREGROUND
+     * mientras se procesa un push VoIP (race condition en cold start).
+     */
+    fun isIncomingCallFromPush(): Boolean {
+        return sipCoreManager?.isIncomingPushCallPending ?: false
+    }
+
+    /**
      * Crea información de llamada entrante desde la llamada actual
      */
     @OptIn(ExperimentalTime::class)
