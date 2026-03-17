@@ -20,9 +20,12 @@ object SipMessageBuilder {
      * Build REGISTER message with optional push notification support
      *
      * @param pushProduction true = entorno de produccion (APNS produccion, RuStore produccion),
-     *                       false = sandbox/debug. Se incluye en el Contact header como
-     *                       ;pn-production=true/false cuando la app esta en background.
-     *                       Requerido por OpenSIPS para enrutar pushes correctamente.
+     *                       false = sandbox/debug.
+     *                       IMPORTANTE: Solo se envia ;pn-production=false cuando es DEBUG.
+     *                       En produccion NO se envia el parametro (OpenSIPS asume produccion
+     *                       por defecto cuando no recibe el parametro).
+     *                       Esto es estricto: OpenSIPS detecta cuando se envia production=false
+     *                       y enruta al sandbox, asi que en release simplemente se omite.
      */
     suspend fun buildRegisterMessage(
         accountInfo: AccountInfo,
@@ -61,11 +64,19 @@ object SipMessageBuilder {
         builder.append("Contact: <sip:${accountInfo.localContactId}@${accountInfo.localContactHost}")
 
         if (isAppInBackground) {
-            log.d(tag = TAG) { "Adding push notification parameters to Contact header (pn-production=$pushProduction)" }
+            log.d(tag = TAG) { "Adding push notification parameters to Contact header (pushProduction=$pushProduction)" }
             // pn-prid y pn-provider son obligatorios para push (RFC 8599)
             builder.append(";pn-prid=${accountInfo.token.value};pn-provider=${accountInfo.provider.value}")
 
-            builder.append(";pn-production=$pushProduction")
+            // ESTRICTO: Solo enviar pn-production=false en DEBUG.
+            // En RELEASE (pushProduction=true) NO enviar el parametro.
+            // OpenSIPS asume produccion por defecto cuando no recibe pn-production.
+            if (!pushProduction) {
+                builder.append(";pn-production=false")
+                log.d(tag = TAG) { "DEBUG mode: enviando pn-production=false" }
+            } else {
+                log.d(tag = TAG) { "RELEASE mode: omitiendo pn-production (OpenSIPS asume produccion)" }
+            }
         } else {
             log.d(tag = TAG) { "Building Contact header WITHOUT push notification parameters" }
         }
@@ -108,7 +119,8 @@ object SipMessageBuilder {
     /**
      * Build authenticated REGISTER message
      *
-     * @param pushProduction true = produccion, false = sandbox/debug.
+     * @param pushProduction true = produccion (no se envia pn-production),
+     *                       false = sandbox/debug (se envia pn-production=false).
      *                       Se pasa directamente a buildRegisterMessage.
      */
     suspend fun buildAuthenticatedRegisterMessage(

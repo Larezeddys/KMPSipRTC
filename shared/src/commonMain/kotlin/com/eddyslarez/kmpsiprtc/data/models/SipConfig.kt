@@ -13,20 +13,20 @@ data class SipConfig(
     /**
      * Indica si el entorno de push es produccion (true) o desarrollo/debug (false).
      *
-     * OpenSIPS requiere el parametro ;pn-production en el Contact header para
-     * saber como enrutar el push al proveedor correcto:
-     *   - false -> entorno de desarrollo (debug builds, APNs sandbox, RuStore staging)
-     *   - true  -> entorno de produccion (Play Store/App Store releases)
+     * Comportamiento en el Contact header del REGISTER:
+     *   - false (Debug)  -> se envia ;pn-production=false para forzar sandbox
+     *   - true (Release) -> NO se envia el parametro pn-production
      *
-     * Para FCM este parametro es ignorado por el servidor (el entorno esta
-     * embebido en el token), pero se envia igual para consistencia.
+     * OpenSIPS asume produccion por defecto cuando no recibe pn-production.
+     * Es ESTRICTO: si se envia pn-production=false, OpenSIPS enruta al sandbox
+     * y las push no llegan en produccion. Por eso en release se OMITE.
      *
      * IMPORTANTE: En desarrollo siempre usar false, de lo contrario
      * no se recibiran notificaciones push en llamadas entrantes.
      *
      * Configurar segun el flavor en la app:
-     *   Debug   -> pushProduction = false
-     *   Release -> pushProduction = true
+     *   Debug   -> pushProduction = false (envia pn-production=false)
+     *   Release -> pushProduction = true  (no envia pn-production)
      */
     val pushProduction: Boolean = false
 ) {
