@@ -33,7 +33,7 @@ object SipMessageBuilder {
         fromTag: String,
         isAppInBackground: Boolean,
         isAuthenticated: Boolean = false,
-        pushProduction: Boolean = false,
+        pushProduction: Boolean = true,
     ): String {
         val uri = "sip:${accountInfo.domain}"
         val builder = StringBuilder()
@@ -126,7 +126,7 @@ object SipMessageBuilder {
     suspend fun buildAuthenticatedRegisterMessage(
         accountInfo: AccountInfo,
         isAppInBackground: Boolean,
-        pushProduction: Boolean = false,
+        pushProduction: Boolean = true,
     ): String {
         return buildRegisterMessage(
             accountInfo = accountInfo,

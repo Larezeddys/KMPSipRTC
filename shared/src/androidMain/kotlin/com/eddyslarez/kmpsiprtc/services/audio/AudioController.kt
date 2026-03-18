@@ -161,12 +161,24 @@ class AudioController(
             }
             AudioManager.AUDIOFOCUS_LOSS -> {
                 log.d(TAG) { "Audio focus lost permanently" }
-                audioManager?.isMicrophoneMute = true
-                stopBluetoothSco()
+                // NO mutear mic durante llamada VoIP activa — el interlocutor
+                // dejaria de escuchar al usuario. La llamada VoIP tiene prioridad.
+                if (!isStarted) {
+                    audioManager?.isMicrophoneMute = true
+                    stopBluetoothSco()
+                } else {
+                    log.w(TAG) { "Llamada activa, ignorando AUDIOFOCUS_LOSS para no silenciar mic" }
+                }
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                 log.d(TAG) { "Audio focus lost temporarily" }
-                audioManager?.isMicrophoneMute = true
+                // NO mutear mic durante llamada VoIP activa — causa que el
+                // interlocutor no escuche al usuario al contestar via TelecomManager.
+                if (!isStarted) {
+                    audioManager?.isMicrophoneMute = true
+                } else {
+                    log.w(TAG) { "Llamada activa, ignorando AUDIOFOCUS_LOSS_TRANSIENT" }
+                }
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                 log.d(TAG) { "Audio focus lost, can duck" }
@@ -631,8 +643,12 @@ class AudioController(
                     if (!isBluetoothScoOn && isBluetoothScoRequested) {
                         log.w(TAG) { "SCO connection timeout, retrying..." }
                         am.stopBluetoothSco()
-                        Thread.sleep(100)
-                        am.startBluetoothSco()
+                        // Reintentar SCO sin bloquear main thread
+                        mainHandler.postDelayed({
+                            if (!isBluetoothScoOn && isBluetoothScoRequested) {
+                                am.startBluetoothSco()
+                            }
+                        }, 100)
                     }
                 }, 1000)
 

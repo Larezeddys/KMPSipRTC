@@ -28,7 +28,7 @@ data class SipConfig(
      *   Debug   -> pushProduction = false (envia pn-production=false)
      *   Release -> pushProduction = true  (no envia pn-production)
      */
-    val pushProduction: Boolean = false
+    val pushProduction: Boolean = true
 ) {
     /**
      * Valida la configuracion y retorna una lista de errores encontrados.

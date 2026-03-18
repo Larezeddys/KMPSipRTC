@@ -295,7 +295,8 @@ class KmpSipRtc private constructor() {
                             enableAutoReconnect = config.enableAutoReconnect,
                             pingIntervalMs = config.pingIntervalMs,
                             incomingRingtoneUri = config.incomingRingtoneUri,
-                            outgoingRingtoneUri = config.outgoingRingtoneUri
+                            outgoingRingtoneUri = config.outgoingRingtoneUri,
+                            pushProduction = config.pushProduction
                         )
                     )
 

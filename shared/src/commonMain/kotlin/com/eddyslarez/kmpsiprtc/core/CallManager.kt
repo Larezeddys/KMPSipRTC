@@ -496,11 +496,11 @@ class CallManager(
                     }
                 }
 
-                // PASO 2: Preparar Audio Session (iOS CallKit)
+                // PASO 2: Preparar Audio Session (iOS CallKit / Android AudioController)
                 audioManager.prepareAudioForIncomingCall()
 
                 // Delay para que audio session se estabilice
-                delay(500)
+                delay(200)
 
                 // PASO 2.5: En multi-línea, la PeerConnection activa pertenece a otra llamada
                 // (call1 en hold) y tiene ICE candidatos distintos al endpoint de media de call2.
@@ -544,14 +544,13 @@ class CallManager(
                 CallStateManager.callConnected(callData.callId, 200)
                 sipCoreManager.notifyCallStateChanged(CallState.CONNECTED)
 
-                // PASO 7: Esperar ACK antes de activar audio
-                delay(1000)
-
-                // PASO 8: Habilitar audio DESPUES de todo lo demas
+                // PASO 7: Habilitar audio INMEDIATAMENTE tras enviar 200 OK
+                // (antes se esperaba 1s al ACK, pero el ACK llega en ms y el delay
+                // causaba que el interlocutor no escuchara al usuario por ~2.6s)
                 audioManager.setAudioEnabled(true)
 
-                // PASO 9: Verificar que el audio esta funcionando
-                delay(500)
+                // PASO 8: Breve espera para estabilizacion y verificar mute
+                delay(300)
 
                 if (audioManager.isMuted()) {
                     audioManager.toggleMute()

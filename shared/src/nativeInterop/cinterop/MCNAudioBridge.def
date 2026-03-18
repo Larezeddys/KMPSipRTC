@@ -1,0 +1,4 @@
+language = Objective-C
+headers = MCNAudioInjectionBridge.h
+staticLibraries = libMCNAudioBridge.a
+linkerOpts = -framework AudioToolbox -framework WebRTC -lobjc

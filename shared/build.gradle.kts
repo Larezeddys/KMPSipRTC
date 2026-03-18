@@ -39,6 +39,31 @@ kotlin {
     val iosArm64Target = iosArm64()
     val iosSimulatorArm64Target = iosSimulatorArm64()
 
+    // Custom cinterop para MCNAudioBridge (bridge ObjC para inyeccion de audio)
+    val xcframeworkBase = project.file("build/cocoapods/synthetic/ios/Pods/WebRTC-SDK/WebRTC.xcframework")
+    val libsBase = project.file("src/nativeInterop/libs")
+    listOf(iosX64Target, iosArm64Target, iosSimulatorArm64Target).forEach { target ->
+        val frameworkDir = when (target.name) {
+            "iosArm64" -> xcframeworkBase.resolve("ios-arm64")
+            else -> xcframeworkBase.resolve("ios-arm64_x86_64-simulator")
+        }
+        val libDir = when (target.name) {
+            "iosArm64" -> libsBase.resolve("ios-arm64")
+            "iosX64" -> libsBase.resolve("ios-simulator-x86_64")
+            else -> libsBase.resolve("ios-simulator-arm64")
+        }
+        target.compilations.getByName("main") {
+            cinterops {
+                create("MCNAudioBridge") {
+                    defFile = project.file("src/nativeInterop/cinterop/MCNAudioBridge.def")
+                    val headerDir = project.file("src/nativeInterop/cinterop")
+                    compilerOpts("-I${headerDir}")
+                    extraOpts("-libraryPath", libDir.absolutePath)
+                }
+            }
+        }
+    }
+
     // Desktop target
     jvm("desktop") {
         compilations.all {
