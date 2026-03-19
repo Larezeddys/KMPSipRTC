@@ -418,11 +418,13 @@ class DesktopPeerConnectionController(
                 while (pacerFramesPushed < targetFrames && pushed < 5) {
                     val frame = injectionFrameQueue.poll()
                     if (frame == null) {
-                        // Avanzar reloj lógico sin inyectar silencio explícito.
-                        // Evita bursts cuando vuelven a llegar frames tras periodos vacíos.
-                        pacerFramesPushed++
-                        pushed++
-                        continue
+                        // Cola vacía: resetear el reloj lógico para que cuando lleguen
+                        // nuevos frames se empujen a ritmo real sin burst ni delay.
+                        // Sin esto, el reloj avanzaría en vacío y los nuevos frames
+                        // se empujarían como burst instantáneo → audio distorsionado.
+                        pacerStartNanos = now
+                        pacerFramesPushed = 0L
+                        break
                     }
                     val chunkFrames = frame.size / 2  // 16-bit mono
                     source.pushAudio(frame, 16, 48000, 1, chunkFrames)
