@@ -89,6 +89,10 @@ kotlin {
             version = "125.6422.05"
             moduleName = "WebRTC"
         }
+        pod("LiveKitClient") {
+            version = "2.0.18"
+            moduleName = "LiveKit"
+        }
     }
 
     sourceSets {
@@ -139,8 +143,9 @@ kotlin {
                 implementation("io.ktor:ktor-client-okhttp:3.3.1")
                 implementation("androidx.room:room-sqlite-wrapper:2.8.2")
 
-                // Motor Ktor para Android
-                // Ya lo tienes, pero asegúrate de que esté presente
+                // LiveKit Android SDK para conferencias
+                implementation("io.livekit:livekit-android:2.24.1")
+                implementation("io.livekit:livekit-android-camerax:2.24.1")
             }
         }
 

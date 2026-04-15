@@ -116,6 +116,12 @@ object LiveKitProto {
                     val data = reader.readBytes()
                     return LiveKitSignalMessage.Trickle(decodeTrickle(data))
                 }
+                // field 5: Update (ParticipantUpdate)
+                5 -> {
+                    if (wireType != 2) { reader.skip(wireType); continue }
+                    val data = reader.readBytes()
+                    return LiveKitSignalMessage.ParticipantUpdated(decodeParticipantUpdate(data))
+                }
                 // field 6: TrackPublished
                 6 -> {
                     if (wireType != 2) { reader.skip(wireType); continue }
@@ -177,6 +183,8 @@ object LiveKitProto {
         var room: LiveKitRoom? = null
         var participantSid = ""
         var participantIdentity = ""
+        var participantName = ""
+        val otherParticipants = mutableListOf<LiveKitParticipantInfo>()
         val iceServers = mutableListOf<LiveKitIceServer>()
         var subscriberPrimary = false
         var serverVersion = ""
@@ -194,21 +202,21 @@ object LiveKitProto {
                         room = decodeRoom(roomData)
                     } else reader.skip(wireType)
                 }
-                // field 2: ParticipantInfo (message) - extraer sid e identity
+                // field 2: ParticipantInfo (message) - local participant
                 2 -> {
                     if (wireType == 2) {
                         val partData = reader.readBytes()
-                        val partReader = ProtoReader(partData)
-                        while (partReader.hasMore()) {
-                            val pTag = partReader.readTag()
-                            val pField = pTag shr 3
-                            val pWire = pTag and 0x07
-                            when (pField) {
-                                1 -> if (pWire == 2) participantSid = partReader.readString() else partReader.skip(pWire)
-                                2 -> if (pWire == 2) participantIdentity = partReader.readString() else partReader.skip(pWire)
-                                else -> partReader.skip(pWire)
-                            }
-                        }
+                        val info = decodeParticipantInfo(partData)
+                        participantSid = info.sid
+                        participantIdentity = info.identity
+                        participantName = info.name
+                    } else reader.skip(wireType)
+                }
+                // field 3: other_participants (repeated ParticipantInfo)
+                3 -> {
+                    if (wireType == 2) {
+                        val partData = reader.readBytes()
+                        otherParticipants.add(decodeParticipantInfo(partData))
                     } else reader.skip(wireType)
                 }
                 // field 4: server_version (string)
@@ -236,6 +244,8 @@ object LiveKitProto {
             room = room,
             participantSid = participantSid,
             participantIdentity = participantIdentity,
+            participantName = participantName,
+            otherParticipants = otherParticipants,
             iceServers = iceServers,
             subscriberPrimary = subscriberPrimary,
             serverVersion = serverVersion
@@ -381,6 +391,66 @@ object LiveKitProto {
         }
 
         return LiveKitSignalMessage.Leave(canReconnect, reason)
+    }
+
+    /**
+     * Decodifica ParticipantInfo del protocolo LiveKit.
+     * Proto fields: 1=sid, 2=identity, 3=state, 4=tracks, 5=metadata, 6=joined_at, 7=name, 9=permission, 10=region, 11=is_publisher
+     */
+    private fun decodeParticipantInfo(data: ByteArray): LiveKitParticipantInfo {
+        val reader = ProtoReader(data)
+        var sid = ""
+        var identity = ""
+        var name = ""
+        var state = 0
+        var isPublisher = false
+
+        while (reader.hasMore()) {
+            val tag = reader.readTag()
+            val fieldNumber = tag shr 3
+            val wireType = tag and 0x07
+            when (fieldNumber) {
+                1 -> if (wireType == 2) sid = reader.readString() else reader.skip(wireType)
+                2 -> if (wireType == 2) identity = reader.readString() else reader.skip(wireType)
+                3 -> if (wireType == 0) state = reader.readVarint().toInt() else reader.skip(wireType)
+                7 -> if (wireType == 2) name = reader.readString() else reader.skip(wireType)
+                11 -> if (wireType == 0) isPublisher = reader.readVarint() != 0L else reader.skip(wireType)
+                else -> reader.skip(wireType)
+            }
+        }
+
+        return LiveKitParticipantInfo(
+            sid = sid,
+            identity = identity,
+            name = name.ifEmpty { identity },
+            state = state,
+            isPublisher = isPublisher,
+        )
+    }
+
+    /**
+     * Decodifica ParticipantUpdate (field 5 de SignalResponse).
+     * Proto: message UpdateParticipants { repeated ParticipantInfo participants = 1; }
+     */
+    private fun decodeParticipantUpdate(data: ByteArray): LiveKitParticipantUpdate {
+        val reader = ProtoReader(data)
+        val participants = mutableListOf<LiveKitParticipantInfo>()
+
+        while (reader.hasMore()) {
+            val tag = reader.readTag()
+            val fieldNumber = tag shr 3
+            val wireType = tag and 0x07
+            when (fieldNumber) {
+                1 -> {
+                    if (wireType == 2) {
+                        participants.add(decodeParticipantInfo(reader.readBytes()))
+                    } else reader.skip(wireType)
+                }
+                else -> reader.skip(wireType)
+            }
+        }
+
+        return LiveKitParticipantUpdate(participants)
     }
 
     // ======================= PROTOBUF PRIMITIVES =======================

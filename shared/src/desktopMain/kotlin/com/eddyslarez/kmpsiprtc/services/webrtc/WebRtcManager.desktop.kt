@@ -14,6 +14,8 @@ import dev.onvoid.webrtc.*
 import dev.onvoid.webrtc.media.audio.AudioDeviceModule
 import dev.onvoid.webrtc.media.audio.AudioLayer
 import dev.onvoid.webrtc.media.audio.AudioOptions
+import dev.onvoid.webrtc.media.video.VideoDevice
+import dev.onvoid.webrtc.media.video.VideoTrack
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -85,6 +87,46 @@ class DesktopWebRtcManager : WebRtcManager {
     }
 
     override fun isInitialized(): Boolean = _isInitialized.value
+
+    // ==================== DATA CHANNEL (para conferencias) ====================
+
+    fun createPublisherDataChannel(label: String = "_reliable") {
+        peerConnectionController.createPublisherDataChannel(label)
+    }
+
+    fun sendDataChannelMessage(data: ByteArray): Boolean {
+        return peerConnectionController.sendDataChannelMessage(data)
+    }
+
+    fun setDataChannelMessageListener(listener: ((ByteArray) -> Unit)?) {
+        peerConnectionController.dataChannelMessageListener = listener
+    }
+
+    // ==================== VIDEO (para conferencias) ====================
+
+    fun enumerateVideoDevices(): List<VideoDevice> {
+        return peerConnectionController.enumerateVideoDevices()
+    }
+
+    fun addLocalVideoTrack(device: VideoDevice? = null): VideoTrack? {
+        ensureInitialized()
+        if (!peerConnectionController.hasPeerConnection()) {
+            peerConnectionController.createNewPeerConnection()
+        }
+        return peerConnectionController.addLocalVideoTrack(device)
+    }
+
+    fun removeLocalVideoTrack() {
+        peerConnectionController.removeLocalVideoTrack()
+    }
+
+    fun getLocalVideoTrack(): VideoTrack? {
+        return peerConnectionController.getLocalVideoTrack()
+    }
+
+    fun setOnRemoteVideoTrack(listener: ((VideoTrack) -> Unit)?) {
+        peerConnectionController.onRemoteVideoTrack = listener
+    }
 
     // ==================== CONNECTION MANAGEMENT ====================
 
@@ -1154,3 +1196,4 @@ class DesktopWebRtcManager : WebRtcManager {
 //        return peerConnection
 //    }
 //}
+

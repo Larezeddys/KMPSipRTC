@@ -61,11 +61,15 @@ class LiveKitSignalingClient {
                 install(WebSockets)
             }
 
-            // Extraer host y puerto de la URL
-            val urlParts = wsUrl.removePrefix("ws://").removePrefix("wss://").split(":")
-            val host = urlParts[0]
-            val port = if (urlParts.size > 1) urlParts[1].split("/")[0].toIntOrNull() ?: 7880 else 7880
+            // Extraer host, puerto y path base de la URL
             val isSecure = wsUrl.startsWith("wss://")
+            val withoutScheme = wsUrl.removePrefix("ws://").removePrefix("wss://")
+            val hostPortPath = withoutScheme.split("/", limit = 2)
+            val hostPort = hostPortPath[0]
+            val basePath = if (hostPortPath.size > 1) "/${hostPortPath[1].trimEnd('/')}" else ""
+            val hostParts = hostPort.split(":")
+            val host = hostParts[0]
+            val port = if (hostParts.size > 1) hostParts[1].toIntOrNull() ?: 7880 else 7880
 
             val connectBlock: suspend DefaultClientWebSocketSession.() -> Unit = {
                 wsSession = this
@@ -110,7 +114,7 @@ class LiveKitSignalingClient {
             // Lanzar la conexion WebSocket en un coroutine separado
             receiveJob = scope.launch {
                 try {
-                    val path = "/rtc?access_token=${jwt}&auto_subscribe=1&protocol=9"
+                    val path = "${basePath}/rtc?access_token=${jwt}&auto_subscribe=1&protocol=9"
                     if (isSecure) {
                         httpClient!!.wss(
                             host = host,
@@ -249,6 +253,11 @@ class LiveKitSignalingClient {
                 log.d(tag = TAG) { "ICE candidate recibido (target=${message.trickle.target})" }
                 listener?.onTrickle(message.trickle)
             }
+            is LiveKitSignalMessage.ParticipantUpdated -> {
+                val names = message.update.participants.map { "${it.name}(${it.identity}, state=${it.state})" }
+                log.d(tag = TAG) { "ParticipantUpdate: $names" }
+                listener?.onParticipantUpdate(message.update)
+            }
             is LiveKitSignalMessage.TrackPublished -> {
                 log.d(tag = TAG) { "Track publicado: cid=${message.published.cid}, sid=${message.published.trackSid}" }
                 listener?.onTrackPublished(message.published)
@@ -272,6 +281,7 @@ interface LiveKitSignalingListener {
     fun onAnswer(sdp: LiveKitSessionDescription)
     fun onOffer(sdp: LiveKitSessionDescription)
     fun onTrickle(trickle: LiveKitTrickle)
+    fun onParticipantUpdate(update: LiveKitParticipantUpdate)
     fun onTrackPublished(published: LiveKitTrackPublished)
     fun onLeave(canReconnect: Boolean, reason: Int)
     fun onDisconnected()

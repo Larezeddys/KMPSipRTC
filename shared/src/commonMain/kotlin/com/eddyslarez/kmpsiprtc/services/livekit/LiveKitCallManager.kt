@@ -264,6 +264,10 @@ class LiveKitCallManager(
                 }
             }
 
+            override fun onParticipantUpdate(update: LiveKitParticipantUpdate) {
+                // LiveKitCallManager no usa participantes — solo para conferencias
+            }
+
             override fun onTrackPublished(published: LiveKitTrackPublished) {
                 log.d(tag = TAG) { "Track publicado exitosamente: ${published.trackSid}" }
                 listener?.onTrackPublished(published.trackSid)

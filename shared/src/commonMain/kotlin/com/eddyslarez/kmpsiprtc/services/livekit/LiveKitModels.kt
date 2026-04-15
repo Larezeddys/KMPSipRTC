@@ -16,6 +16,8 @@ data class LiveKitJoinResponse(
     val room: LiveKitRoom?,
     val participantSid: String,
     val participantIdentity: String,
+    val participantName: String = "",
+    val otherParticipants: List<LiveKitParticipantInfo> = emptyList(),
     val iceServers: List<LiveKitIceServer>,
     val subscriberPrimary: Boolean,
     val serverVersion: String
@@ -31,6 +33,20 @@ data class LiveKitIceServer(
     val urls: List<String>,
     val username: String,
     val credential: String
+)
+
+/** Informacion de un participante en el protocolo LiveKit */
+data class LiveKitParticipantInfo(
+    val sid: String = "",
+    val identity: String = "",
+    val name: String = "",
+    val state: Int = 0, // 0=JOINING, 1=JOINED, 2=ACTIVE, 3=DISCONNECTED
+    val isPublisher: Boolean = false,
+)
+
+/** Update de participantes (join/leave/update) */
+data class LiveKitParticipantUpdate(
+    val participants: List<LiveKitParticipantInfo>
 )
 
 data class LiveKitTrackPublished(
@@ -86,6 +102,7 @@ sealed class LiveKitSignalMessage {
     data class Answer(val sdp: LiveKitSessionDescription) : LiveKitSignalMessage()
     data class Offer(val sdp: LiveKitSessionDescription) : LiveKitSignalMessage()
     data class Trickle(val trickle: LiveKitTrickle) : LiveKitSignalMessage()
+    data class ParticipantUpdated(val update: LiveKitParticipantUpdate) : LiveKitSignalMessage()
     data class TrackPublished(val published: LiveKitTrackPublished) : LiveKitSignalMessage()
     data class Leave(val canReconnect: Boolean, val reason: Int) : LiveKitSignalMessage()
     data class Unknown(val fieldNumber: Int) : LiveKitSignalMessage()

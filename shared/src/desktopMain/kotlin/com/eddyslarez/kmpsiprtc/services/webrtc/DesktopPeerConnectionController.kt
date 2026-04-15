@@ -13,6 +13,7 @@ import com.eddyslarez.kmpsiprtc.services.recording.createCallRecorder
 import dev.onvoid.webrtc.*
 import dev.onvoid.webrtc.media.*
 import dev.onvoid.webrtc.media.audio.*
+import dev.onvoid.webrtc.media.video.*
 import kotlinx.coroutines.*
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
@@ -48,6 +49,18 @@ class DesktopPeerConnectionController(
     // Flag que indica si la inyección de audio local está activa
     @Volatile
     private var localAudioInjectionActive = false
+
+    // === VIDEO para conferencias ===
+    private var videoDeviceSource: VideoDeviceSource? = null
+    private var localVideoTrack: VideoTrack? = null
+    private var videoSender: RTCRtpSender? = null
+    // Callback para cuando llega un video track remoto
+    var onRemoteVideoTrack: ((VideoTrack) -> Unit)? = null
+
+    // === DATA CHANNEL para conferencias ===
+    private var publisherDataChannel: RTCDataChannel? = null
+    private var receivedDataChannel: RTCDataChannel? = null
+    var dataChannelMessageListener: ((ByteArray) -> Unit)? = null
     // Flag que indica si el audio local (mic) está habilitado en WebRTC
     @Volatile
     private var localAudioEnabled = true
@@ -182,8 +195,8 @@ class DesktopPeerConnectionController(
             }
 
             override fun onTrack(transceiver: RTCRtpTransceiver) {
-                log.d(TAG) { "Remote track received" }
                 val track = transceiver.receiver?.track
+                log.d(TAG) { "Remote track received: kind=${track?.kind}" }
                 if (track?.kind == "audio") {
                     (track as? AudioTrack)?.let { audioTrack ->
                         remoteAudioTrack = audioTrack
@@ -192,6 +205,11 @@ class DesktopPeerConnectionController(
                     // Configurar captura de audio remoto
                     setupRemoteAudioCapture(track)
                     onRemoteAudioTrack()
+                } else if (track?.kind == "video") {
+                    (track as? VideoTrack)?.let { videoTrack ->
+                        log.d(TAG) { "✅ Remote video track received" }
+                        onRemoteVideoTrack?.invoke(videoTrack)
+                    }
                 }
             }
 
@@ -199,7 +217,25 @@ class DesktopPeerConnectionController(
             override fun onIceGatheringChange(state: RTCIceGatheringState) {}
             override fun onIceConnectionChange(state: RTCIceConnectionState) {}
             override fun onStandardizedIceConnectionChange(state: RTCIceConnectionState) {}
-            override fun onDataChannel(dataChannel: RTCDataChannel) {}
+            override fun onDataChannel(dataChannel: RTCDataChannel) {
+                log.d(tag = TAG) { "Data channel recibido: ${dataChannel.label}" }
+                dataChannel.registerObserver(object : RTCDataChannelObserver {
+                    override fun onBufferedAmountChange(previousAmount: Long) {}
+                    override fun onStateChange() {
+                        log.d(tag = TAG) { "Data channel state: ${dataChannel.state}" }
+                    }
+                    override fun onMessage(buffer: RTCDataChannelBuffer) {
+                        try {
+                            val bytes = ByteArray(buffer.data.remaining())
+                            buffer.data.get(bytes)
+                            dataChannelMessageListener?.invoke(bytes)
+                        } catch (e: Exception) {
+                            log.e(tag = TAG) { "Error leyendo data channel message: ${e.message}" }
+                        }
+                    }
+                })
+                receivedDataChannel = dataChannel
+            }
             override fun onRenegotiationNeeded() {}
             override fun onAddStream(stream: MediaStream) {}
             override fun onRemoveStream(stream: MediaStream) {}
@@ -792,10 +828,138 @@ class DesktopPeerConnectionController(
 
     fun getLocalDescription(): String? = peerConnection?.localDescription?.sdp
 
+    // === DATA CHANNEL ===
+
+    /**
+     * Crea un data channel en el publisher PeerConnection para enviar mensajes.
+     * Debe llamarse ANTES de createOffer() para que el DC aparezca en el SDP.
+     */
+    fun createPublisherDataChannel(label: String = "_reliable") {
+        val pc = peerConnection ?: run {
+            log.w(TAG) { "No PeerConnection para crear data channel" }
+            return
+        }
+        try {
+            val init = RTCDataChannelInit()
+            init.ordered = true
+            publisherDataChannel = pc.createDataChannel(label, init)
+            publisherDataChannel?.registerObserver(object : RTCDataChannelObserver {
+                override fun onBufferedAmountChange(previousAmount: Long) {}
+                override fun onStateChange() {
+                    log.d(TAG) { "Publisher data channel state: ${publisherDataChannel?.state}" }
+                }
+                override fun onMessage(buffer: RTCDataChannelBuffer) {}
+            })
+            log.d(TAG) { "Publisher data channel creado: $label" }
+        } catch (e: Exception) {
+            log.e(TAG) { "Error creando data channel: ${e.message}" }
+        }
+    }
+
+    /**
+     * Envia datos via el publisher data channel (o el received data channel como fallback).
+     */
+    fun sendDataChannelMessage(data: ByteArray): Boolean {
+        val channel = publisherDataChannel ?: receivedDataChannel
+        if (channel == null) {
+            log.w(TAG) { "No hay data channel disponible para enviar" }
+            return false
+        }
+        return try {
+            val buffer = RTCDataChannelBuffer(java.nio.ByteBuffer.wrap(data), false)
+            channel.send(buffer)
+            true
+        } catch (e: Exception) {
+            log.e(TAG) { "Error enviando data channel message: ${e.message}" }
+            false
+        }
+    }
+
+    // ==================== VIDEO CAPTURE (conferencias) ====================
+
+    /**
+     * Enumera las cámaras disponibles en el sistema via MediaDevices.
+     */
+    fun enumerateVideoDevices(): List<VideoDevice> {
+        return try {
+            MediaDevices.getVideoCaptureDevices() ?: emptyList()
+        } catch (e: Exception) {
+            log.e(TAG) { "Error enumerando cámaras: ${e.message}" }
+            emptyList()
+        }
+    }
+
+    /**
+     * Agrega un video track local (cámara) al PeerConnection.
+     * @param device cámara a usar, null = primera disponible
+     * @return el VideoTrack creado, o null si falla
+     */
+    fun addLocalVideoTrack(device: VideoDevice? = null): VideoTrack? {
+        val factory = peerConnectionFactory ?: return null
+        val pc = peerConnection ?: return null
+
+        try {
+            val cam = device ?: MediaDevices.getVideoCaptureDevices()?.firstOrNull()
+            if (cam == null) {
+                log.w(TAG) { "No hay cámaras disponibles" }
+                return null
+            }
+
+            val source = VideoDeviceSource()
+            source.setVideoCaptureDevice(cam)
+            source.setVideoCaptureCapability(VideoCaptureCapability(640, 480, 30))
+            videoDeviceSource = source
+
+            val videoTrack = factory.createVideoTrack("video0", source)
+            localVideoTrack = videoTrack
+
+            val sender = pc.addTrack(videoTrack, listOf("stream0"))
+            videoSender = sender
+
+            source.start()
+
+            log.d(TAG) { "✅ Local video track added (${cam.name})" }
+            return videoTrack
+        } catch (e: Exception) {
+            log.e(TAG) { "Error adding local video track: ${e.message}" }
+            e.printStackTrace()
+            return null
+        }
+    }
+
+    /**
+     * Remueve el video track local (apaga cámara).
+     */
+    fun removeLocalVideoTrack() {
+        try {
+            videoDeviceSource?.stop()
+            videoDeviceSource?.dispose()
+        } catch (_: Throwable) {}
+        videoDeviceSource = null
+
+        try {
+            videoSender?.let { peerConnection?.removeTrack(it) }
+        } catch (_: Throwable) {}
+        videoSender = null
+
+        try {
+            localVideoTrack?.setEnabled(false)
+            localVideoTrack?.dispose()
+        } catch (_: Throwable) {}
+        localVideoTrack = null
+
+        log.d(TAG) { "Video track removed" }
+    }
+
+    fun getLocalVideoTrack(): VideoTrack? = localVideoTrack
+
     fun closePeerConnection() {
         log.d(TAG) { "Closing PeerConnection" }
 
         stopInjectionPacer()
+
+        // Limpiar video
+        removeLocalVideoTrack()
 
         try {
             localAudioTrack?.setEnabled(false)
@@ -917,3 +1081,5 @@ class DesktopPeerConnectionController(
         }
     }
 }
+
+
