@@ -97,6 +97,24 @@ interface WebRtcManager {
      */
     fun setListener(listener: WebRtcEventListener?)
     fun prepareAudioForIncomingCall()
+
+    /**
+     * Android-only: activa el modo "gestionado por TelecomManager".
+     * Cuando está activo, el AudioController interno NO toca AudioManager.mode,
+     * audio focus, speakerphone ni Bluetooth SCO — deja que el framework Telecom
+     * los gestione. Imprescindible cuando la app usa ConnectionService/VoipConnection
+     * para que WebRTC no pelee con Telecom por el audio (y el micrófono funcione
+     * en llamadas entrantes desde push/segundo plano).
+     *
+     * @param managed true cuando hay una llamada activa gestionada por Telecom
+     * @param routeHandler opcional: handler que traduce setActiveRoute() a
+     *        Connection.setAudioRoute() en la capa app. Si es null, los cambios
+     *        de ruta se ignoran en modo telecom-managed.
+     */
+    fun setAndroidTelecomManaged(
+        managed: Boolean,
+        routeHandler: ((AudioUnitTypes) -> Boolean)? = null,
+    ) { /* default no-op para iOS/Desktop */ }
     suspend fun applyModifiedSdp(modifiedSdp: String): Boolean
     fun isInitialized(): Boolean
 

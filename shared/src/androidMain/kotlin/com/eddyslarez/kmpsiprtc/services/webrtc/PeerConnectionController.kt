@@ -185,6 +185,20 @@ class PeerConnectionController(
             val audioModule = JavaAudioDeviceModule.builder(context)
                 .setUseHardwareAcousticEchoCanceler(true)
                 .setUseHardwareNoiseSuppressor(true)
+                // 🎙️ Forzar fuente de audio VOICE_COMMUNICATION (micrófono con echo
+                // cancelation del sistema y modo full-duplex). Es el default de
+                // JavaAudioDeviceModule, pero lo dejamos explícito: si Telecom está
+                // activo (MODE_IN_COMMUNICATION), esta fuente es la única que AudioRecord
+                // acepta sin conflicto; cualquier otra (MIC, DEFAULT) puede quedarse
+                // silenciada al pelear con el pipeline VoIP del sistema.
+                .setAudioSource(android.media.MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+                // Reproducción: stream "voice call" para que respete el route de Telecom.
+                .setAudioAttributes(
+                    android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
                 .setUseStereoInput(false)
                 .setUseStereoOutput(true)
                 .setAudioBufferCallback { buffer, audioFormat, channels, sampleRate, bytesRead, timestamp ->

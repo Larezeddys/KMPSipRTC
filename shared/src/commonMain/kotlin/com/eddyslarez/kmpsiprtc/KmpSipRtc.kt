@@ -1687,6 +1687,35 @@ class KmpSipRtc private constructor() {
     }
 
     /**
+     * Android-only: notifica al stack que la llamada actual está gestionada por
+     * el framework Android TelecomManager (ConnectionService + Connection). En
+     * ese modo, el sistema maneja AudioManager.mode, audio focus, speakerphone
+     * y Bluetooth SCO — por lo que la librería NO debe tocarlos, o se pelea con
+     * Telecom y WebRTC pierde el micrófono (síntoma clásico en llamadas que
+     * entran desde push/segundo plano: sin audio, el remoto no escucha, etc.).
+     *
+     * Llamar con `managed = true` al crear/recibir la Connection y con
+     * `managed = false` al terminar todas las Connections activas.
+     *
+     * En iOS y Desktop es un no-op.
+     *
+     * @param managed true mientras haya una llamada Telecom activa
+     * @param routeHandler opcional: se invoca cuando la UI pide un cambio de ruta
+     *        (ej. "altavoz"); la app debe traducirlo a `Connection.setAudioRoute()`.
+     *        Si es null, los cambios de ruta se ignoran mientras Telecom está activo.
+     */
+    fun setAndroidTelecomManaged(
+        managed: Boolean,
+        routeHandler: ((com.eddyslarez.kmpsiprtc.data.models.AudioUnitTypes) -> Boolean)? = null,
+    ) {
+        try {
+            sipCoreManager?.webRtcManager?.setAndroidTelecomManaged(managed, routeHandler)
+        } catch (e: Exception) {
+            log.e(tag = TAG) { "Error setAndroidTelecomManaged: ${e.message}" }
+        }
+    }
+
+    /**
      * Maneja cambio de conexión Bluetooth
      */
     fun onBluetoothConnectionChanged(isConnected: Boolean) {

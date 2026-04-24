@@ -108,6 +108,7 @@ class AndroidWebRtcManager : WebRtcManager {
                 }
             )
             audioController.initialize()
+            applyPendingTelecomConfig()
 
             // Initialize PeerConnection Controller
             peerConnectionController = PeerConnectionController(
@@ -370,6 +371,36 @@ class AndroidWebRtcManager : WebRtcManager {
 
     override fun prepareAudioForIncomingCall() {
         audioController.startForCall()
+    }
+
+    override fun setAndroidTelecomManaged(
+        managed: Boolean,
+        routeHandler: ((AudioUnitTypes) -> Boolean)?
+    ) {
+        if (::audioController.isInitialized) {
+            audioController.telecomManaged = managed
+            audioController.telecomRouteHandler = routeHandler
+            log.d(TAG) { "🛂 AndroidTelecomManaged set to $managed (routeHandler=${routeHandler != null})" }
+        } else {
+            log.w(TAG) { "setAndroidTelecomManaged: audioController no inicializado, posponiendo…" }
+            // Reintentar en cuanto initialize() termine — guardar valor para inicialización diferida
+            pendingTelecomManaged = managed
+            pendingTelecomRouteHandler = routeHandler
+        }
+    }
+
+    @Volatile private var pendingTelecomManaged: Boolean? = null
+    @Volatile private var pendingTelecomRouteHandler: ((AudioUnitTypes) -> Boolean)? = null
+
+    private fun applyPendingTelecomConfig() {
+        val pm = pendingTelecomManaged ?: return
+        if (::audioController.isInitialized) {
+            audioController.telecomManaged = pm
+            audioController.telecomRouteHandler = pendingTelecomRouteHandler
+            pendingTelecomManaged = null
+            pendingTelecomRouteHandler = null
+            log.d(TAG) { "🛂 Applied pending TelecomManaged=$pm" }
+        }
     }
 
     override fun diagnoseAudioIssues(): String {
