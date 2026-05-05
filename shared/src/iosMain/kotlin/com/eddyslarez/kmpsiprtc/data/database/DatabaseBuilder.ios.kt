@@ -8,7 +8,8 @@ import platform.Foundation.NSFileManager
 import platform.Foundation.NSUserDomainMask
 
 actual fun getDatabaseBuilder(): RoomDatabase.Builder<SipDatabase> {
-    val dbFilePath = documentDirectory() + "/sip.db"
+    val suffix = DatabaseConfig.brandSuffix
+    val dbFilePath = documentDirectory() + "/sip$suffix.db"
     return Room.databaseBuilder<SipDatabase>(name = dbFilePath)
 }
 

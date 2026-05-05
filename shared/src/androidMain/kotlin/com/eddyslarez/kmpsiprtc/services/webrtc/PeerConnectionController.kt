@@ -8,12 +8,16 @@ import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.services.audio.AudioCaptureCallback
 import com.eddyslarez.kmpsiprtc.services.audio.AudioTrackCapture
 import com.eddyslarez.kmpsiprtc.services.audio.createRemoteAudioCapture
+import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 import com.eddyslarez.kmpsiprtc.services.recording.CallRecorder
 import com.eddyslarez.kmpsiprtc.services.recording.createCallRecorder
 import kotlinx.coroutines.*
 import org.webrtc.*
 import org.webrtc.audio.AudioDeviceModule
 import org.webrtc.audio.JavaAudioDeviceModule
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -23,6 +27,11 @@ class PeerConnectionController(
     private val onConnectionStateChange: (WebRtcConnectionState) -> Unit,
     private val onRemoteAudioTrack: () -> Unit
 ) {
+    private companion object {
+        private const val AI_INJECTION_TAG = "L2R_INJECT"
+        private const val AI_INJECTION_PREFIX = "L2R_INJECT"
+    }
+
     private val TAG = "PeerConnectionController"
     private val mainHandler = Handler(Looper.getMainLooper())
     private val callRecorder: CallRecorder by lazy {
@@ -35,8 +44,43 @@ class PeerConnectionController(
     private var localAudioSource: AudioSource? = null
     private var audioDeviceModule: AudioDeviceModule? = null
     private var isMuted = false
+    @Volatile
+    private var remoteAudioEnabled = true
     private var currentConnectionState = WebRtcConnectionState.DISCONNECTED
     private var remoteAudioCapture: AudioTrackCapture? = null
+
+    // === INYECCIÓN DE AUDIO PARA TRADUCCIÓN ===
+    // Buffer FIFO para audio traducido que reemplazará al mic
+    private val localInjectionBuffer = ConcurrentLinkedQueue<ByteArray>()
+    // Límite de backlog (~6s a 10ms por chunk) para evitar cortes por ráfagas del servidor.
+    private val maxInjectionQueueChunks = 600
+    // Estado parcial para no perder bytes cuando el callback pide menos de lo encolado
+    private val localInjectionLock = Any()
+    private var pendingInjectionChunk: ByteArray? = null
+    private var pendingInjectionOffset = 0
+    // Acumulador para agrupar deltas pequeños antes de encolar al callback del ADM.
+    private var pendingInjectionAssemble = ByteArray(0)
+    @Volatile
+    private var injectionChunksReceived = 0L
+    @Volatile
+    private var injectionChunksConsumed = 0L
+    @Volatile
+    private var injectionUnderrunCount = 0L
+    @Volatile
+    private var injectionCalls = 0L
+    // Flag que indica si la inyección de audio local está activa
+    @Volatile
+    private var localAudioInjectionActive = false
+    // Flag que indica si el audio local está habilitado
+    @Volatile
+    private var localAudioEnabled = true
+    // Sample rate del ADM de Android para resampleo
+    @Volatile
+    private var admSampleRate = 48000
+    @Volatile
+    private var audioBufferCallbackLogged = false
+    // Referencia al JavaAudioDeviceModule para control del AudioRecord
+    private var javaAudioDeviceModule: JavaAudioDeviceModule? = null
 
     private val eglBase = EglBase.create()
 //    private var localAudioRecorder: AudioTrackRecorder? = null
@@ -99,7 +143,7 @@ class PeerConnectionController(
             log.d(TAG) { "Remote track added" }
             val track = receiver?.track()
             if (track is AudioTrack) {
-                track.setEnabled(true)
+                track.setEnabled(remoteAudioEnabled)
                 remoteAudioTrack = track
 
                 // ✅ NUEVO: Configurar captura de audio remoto
@@ -141,11 +185,88 @@ class PeerConnectionController(
             val audioModule = JavaAudioDeviceModule.builder(context)
                 .setUseHardwareAcousticEchoCanceler(true)
                 .setUseHardwareNoiseSuppressor(true)
-                .setUseStereoInput(true)
+                // 🎙️ Forzar fuente de audio VOICE_COMMUNICATION (micrófono con echo
+                // cancelation del sistema y modo full-duplex). Es el default de
+                // JavaAudioDeviceModule, pero lo dejamos explícito: si Telecom está
+                // activo (MODE_IN_COMMUNICATION), esta fuente es la única que AudioRecord
+                // acepta sin conflicto; cualquier otra (MIC, DEFAULT) puede quedarse
+                // silenciada al pelear con el pipeline VoIP del sistema.
+                .setAudioSource(android.media.MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+                // Reproducción: stream "voice call" para que respete el route de Telecom.
+                .setAudioAttributes(
+                    android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setUseStereoInput(false)
                 .setUseStereoOutput(true)
+                .setAudioBufferCallback { buffer, audioFormat, channels, sampleRate, bytesRead, timestamp ->
+                    // Este callback intercepta los datos del micrófono ANTES de enviarlos a WebRTC.
+                    // Cuando la inyección está activa, reemplazamos el contenido del buffer
+                    // con audio traducido del queue de inyección.
+                    if (sampleRate >= 8000) {
+                        admSampleRate = sampleRate
+                    }
+                    if (!audioBufferCallbackLogged) {
+                        audioBufferCallbackLogged = true
+                        log.i(AI_INJECTION_TAG) {
+                            "$AI_INJECTION_PREFIX audioBufferCallback: format=$audioFormat, channels=$channels, " +
+                                "sampleRate=$sampleRate, bytesRead=$bytesRead, bufferCap=${buffer.capacity()}"
+                        }
+                    }
+                    if (localAudioInjectionActive) {
+                        // Importante: no perder remainder cuando injectedData > buffer.remaining().
+                        // Antes se descartaba la cola restante y el peer remoto recibía silencio.
+                        buffer.clear()
+                        synchronized(localInjectionLock) {
+                            while (buffer.hasRemaining()) {
+                                val currentChunk = when {
+                                    pendingInjectionChunk != null && pendingInjectionOffset < pendingInjectionChunk!!.size -> {
+                                        pendingInjectionChunk!!
+                                    }
+                                    else -> {
+                                        pendingInjectionChunk = localInjectionBuffer.poll()
+                                        pendingInjectionOffset = 0
+                                        pendingInjectionChunk
+                                    }
+                                }
+
+                                if (currentChunk == null) {
+                                    injectionUnderrunCount++
+                                    if (injectionUnderrunCount <= 3 || injectionUnderrunCount % 200L == 0L) {
+                                        log.w(AI_INJECTION_TAG) {
+                                            "$AI_INJECTION_PREFIX underrun #$injectionUnderrunCount, queue=${localInjectionBuffer.size}, " +
+                                                "received=$injectionChunksReceived, consumed=$injectionChunksConsumed"
+                                        }
+                                    }
+                                    while (buffer.hasRemaining()) {
+                                        buffer.put(0)
+                                    }
+                                    break
+                                }
+
+                                val available = currentChunk.size - pendingInjectionOffset
+                                val bytesToCopy = minOf(available, buffer.remaining())
+                                buffer.put(currentChunk, pendingInjectionOffset, bytesToCopy)
+                                pendingInjectionOffset += bytesToCopy
+
+                                if (pendingInjectionOffset >= currentChunk.size) {
+                                    pendingInjectionChunk = null
+                                    pendingInjectionOffset = 0
+                                    injectionChunksConsumed++
+                                }
+                            }
+                        }
+                        buffer.rewind()
+                    }
+                    // Retornar timestamp sin cambios
+                    timestamp
+                }
                 .createAudioDeviceModule()
 
             audioDeviceModule = audioModule
+            javaAudioDeviceModule = audioModule
 
             val options = PeerConnectionFactory.Options().apply {
                 disableEncryption = false
@@ -281,21 +402,16 @@ class PeerConnectionController(
                         frames: Int,
                         timestampMs: Long
                     ) {
-                        // Enviar al recorder si está grabando
-                        if (callRecorder.isRecording()) {
-                            callRecorder.captureRemoteAudio(data)
-                        }
-
-                        log.d(TAG) {
-                            "🔊 Remote audio: ${data.size} bytes, " +
-                                    "$sampleRate Hz, $channels ch, $bitsPerSample bits"
+                        // Enviar al recorder si está grabando o haciendo streaming
+                        if (callRecorder.isRecording() || callRecorder.isStreaming()) {
+                            callRecorder.captureRemoteAudio(data, sampleRate, channels, bitsPerSample)
                         }
                     }
                 }
             )
 
-            // Iniciar captura si ya estamos grabando
-            if (callRecorder.isRecording()) {
+            // Iniciar captura si ya estamos grabando o haciendo streaming
+            if (callRecorder.isRecording() || callRecorder.isStreaming()) {
                 remoteAudioCapture?.startCapture()
                 log.d(TAG) { "✅ Remote audio capture started" }
             }
@@ -345,6 +461,35 @@ class PeerConnectionController(
      * Obtener el recorder para acceso directo
      */
     fun getRecorder(): CallRecorder? = callRecorder
+
+    // ==================== STREAMING EN TIEMPO REAL ====================
+
+    fun setAudioStreamListener(listener: AudioStreamListener?) {
+        callRecorder.setAudioStreamListener(listener)
+    }
+
+    fun startStreaming(callId: String) {
+        log.d(TAG) { "🎙️ Starting audio streaming" }
+        callRecorder.startStreaming(callId)
+        remoteAudioCapture?.startCapture()
+        log.d(TAG) { "✅ Audio streaming started for call: $callId" }
+    }
+
+    fun stopStreaming() {
+        log.d(TAG) { "🛑 Stopping audio streaming" }
+        callRecorder.stopStreaming()
+        // Restaurar estado de audio: volumen normal y aplicar el estado real del track
+        try {
+            remoteAudioTrack?.setVolume(1.0)
+            remoteAudioTrack?.setEnabled(remoteAudioEnabled)
+        } catch (_: Exception) {}
+        if (!callRecorder.isRecording()) {
+            remoteAudioCapture?.stopCapture()
+        }
+        log.d(TAG) { "✅ Audio streaming stopped" }
+    }
+
+    fun isStreaming(): Boolean = callRecorder.isStreaming()
 
     // ==================== SDP OPERATIONS (sin cambios) ====================
 
@@ -514,6 +659,246 @@ class PeerConnectionController(
     }
 
     fun isMuted(): Boolean = isMuted
+
+    fun setRemoteAudioEnabled(enabled: Boolean) {
+        remoteAudioEnabled = enabled
+        try {
+            if (callRecorder.isStreaming()) {
+                // Durante streaming (traducción): usar setVolume en lugar de setEnabled
+                // setEnabled(false) puede detener los AudioTrackSink y romper la captura.
+                // setVolume(0.0) silencia la salida al speaker preservando los sinks.
+                remoteAudioTrack?.setVolume(if (enabled) 1.0 else 0.0)
+                log.d(TAG) { "setRemoteAudioEnabled($enabled) via setVolume (streaming activo)" }
+                return
+            }
+            remoteAudioTrack?.setEnabled(enabled)
+            log.d(TAG) { "setRemoteAudioEnabled($enabled)" }
+        } catch (e: Exception) {
+            log.e(TAG) { "Error setting remote audio enabled: ${e.message}" }
+        }
+    }
+
+    fun isRemoteAudioEnabled(): Boolean = remoteAudioEnabled
+
+    // ==================== INYECCIÓN DE AUDIO PARA TRADUCCIÓN ====================
+
+    /**
+     * Habilitar/deshabilitar el audio local (micrófono) que se envía al peer remoto.
+     * Cuando se deshabilita, el AudioBufferCallback reemplaza los datos del mic
+     * con audio del buffer de inyección (o silencio).
+     */
+    fun setLocalAudioEnabled(enabled: Boolean) {
+        if (localAudioEnabled == enabled) return
+        localAudioEnabled = enabled
+        localAudioInjectionActive = !enabled
+
+        log.d(TAG) { "setLocalAudioEnabled: $enabled (injection: $localAudioInjectionActive)" }
+        log.i(AI_INJECTION_TAG) { "$AI_INJECTION_PREFIX setLocalAudioEnabled=$enabled (injectionActive=$localAudioInjectionActive)" }
+
+        if (!enabled) {
+            // Limpiar buffer para empezar limpio
+            synchronized(localInjectionLock) {
+                localInjectionBuffer.clear()
+                pendingInjectionChunk = null
+                pendingInjectionOffset = 0
+                pendingInjectionAssemble = ByteArray(0)
+                injectionChunksReceived = 0L
+                injectionChunksConsumed = 0L
+                injectionUnderrunCount = 0L
+                injectionCalls = 0L
+            }
+            log.d(TAG) { "✅ Local audio injection activated via AudioBufferCallback" }
+            log.i(AI_INJECTION_TAG) { "$AI_INJECTION_PREFIX activated" }
+        } else {
+            synchronized(localInjectionLock) {
+                localInjectionBuffer.clear()
+                pendingInjectionChunk = null
+                pendingInjectionOffset = 0
+                pendingInjectionAssemble = ByteArray(0)
+                injectionChunksReceived = 0L
+                injectionChunksConsumed = 0L
+                injectionUnderrunCount = 0L
+                injectionCalls = 0L
+            }
+            log.d(TAG) { "✅ Local audio injection deactivated - mic restored" }
+            log.i(AI_INJECTION_TAG) { "$AI_INJECTION_PREFIX deactivated, mic restored" }
+        }
+    }
+
+    fun isLocalAudioEnabled(): Boolean = localAudioEnabled
+
+    /**
+     * Inyecta datos de audio PCM que se enviarán al peer remoto.
+     * Los datos deben ser PCM 16-bit little-endian.
+     * El resampleo se maneja automáticamente por el AudioBufferCallback
+     * ya que los datos se copian al buffer del ADM que opera al sampleRate nativo.
+     *
+     * NOTA: Para Android, el audio se inyecta via el AudioBufferCallback del
+     * JavaAudioDeviceModule. Los datos se ponen en un queue y el callback
+     * los lee cuando el ADM necesita más audio.
+     *
+     * @param pcmData Audio PCM 16-bit LE
+     * @param sampleRate Frecuencia de muestreo (ej: 24000)
+     * @param channels Número de canales (1 = mono)
+     * @param bitsPerSample Bits por muestra (16)
+     */
+    fun injectLocalAudio(pcmData: ByteArray, sampleRate: Int, channels: Int, bitsPerSample: Int) {
+        if (!localAudioInjectionActive) return
+
+        try {
+            val callIndex = synchronized(localInjectionLock) {
+                injectionCalls += 1L
+                injectionCalls
+            }
+
+            val inputBytes = pcmData.size
+            if (inputBytes == 0) {
+                if (callIndex <= 5L || callIndex % 100L == 0L) {
+                    log.w(AI_INJECTION_TAG) {
+                        "$AI_INJECTION_PREFIX injectLocalAudio #$callIndex: input vacío (sampleRate=$sampleRate, channels=$channels, bps=$bitsPerSample)"
+                    }
+                }
+                return
+            }
+
+            val bytesPerSample = (bitsPerSample / 8).coerceAtLeast(1)
+            val safeChannels = channels.coerceAtLeast(1)
+            // Encolar en frames cortos para minimizar jitter y latencia.
+            val frameBytes = ((admSampleRate * safeChannels * bytesPerSample) / 100).coerceAtLeast(bytesPerSample)
+
+            // Si el sampleRate no coincide con el del ADM, resamplear
+            val data = if (sampleRate != admSampleRate) {
+                resamplePcm(pcmData, sampleRate, admSampleRate, safeChannels, bitsPerSample)
+            } else {
+                pcmData.copyOf()
+            }
+
+            if (data.isEmpty()) {
+                log.w(AI_INJECTION_TAG) {
+                    "$AI_INJECTION_PREFIX injectLocalAudio #$callIndex: resample vacío (in=$inputBytes, sr=$sampleRate->$admSampleRate, channels=$safeChannels, bps=$bitsPerSample)"
+                }
+                return
+            }
+
+            var addedChunks = 0
+            var flushedPartial = false
+            var queueSize = 0
+            var pendingBytes = 0
+            synchronized(localInjectionLock) {
+                // Importante: los deltas del servidor pueden venir muy pequeños.
+                // Si se encolan tal cual, el callback consume pulsos cortos y luego silencio ("tic tic").
+                // Aquí agrupamos hasta frameBytes antes de publicar cada chunk.
+                if (pendingInjectionAssemble.isEmpty()) {
+                    pendingInjectionAssemble = data
+                } else {
+                    val merged = ByteArray(pendingInjectionAssemble.size + data.size)
+                    pendingInjectionAssemble.copyInto(merged, 0)
+                    data.copyInto(merged, pendingInjectionAssemble.size)
+                    pendingInjectionAssemble = merged
+                }
+
+                var offset = 0
+                while (pendingInjectionAssemble.size - offset >= frameBytes) {
+                    localInjectionBuffer.offer(pendingInjectionAssemble.copyOfRange(offset, offset + frameBytes))
+                    offset += frameBytes
+                    addedChunks++
+                }
+
+                pendingInjectionAssemble = if (offset > 0) {
+                    pendingInjectionAssemble.copyOfRange(offset, pendingInjectionAssemble.size)
+                } else {
+                    pendingInjectionAssemble
+                }
+
+                // Fallback anti-starvation:
+                // si aún no alcanzamos un frame completo pero ya hay suficiente data parcial,
+                // encolar parcial para evitar silencio continuo por underrun.
+                if (addedChunks == 0 && pendingInjectionAssemble.isNotEmpty()) {
+                    val partialFlushThreshold = (frameBytes / 4).coerceAtLeast(bytesPerSample * safeChannels * 8)
+                    if (pendingInjectionAssemble.size >= partialFlushThreshold) {
+                        localInjectionBuffer.offer(pendingInjectionAssemble.copyOf())
+                        pendingInjectionAssemble = ByteArray(0)
+                        addedChunks++
+                        flushedPartial = true
+                    }
+                }
+
+                injectionChunksReceived += addedChunks
+
+                // Limitar backlog para evitar uso excesivo de memoria sin cortar frases completas.
+                while (localInjectionBuffer.size > maxInjectionQueueChunks) {
+                    localInjectionBuffer.poll()
+                }
+
+                queueSize = localInjectionBuffer.size
+                pendingBytes = pendingInjectionAssemble.size
+            }
+
+            val shouldLog =
+                callIndex <= 5L ||
+                    callIndex % 100L == 0L ||
+                    flushedPartial ||
+                    (addedChunks == 0 && (callIndex <= 20L || callIndex % 50L == 0L))
+
+            if (shouldLog) {
+                log.i(AI_INJECTION_TAG) {
+                    "$AI_INJECTION_PREFIX injectLocalAudio #$callIndex: in=$inputBytes, out=${data.size}, " +
+                        "sr=$sampleRate->$admSampleRate, frameBytes=$frameBytes, added=$addedChunks, " +
+                        "partialFlush=$flushedPartial, pending=$pendingBytes, queue=$queueSize, " +
+                        "received=$injectionChunksReceived, consumed=$injectionChunksConsumed, underruns=$injectionUnderrunCount"
+                }
+            }
+        } catch (e: Exception) {
+            log.e(TAG) { "Error injecting local audio: ${e.message}" }
+            log.e(AI_INJECTION_TAG) { "$AI_INJECTION_PREFIX injectLocalAudio error: ${e.message}" }
+        }
+    }
+
+    /**
+     * Inyecta audio remoto traducido. En Android, la reproducción de audio traducido
+     * se maneja via TranslationAudioPlayer (AudioTrack de Android directo al speaker).
+     * Este método es un placeholder por simetría con la interfaz.
+     */
+    fun injectRemoteAudio(pcmData: ByteArray, sampleRate: Int, channels: Int, bitsPerSample: Int) {
+        // En Android, la reproducción de audio traducido se maneja via TranslationAudioPlayer
+        // (android.media.AudioTrack directo al speaker).
+    }
+
+    /**
+     * Resampleo lineal simple de PCM 16-bit
+     */
+    private fun resamplePcm(
+        input: ByteArray, fromRate: Int, toRate: Int, channels: Int, bitsPerSample: Int
+    ): ByteArray {
+        if (fromRate == toRate) return input.copyOf()
+
+        val bytesPerSample = bitsPerSample / 8
+        val frameSize = bytesPerSample * channels
+        val inputFrames = input.size / frameSize
+        val outputFrames = (inputFrames.toLong() * toRate / fromRate).toInt()
+        val output = ByteArray(outputFrames * frameSize)
+
+        val inBuf = ByteBuffer.wrap(input).order(ByteOrder.LITTLE_ENDIAN)
+        val outBuf = ByteBuffer.wrap(output).order(ByteOrder.LITTLE_ENDIAN)
+
+        val ratio = fromRate.toDouble() / toRate.toDouble()
+
+        for (i in 0 until outputFrames) {
+            val srcPos = i * ratio
+            val srcIdx = srcPos.toInt().coerceIn(0, inputFrames - 1)
+            val nextIdx = (srcIdx + 1).coerceIn(0, inputFrames - 1)
+            val frac = srcPos - srcIdx
+
+            for (ch in 0 until channels) {
+                val s0 = inBuf.getShort((srcIdx * frameSize + ch * bytesPerSample)).toInt()
+                val s1 = inBuf.getShort((nextIdx * frameSize + ch * bytesPerSample)).toInt()
+                val interpolated = (s0 + (s1 - s0) * frac).toInt().coerceIn(-32768, 32767).toShort()
+                outBuf.putShort(interpolated)
+            }
+        }
+
+        return output
+    }
 
     // ==================== DTMF ====================
 

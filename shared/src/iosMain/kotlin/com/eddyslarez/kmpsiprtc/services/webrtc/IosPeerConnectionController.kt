@@ -5,6 +5,7 @@ import com.eddyslarez.kmpsiprtc.data.models.SdpType
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.services.audio.AudioCaptureCallback
+import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 import com.eddyslarez.kmpsiprtc.services.audio.AudioTrackCapture
 import com.eddyslarez.kmpsiprtc.services.audio.createRemoteAudioCapture
 import com.eddyslarez.kmpsiprtc.services.recording.CallRecorder
@@ -36,10 +37,16 @@ class IosPeerConnectionController(
 
     // Audio state
     private var isMuted = false
+    @Volatile
+    private var remoteAudioEnabled = true
     private var audioSessionConfigured = false
     private var microphonePermissionGranted = false
     private var audioTrackCreationRetries = 0
     private val maxAudioTrackRetries = 3
+
+    // Audio injection para traduccion L→R
+    private var audioRtpSender: RtpSender? = null
+    private var audioInjector: IosAudioInjector? = null
 
     @Volatile
     private var currentConnectionState = WebRtcConnectionState.DISCONNECTED
@@ -158,7 +165,7 @@ class IosPeerConnectionController(
             val track = event.receiver.track
             if (track is AudioStreamTrack) {
                 remoteAudioTrack = track
-                remoteAudioTrack?.enabled = true
+                remoteAudioTrack?.enabled = remoteAudioEnabled
 
                 // Configurar captura de audio remoto
                 setupRemoteAudioCapture(track)
@@ -190,6 +197,7 @@ class IosPeerConnectionController(
 
                 val sender = peerConn.addTrack(audioTrack, mediaStream)
                 dtmfSender = sender.dtmf
+                audioRtpSender = sender
 
                 audioTrackCreationRetries = 0
                 log.d(TAG) { "✅ Audio track added successfully" }
@@ -339,6 +347,155 @@ class IosPeerConnectionController(
 
     fun isMuted(): Boolean = isMuted
 
+    fun setRemoteAudioEnabled(enabled: Boolean) {
+        remoteAudioEnabled = enabled
+        runCatching {
+            // En iOS, track.enabled = false solo detiene el rendering al speaker
+            // pero los sinks siguen recibiendo datos (a diferencia de Desktop webrtc-java).
+            // Por lo tanto, podemos usarlo directamente para silenciar durante traducción.
+            remoteAudioTrack?.enabled = enabled
+            log.d(TAG) { "setRemoteAudioEnabled($enabled)" }
+        }
+    }
+
+    fun isRemoteAudioEnabled(): Boolean = remoteAudioEnabled
+
+    // ==================== INYECCIÓN DE AUDIO PARA TRADUCCIÓN ====================
+
+    // Flag que indica si el audio local está habilitado
+    @Volatile
+    private var localAudioEnabled = true
+    // Flag que indica si la inyección de audio local está activa
+    @Volatile
+    private var localAudioInjectionActive = false
+
+    /**
+     * Habilitar/deshabilitar el audio local (micrófono) que se envía al peer remoto.
+     *
+     * Cuando se deshabilita (enabled=false):
+     *   1. Se deshabilita el track del mic en WebRTC
+     *   2. Se crea un IosAudioInjector con factoria WebRTC separada + RTCAudioDevice custom
+     *   3. Se reemplaza el track del sender RTP con el track de inyeccion
+     *   4. Los datos traducidos se empujan via injectLocalAudio()
+     *
+     * Cuando se habilita (enabled=true):
+     *   1. Se restaura el track original del mic en el sender RTP
+     *   2. Se detiene y libera el inyector
+     *
+     * El mic sigue siendo capturado por CallRecorder/AudioStreamListener
+     * para enviar al servidor de traduccion, independientemente de este flag.
+     */
+    fun setLocalAudioEnabled(enabled: Boolean) {
+        if (localAudioEnabled == enabled) return
+        localAudioEnabled = enabled
+        localAudioInjectionActive = !enabled
+
+        log.d(TAG) { "setLocalAudioEnabled: $enabled (injection: $localAudioInjectionActive)" }
+
+        if (!enabled) {
+            activateLocalAudioInjection()
+        } else {
+            deactivateLocalAudioInjection()
+        }
+    }
+
+    /**
+     * Activa la inyeccion de audio local usando el bridge nativo MCNAudioInjectionBridge.
+     * El bridge crea una factory con RTCAudioDevice custom, genera un track,
+     * y lo reemplaza en el sender RTP — todo en Objective-C nativo.
+     */
+    @OptIn(ExperimentalForeignApi::class)
+    private fun activateLocalAudioInjection() {
+        try {
+            val nativeSender = audioRtpSender?.ios
+            if (nativeSender == null) {
+                log.e(TAG) { "Cannot activate injection: audioRtpSender is null" }
+                return
+            }
+
+            // Deshabilitar el track del mic en WebRTC (evitar doble fuente de audio)
+            localAudioTrack?.enabled = false
+
+            // Crear inyector y activar via bridge nativo
+            val injector = IosAudioInjector()
+            val success = injector.activate(nativeSender)
+
+            if (!success) {
+                log.e(TAG) { "Bridge activation failed - fallback: mic stays active" }
+                localAudioTrack?.enabled = true
+                return
+            }
+
+            audioInjector = injector
+            localAudioInjectionActive = true
+            log.d(TAG) { "Local audio injection activated via native bridge" }
+        } catch (e: Exception) {
+            log.e(TAG) { "Error activating local audio injection: ${e.message}" }
+            localAudioTrack?.enabled = true
+            audioInjector?.dispose()
+            audioInjector = null
+        }
+    }
+
+    /**
+     * Desactiva la inyeccion de audio y restaura el track original del mic.
+     * El bridge nativo se encarga de restaurar el track en el sender RTP.
+     */
+    @OptIn(ExperimentalForeignApi::class)
+    private fun deactivateLocalAudioInjection() {
+        try {
+            localAudioInjectionActive = false
+
+            val nativeSender = audioRtpSender?.ios
+            if (nativeSender != null) {
+                // El bridge restaura el track original y libera recursos
+                audioInjector?.deactivate(nativeSender)
+            } else {
+                audioInjector?.dispose()
+            }
+            audioInjector = null
+
+            // Restaurar track del mic
+            localAudioTrack?.enabled = !isMuted
+
+            log.d(TAG) { "Local audio injection deactivated - mic restored" }
+        } catch (e: Exception) {
+            log.e(TAG) { "Error deactivating local audio injection: ${e.message}" }
+            localAudioTrack?.enabled = !isMuted
+            audioInjector?.dispose()
+            audioInjector = null
+        }
+    }
+
+    fun isLocalAudioEnabled(): Boolean = localAudioEnabled
+
+    /**
+     * Inyecta datos de audio PCM que se enviarán al peer remoto.
+     *
+     * Los datos PCM se resamplean a 48kHz si es necesario, se dividen en frames de 10ms
+     * y se encolan en el IosAudioInjector. El InjectionAudioDevice los empuja al ADM
+     * nativo de WebRTC via deliverRecordedData, que los envia al peer remoto a traves
+     * del track de inyeccion en el sender RTP.
+     *
+     * @param pcmData Audio PCM 16-bit LE mono
+     * @param sampleRate Frecuencia de muestreo (ej: 24000 de OpenAI)
+     * @param channels Numero de canales (1 = mono)
+     * @param bitsPerSample Bits por muestra (16)
+     */
+    fun injectLocalAudio(pcmData: ByteArray, sampleRate: Int, channels: Int, bitsPerSample: Int) {
+        if (!localAudioInjectionActive) return
+        val injector = audioInjector ?: return
+        injector.pushAudio(pcmData, sampleRate, channels, bitsPerSample)
+    }
+
+    /**
+     * Inyecta audio remoto traducido para reproducción local.
+     * En iOS, la reproducción se maneja via TranslationAudioPlayer (AVAudioEngine).
+     */
+    fun injectRemoteAudio(pcmData: ByteArray, sampleRate: Int, channels: Int, bitsPerSample: Int) {
+        // En iOS, la reproducción de audio traducido se maneja via TranslationAudioPlayer
+    }
+
     // ==================== DTMF ====================
 
     fun sendDtmf(tones: String, duration: Int, gap: Int): Boolean {
@@ -370,14 +527,14 @@ class IosPeerConnectionController(
                         frames: Int,
                         timestampMs: Long
                     ) {
-                        if (callRecorder.isRecording()) {
-                            callRecorder.captureRemoteAudio(data)
+                        if (callRecorder.isRecording() || callRecorder.isStreaming()) {
+                            callRecorder.captureRemoteAudio(data, sampleRate, channels, bitsPerSample)
                         }
                     }
                 }
             )
 
-            if (callRecorder.isRecording()) {
+            if (callRecorder.isRecording() || callRecorder.isStreaming()) {
                 remoteAudioCapture?.startCapture()
             }
 
@@ -406,6 +563,32 @@ class IosPeerConnectionController(
 
     fun getRecorder(): CallRecorder = callRecorder
 
+    // ==================== STREAMING EN TIEMPO REAL ====================
+
+    fun setAudioStreamListener(listener: AudioStreamListener?) {
+        callRecorder.setAudioStreamListener(listener)
+    }
+
+    fun startStreaming(callId: String) {
+        log.d(TAG) { "🎙️ Starting audio streaming" }
+        callRecorder.startStreaming(callId)
+        remoteAudioCapture?.startCapture()
+        log.d(TAG) { "✅ Audio streaming started for call: $callId" }
+    }
+
+    fun stopStreaming() {
+        log.d(TAG) { "🛑 Stopping audio streaming" }
+        callRecorder.stopStreaming()
+        // Restaurar estado de audio al detener streaming
+        runCatching { remoteAudioTrack?.enabled = remoteAudioEnabled }
+        if (!callRecorder.isRecording()) {
+            remoteAudioCapture?.stopCapture()
+        }
+        log.d(TAG) { "✅ Audio streaming stopped" }
+    }
+
+    fun isStreaming(): Boolean = callRecorder.isStreaming()
+
     // ==================== STATE & CLEANUP ====================
 
     fun getConnectionState(): WebRtcConnectionState = currentConnectionState
@@ -414,6 +597,11 @@ class IosPeerConnectionController(
 
     fun closePeerConnection() {
         log.d(TAG) { "Closing PeerConnection (keeping resources)" }
+
+        // Limpiar inyector de audio si esta activo
+        audioInjector?.dispose()
+        audioInjector = null
+        localAudioInjectionActive = false
 
         try {
             localAudioTrack?.enabled = false
@@ -425,12 +613,16 @@ class IosPeerConnectionController(
         peerConnection?.close()
         peerConnection = null
         remoteAudioTrack = null
+        audioRtpSender = null
         currentConnectionState = WebRtcConnectionState.DISCONNECTED
 
         log.d(TAG) { "✅ PeerConnection closed" }
     }
 
     private fun cleanupPeerConnection() {
+        audioInjector?.dispose()
+        audioInjector = null
+
         try {
             localAudioTrack?.enabled = false
         } catch (e: Exception) {
@@ -439,11 +631,19 @@ class IosPeerConnectionController(
 
         peerConnection?.close()
         peerConnection = null
+        localAudioTrack = null
         remoteAudioTrack = null
+        dtmfSender = null
+        audioRtpSender = null
     }
 
     fun dispose() {
         log.d(TAG) { "Disposing PeerConnectionController" }
+
+        // Limpiar inyector de audio
+        audioInjector?.dispose()
+        audioInjector = null
+        localAudioInjectionActive = false
 
         remoteAudioCapture?.stopCapture()
         remoteAudioCapture = null
@@ -464,6 +664,7 @@ class IosPeerConnectionController(
         localAudioTrack = null
         remoteAudioTrack = null
         dtmfSender = null
+        audioRtpSender = null
 
         callRecorder.dispose()
         coroutineScope.cancel()
@@ -485,6 +686,9 @@ class IosPeerConnectionController(
             appendLine("Recording: ${isRecording()}")
             appendLine("Microphone Permission: $microphonePermissionGranted")
             appendLine("Audio Session Configured: $audioSessionConfigured")
+            appendLine("Audio Injection Active: $localAudioInjectionActive")
+            appendLine("Audio Injector: ${audioInjector != null}")
+            appendLine("Audio RTP Sender: ${audioRtpSender != null}")
             appendLine("Local Description: ${getLocalDescription()?.take(100)}...")
         }
     }

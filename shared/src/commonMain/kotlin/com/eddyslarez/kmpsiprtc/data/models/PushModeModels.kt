@@ -19,7 +19,7 @@ enum class PushModeStrategy {
 @Serializable
 data class PushModeConfig(
     val strategy: PushModeStrategy = PushModeStrategy.AUTOMATIC,
-    val autoTransitionDelay: Long = 5000L,
+    val autoTransitionDelay: Long = 2000L,
     val forceReregisterOnIncomingCall: Boolean = true,
     val returnToPushAfterCallEnd: Boolean = true,
     val enablePushNotifications: Boolean = true
@@ -45,4 +45,5 @@ object PushModeReasons {
     const val REGISTRATION_REQUIRED = "Registration required"
     const val NETWORK_RECONNECTION = "Network reconnection"
     const val PUSH_NOTIFICATION_RECEIVED = "Push notification received"
+    const val RECONNECTION_RESTORED = "Reconnection restored"
 }

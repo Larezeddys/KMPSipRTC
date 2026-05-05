@@ -52,6 +52,27 @@ class AudioController(
     @Volatile
     private var isAndroidAutoMode = false
 
+    // 🛂 Modo "gestionado por Android TelecomManager".
+    // Cuando está activo, el sistema (Telecom) se encarga de:
+    //   - AudioManager.mode (MODE_IN_COMMUNICATION)
+    //   - Audio focus (USAGE_VOICE_COMMUNICATION)
+    //   - Ruta del audio (earpiece/speaker/bluetooth) via Connection.setAudioRoute
+    //   - Bluetooth SCO (el framework lo gestiona automáticamente)
+    // Si además tocamos estas propiedades desde AudioController, nos peleamos
+    // con Telecom y el resultado es: WebRTC no captura micrófono, el remoto no
+    // escucha al usuario, o se pierde audio en ambos sentidos (típico en llamadas
+    // que entran desde push/segundo plano). Con el flag activo, saltamos esas
+    // operaciones y dejamos que Telecom las haga.
+    @Volatile
+    var telecomManaged: Boolean = false
+
+    // Callback que el app puede usar para redirigir cambios de ruta a
+    // Connection.setAudioRoute cuando estamos en modo telecom-managed.
+    // Si es null y telecomManaged=true, setActiveRoute() se vuelve no-op
+    // y solo actualiza el estado local.
+    @Volatile
+    var telecomRouteHandler: ((AudioUnitTypes) -> Boolean)? = null
+
     private val carModeReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
@@ -161,12 +182,24 @@ class AudioController(
             }
             AudioManager.AUDIOFOCUS_LOSS -> {
                 log.d(TAG) { "Audio focus lost permanently" }
-                audioManager?.isMicrophoneMute = true
-                stopBluetoothSco()
+                // NO mutear mic durante llamada VoIP activa — el interlocutor
+                // dejaria de escuchar al usuario. La llamada VoIP tiene prioridad.
+                if (!isStarted) {
+                    audioManager?.isMicrophoneMute = true
+                    stopBluetoothSco()
+                } else {
+                    log.w(TAG) { "Llamada activa, ignorando AUDIOFOCUS_LOSS para no silenciar mic" }
+                }
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                 log.d(TAG) { "Audio focus lost temporarily" }
-                audioManager?.isMicrophoneMute = true
+                // NO mutear mic durante llamada VoIP activa — causa que el
+                // interlocutor no escuche al usuario al contestar via TelecomManager.
+                if (!isStarted) {
+                    audioManager?.isMicrophoneMute = true
+                } else {
+                    log.w(TAG) { "Llamada activa, ignorando AUDIOFOCUS_LOSS_TRANSIENT" }
+                }
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                 log.d(TAG) { "Audio focus lost, can duck" }
@@ -208,6 +241,21 @@ class AudioController(
     fun startForCall() {
         if (isStarted) {
             log.d(TAG) { "Audio already started" }
+            return
+        }
+
+        // 🛂 Telecom-managed: NO tocar mode/focus/speaker/SCO. Telecom ya lo hizo
+        // (setActive() en la Connection con audioModeIsVoip=true dispara MODE_IN_COMMUNICATION
+        // y focus de VOICE_COMMUNICATION). Si intentamos hacerlo también, peleamos con Telecom
+        // y WebRTC pierde el micrófono cuando la llamada entra desde push/segundo plano.
+        if (telecomManaged) {
+            log.d(TAG) { "🛂 Telecom-managed mode: skipping audio mode/focus/SCO setup" }
+            audioManager?.let { am ->
+                // Asegurar que el micro no esté muteado (la app controla esto por Connection.setMuted)
+                am.isMicrophoneMute = false
+            }
+            scanDevices()
+            isStarted = true
             return
         }
 
@@ -259,6 +307,13 @@ class AudioController(
         if (!isStarted) return
 
         log.d(TAG) { "🔇 Stopping audio" }
+
+        // 🛂 Telecom-managed: Telecom limpia mode/focus/SCO cuando setDisconnected() se ejecuta.
+        // No tocamos nada para no pelear.
+        if (telecomManaged) {
+            isStarted = false
+            return
+        }
 
         isBluetoothScoRequested = false
         stopBluetoothSco()
@@ -373,6 +428,31 @@ class AudioController(
         }
     }
     fun setActiveRoute(audioUnitType: AudioUnitTypes): Boolean {
+        // 🛂 Telecom-managed: enrutamiento vive en Connection.setAudioRoute().
+        // Si lo hacemos vía AudioManager (setSpeakerphoneOn / startBluetoothSco),
+        // Telecom revierte o ignora los cambios y el audio se queda donde estaba.
+        if (telecomManaged) {
+            val handler = telecomRouteHandler
+            if (handler != null) {
+                val ok = try {
+                    handler(audioUnitType)
+                } catch (e: Exception) {
+                    log.e(TAG) { "telecomRouteHandler error: ${e.message}" }
+                    false
+                }
+                if (ok) {
+                    mainHandler.postDelayed({
+                        updateCurrentDeviceState()
+                        onDeviceChanged(getCurrentOutputDevice())
+                    }, 200)
+                }
+                return ok
+            } else {
+                log.w(TAG) { "🛂 setActiveRoute($audioUnitType) ignorado: Telecom activo sin handler" }
+                return false
+            }
+        }
+
         return audioManager?.let { am ->
             try {
                 log.d(TAG) { "Setting active route to: $audioUnitType" }
@@ -603,6 +683,11 @@ class AudioController(
      * ✅ NUEVO: Iniciar Bluetooth SCO correctamente
      */
     private fun startBluetoothSco() {
+        // 🛂 Telecom-managed: el sistema gestiona SCO automáticamente al enrutar a BT.
+        if (telecomManaged) {
+            log.d(TAG) { "🛂 Skipping SCO: Telecom-managed mode" }
+            return
+        }
         // ✅ No iniciar SCO en modo Android Auto
         if (isAndroidAutoMode) {
             log.d(TAG) { "Skipping SCO in Android Auto mode" }
@@ -631,8 +716,12 @@ class AudioController(
                     if (!isBluetoothScoOn && isBluetoothScoRequested) {
                         log.w(TAG) { "SCO connection timeout, retrying..." }
                         am.stopBluetoothSco()
-                        Thread.sleep(100)
-                        am.startBluetoothSco()
+                        // Reintentar SCO sin bloquear main thread
+                        mainHandler.postDelayed({
+                            if (!isBluetoothScoOn && isBluetoothScoRequested) {
+                                am.startBluetoothSco()
+                            }
+                        }, 100)
                     }
                 }, 1000)
 
@@ -695,6 +784,14 @@ class AudioController(
     // ==================== MUTE CONTROL ====================
 
     fun setMicrophoneMute(muted: Boolean) {
+        // 🛂 Telecom-managed: NO tocar AudioManager.isMicrophoneMute. Telecom es dueño
+        // del flag de sistema; tocarlo aquí dispara onCallAudioStateChanged y crea un
+        // feedback loop con la app. El track-level mute (localAudioTrack.setEnabled)
+        // hecho por PeerConnectionController ya silencia el TX a WebRTC.
+        if (telecomManaged) {
+            log.d(TAG) { "🛂 setMicrophoneMute($muted) skipped (Telecom-managed; track-level mute applies)" }
+            return
+        }
         audioManager?.isMicrophoneMute = muted
         log.d(TAG) { "Microphone muted: $muted" }
     }

@@ -8,7 +8,7 @@ data class AudioUnit(
     val capability: AudioUnitCompatibilities,
     val isCurrent: Boolean,
     val isDefault: Boolean,
-    val capabilities: AudioDeviceCapabilities = AudioDeviceCapabilities() // ✅ agregado
+    val capabilities: AudioDeviceCapabilities = AudioDeviceCapabilities() // [OK] agregado
 )
 
 enum class AudioUnitTypes {
@@ -27,8 +27,8 @@ enum class AudioUnitTypes {
     HDMI,
     DISPLAY_AUDIO,
     VIRTUAL,
-    USB,         // ✅ nuevo alias para dispositivos USB genéricos
-    AUX          // ✅ nuevo alias más intuitivo para AUXLINE
+    USB,         // [OK] nuevo alias para dispositivos USB genéricos
+    AUX          // [OK] nuevo alias más intuitivo para AUXLINE
 }
 
 
@@ -68,10 +68,10 @@ data class AudioDevice @OptIn(ExperimentalTime::class) constructor(
     val supportsHDVoice: Boolean = false,
     val latency: Int? = null,
     val vendorInfo: String? = null,
-    val capabilities: AudioDeviceCapabilities = AudioDeviceCapabilities(), // ✅ agregado
+    val capabilities: AudioDeviceCapabilities = AudioDeviceCapabilities(), // [OK] agregado
     val lastUpdated: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
-    val deviceAddress: String? = null,                                      // ✅ para Bluetooth o USB
-    val preferredSampleRate: Int? = null                                   // ✅ para sincronizar con WebRTC
+    val deviceAddress: String? = null,                                      // [OK] para Bluetooth o USB
+    val preferredSampleRate: Int? = null                                   // [OK] para sincronizar con WebRTC
 ) {
     // Convenience properties
     val isInput: Boolean get() = !isOutput
@@ -124,7 +124,7 @@ data class AudioDevice @OptIn(ExperimentalTime::class) constructor(
     }
 
     /**
-     * ✅ Diagnóstico rápido del dispositivo
+     * [OK] Diagnóstico rápido del dispositivo
      */
     fun describe(): String = buildString {
         appendLine("🎧 AudioDevice: $name ($descriptor)")
@@ -155,8 +155,8 @@ data class AudioDeviceCapabilities(
     val supportsMonaural: Boolean = true,
     val maxSampleRate: Int = 48000,
     val minSampleRate: Int = 8000,
-    val supportedCodecs: List<String> = listOf("PCM", "OPUS", "AAC"), // ✅ útil para SIP/RTC
-    val dynamicRange: IntRange = 0..100, // ✅ rango dinámico (volumen)
-    val supportsVoiceActivityDetection: Boolean = false, // ✅ para WebRTC optimizado
-    val supportsFullDuplex: Boolean = true // ✅ importante en llamadas
+    val supportedCodecs: List<String> = listOf("PCM", "OPUS", "AAC"), // [OK] útil para SIP/RTC
+    val dynamicRange: IntRange = 0..100, // [OK] rango dinámico (volumen)
+    val supportsVoiceActivityDetection: Boolean = false, // [OK] para WebRTC optimizado
+    val supportsFullDuplex: Boolean = true // [OK] importante en llamadas
 )

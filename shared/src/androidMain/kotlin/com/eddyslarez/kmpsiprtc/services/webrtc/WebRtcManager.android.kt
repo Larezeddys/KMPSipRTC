@@ -19,6 +19,7 @@ import com.eddyslarez.kmpsiprtc.platform.AndroidContext.getApplication
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.services.audio.AudioController
 import com.eddyslarez.kmpsiprtc.services.audio.BluetoothController
+import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 import com.eddyslarez.kmpsiprtc.services.recording.RecordingFileInfo
 import com.eddyslarez.kmpsiprtc.services.recording.RecordingType
 import kotlinx.coroutines.Dispatchers
@@ -107,6 +108,7 @@ class AndroidWebRtcManager : WebRtcManager {
                 }
             )
             audioController.initialize()
+            applyPendingTelecomConfig()
 
             // Initialize PeerConnection Controller
             peerConnectionController = PeerConnectionController(
@@ -296,6 +298,16 @@ class AndroidWebRtcManager : WebRtcManager {
         }
     }
 
+    override fun setRemoteAudioEnabled(enabled: Boolean) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.setRemoteAudioEnabled(enabled)
+    }
+
+    override fun isRemoteAudioEnabled(): Boolean {
+        if (!::peerConnectionController.isInitialized) return true
+        return peerConnectionController.isRemoteAudioEnabled()
+    }
+
     override fun setActiveAudioRoute(audioUnitType: AudioUnitTypes): Boolean {
         return audioController.setActiveRoute(audioUnitType)
     }
@@ -361,6 +373,36 @@ class AndroidWebRtcManager : WebRtcManager {
         audioController.startForCall()
     }
 
+    override fun setAndroidTelecomManaged(
+        managed: Boolean,
+        routeHandler: ((AudioUnitTypes) -> Boolean)?
+    ) {
+        if (::audioController.isInitialized) {
+            audioController.telecomManaged = managed
+            audioController.telecomRouteHandler = routeHandler
+            log.d(TAG) { "🛂 AndroidTelecomManaged set to $managed (routeHandler=${routeHandler != null})" }
+        } else {
+            log.w(TAG) { "setAndroidTelecomManaged: audioController no inicializado, posponiendo…" }
+            // Reintentar en cuanto initialize() termine — guardar valor para inicialización diferida
+            pendingTelecomManaged = managed
+            pendingTelecomRouteHandler = routeHandler
+        }
+    }
+
+    @Volatile private var pendingTelecomManaged: Boolean? = null
+    @Volatile private var pendingTelecomRouteHandler: ((AudioUnitTypes) -> Boolean)? = null
+
+    private fun applyPendingTelecomConfig() {
+        val pm = pendingTelecomManaged ?: return
+        if (::audioController.isInitialized) {
+            audioController.telecomManaged = pm
+            audioController.telecomRouteHandler = pendingTelecomRouteHandler
+            pendingTelecomManaged = null
+            pendingTelecomRouteHandler = null
+            log.d(TAG) { "🛂 Applied pending TelecomManaged=$pm" }
+        }
+    }
+
     override fun diagnoseAudioIssues(): String {
         return buildString {
             appendLine("=== AUDIO DIAGNOSIS ===")
@@ -422,10 +464,37 @@ class AndroidWebRtcManager : WebRtcManager {
         }
     }
 
+    // ==================== DEVICE SELECTION BY NAME (no-op on Android) ====================
+
+    override fun selectAudioInputDeviceByName(deviceName: String): Boolean = false
+    override fun selectAudioOutputDeviceByName(deviceName: String): Boolean = false
+
     // ==================== LISTENER ====================
 
     override fun setListener(listener: WebRtcEventListener?) {
         this.webRtcEventListener = listener
+    }
+
+    // ==================== INYECCIÓN DE AUDIO PARA TRADUCCIÓN ====================
+
+    override fun setLocalAudioEnabled(enabled: Boolean) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.setLocalAudioEnabled(enabled)
+    }
+
+    override fun isLocalAudioEnabled(): Boolean {
+        if (!::peerConnectionController.isInitialized) return true
+        return peerConnectionController.isLocalAudioEnabled()
+    }
+
+    override fun injectLocalAudio(pcmData: ByteArray, sampleRate: Int, channels: Int, bitsPerSample: Int) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.injectLocalAudio(pcmData, sampleRate, channels, bitsPerSample)
+    }
+
+    override fun injectRemoteAudio(pcmData: ByteArray, sampleRate: Int, channels: Int, bitsPerSample: Int) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.injectRemoteAudio(pcmData, sampleRate, channels, bitsPerSample)
     }
 
     // ==================== PRIVATE HELPERS ====================
@@ -560,6 +629,31 @@ class AndroidWebRtcManager : WebRtcManager {
      */
     fun deleteAllRecordings(): Boolean {
         return peerConnectionController.getRecorder()?.deleteAllRecordings() ?: false
+    }
+
+    // ==================== STREAMING EN TIEMPO REAL ====================
+
+    override fun setAudioStreamListener(listener: AudioStreamListener?) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.setAudioStreamListener(listener)
+    }
+
+    override fun startAudioStreaming(callId: String) {
+        if (!::peerConnectionController.isInitialized) {
+            log.e(TAG) { "❌ Cannot start streaming - controller not initialized" }
+            return
+        }
+        peerConnectionController.startStreaming(callId)
+    }
+
+    override fun stopAudioStreaming() {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.stopStreaming()
+    }
+
+    override fun isAudioStreaming(): Boolean {
+        if (!::peerConnectionController.isInitialized) return false
+        return peerConnectionController.isStreaming()
     }
 
     /**

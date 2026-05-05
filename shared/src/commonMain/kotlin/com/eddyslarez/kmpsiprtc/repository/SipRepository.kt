@@ -120,7 +120,9 @@ class SipRepository(private val database: SipDatabase) {
         domain: String,
         displayName: String? = null,
         pushToken: String? = null,
-        pushProvider: String? = null
+        pushProvider: String? = null,
+        incomingRingtoneUri: String? = null,
+        outgoingRingtoneUri: String? = null
     ): SipAccountEntity {
         val existingAccount = getAccountByCredentials(username, domain)
 
@@ -130,6 +132,8 @@ class SipRepository(private val database: SipDatabase) {
                 displayName = displayName ?: existingAccount.displayName,
                 pushToken = pushToken ?: existingAccount.pushToken,
                 pushProvider = pushProvider ?: existingAccount.pushProvider,
+                incomingRingtoneUri = incomingRingtoneUri ?: existingAccount.incomingRingtoneUri,
+                outgoingRingtoneUri = outgoingRingtoneUri ?: existingAccount.outgoingRingtoneUri,
                 updatedAt = kotlin.time.Clock.System.now().toEpochMilliseconds()
             )
         } else {
@@ -140,12 +144,28 @@ class SipRepository(private val database: SipDatabase) {
                 domain = domain,
                 displayName = displayName ?: username,
                 pushToken = pushToken,
-                pushProvider = pushProvider
+                pushProvider = pushProvider,
+                incomingRingtoneUri = incomingRingtoneUri,
+                outgoingRingtoneUri = outgoingRingtoneUri
             )
         }
 
         sipAccountDao.insertAccount(account)
         return account
+    }
+
+    suspend fun updateAccountRingtoneUris(
+        username: String,
+        domain: String,
+        incomingUri: String?,
+        outgoingUri: String?
+    ) {
+        sipAccountDao.updateAccountRingtoneUris(
+            username = username,
+            domain = domain,
+            incomingUri = incomingUri,
+            outgoingUri = outgoingUri
+        )
     }
 
     suspend fun updateRegistrationState(
@@ -247,8 +267,7 @@ class SipRepository(private val database: SipDatabase) {
     }
 
     suspend fun clearCallLogs() {
-
-//        callLogDao.deleteAllCallLogs()
+        callLogDao.deleteAllCallLogs()
     }
 
     // === OPERACIONES DE DATOS DE LLAMADAS ===

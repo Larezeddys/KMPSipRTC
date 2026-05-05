@@ -39,13 +39,13 @@ class CallHistoryManager(
     private val TAG = "CallHistoryManager"
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val processingMutex = Mutex()
-    // ✅ MEJORADO: Usar Map para mejor gestión y preservación de datos
+    // [OK] MEJORADO: Usar Map para mejor gestión y preservación de datos
     private val savedCallLogs = mutableMapOf<String, CallLog>()
     private val processingCallIds = mutableSetOf<String>()
     private val recentlyAddedCallIds = mutableSetOf<String>()
     private var isInitialLoadComplete = false
     private val loadMutex = Mutex()
-    // ✅ NUEVO: Flow para observar cambios en el historial
+    // [OK] NUEVO: Flow para observar cambios en el historial
     private val _callLogsFlow = MutableStateFlow<List<CallLog>>(emptyList())
     val callLogsFlow: StateFlow<List<CallLog>> = _callLogsFlow.asStateFlow()
 
@@ -53,7 +53,7 @@ class CallHistoryManager(
         log.d(tag = TAG) { "CallHistoryManager initialized" }
     }
     /**
-     * ✅ SOLUCIÓN: Carga inicial de call logs desde BD sin limpiar
+     * [OK] SOLUCIÓN: Carga inicial de call logs desde BD sin limpiar
      */
     suspend fun loadCallLogsFromDatabase() {
         loadMutex.withLock {
@@ -63,12 +63,12 @@ class CallHistoryManager(
             }
 
             try {
-                log.d(tag = TAG) { "🔄 Loading call logs from database..." }
+                log.d(tag = TAG) { "[SYNC] Loading call logs from database..." }
 
                 val dbLogs = databaseManager?.getRecentCallLogs(1000)?.first() ?: emptyList()
 
                 if (dbLogs.isNotEmpty()) {
-                    log.d(tag = TAG) { "📥 Found ${dbLogs.size} logs in database" }
+                    log.d(tag = TAG) { "[RECV] Found ${dbLogs.size} logs in database" }
 
                     val existingIds = _callLogs.map { it.id }.toSet()
                     val newLogs = dbLogs
@@ -78,7 +78,7 @@ class CallHistoryManager(
                     if (newLogs.isNotEmpty()) {
                         _callLogs.addAll(newLogs)
                         newLogs.forEach { savedCallLogs[it.id] = it }
-                        log.d(tag = TAG) { "✅ Added ${newLogs.size} logs from database" }
+                        log.d(tag = TAG) { "[OK] Added ${newLogs.size} logs from database" }
                     }
 
                     _callLogs.sortByDescending { parseFormattedDate(it.formattedStartDate) }
@@ -86,25 +86,50 @@ class CallHistoryManager(
                 }
 
                 isInitialLoadComplete = true
-                log.d(tag = TAG) { "✅ Total logs in memory: ${_callLogs.size}" }
+                log.d(tag = TAG) { "[OK] Total logs in memory: ${_callLogs.size}" }
 
             } catch (e: Exception) {
-                log.e(tag = TAG) { "❌ Error loading from database: ${e.message}" }
+                log.e(tag = TAG) { "[ERROR] Error loading from database: ${e.message}" }
             }
         }
     }
 
 
     /**
-     * ✅ CORREGIDO: Método mejorado para agregar logs sin duplicados ni pérdida de datos
+     * [OK] CORREGIDO: Método mejorado para agregar logs sin duplicados ni pérdida de datos
      */
     @OptIn(ExperimentalTime::class)
     fun addCallLog(callData: CallData, callType: CallTypes, endTime: Long? = null) {
         scope.launch {
             processingMutex.withLock {
                 try {
-                    val callId = callData.callId
-                    val startTime = callData.startTime ?: kotlin.time.Clock.System.now().toEpochMilliseconds()
+                    // Defensa: normalizar por si llega CallData sin pasar por SipMessageHandler
+                    val safeCallData = CallDataNormalizer.normalize(callData)
+
+                    // Un callback es técnicamente INCOMING en SIP, pero el usuario lo
+                    // inició, por lo que debe aparecer como OUTGOING en el historial.
+                    // Tras la normalización: safeCallData.from = número real del destino.
+                    val isCallback = safeCallData.isCallback
+                    if (isCallback) {
+                        log.d(TAG) {
+                            "[CALLBACK] Callback call detected: ${safeCallData.callId} | " +
+                            "from=${safeCallData.from} | type=$callType → forzando OUTGOING"
+                        }
+                    }
+
+                    val effectiveDirection = if (isCallback) CallDirections.OUTGOING else safeCallData.direction
+                    // Para callback: to = número real (estaba en 'from'), from = cuenta local
+                    val effectiveTo = if (isCallback)
+                        safeCallData.from.ifEmpty { safeCallData.getRemoteParty() }
+                    else
+                        safeCallData.to
+                    val effectiveFrom = if (isCallback)
+                        safeCallData.getLocalParty()
+                    else
+                        safeCallData.from ?: safeCallData.getLocalParty()
+
+                    val callId = safeCallData.callId
+                    val startTime = safeCallData.startTime ?: kotlin.time.Clock.System.now().toEpochMilliseconds()
                     val finalEndTime = endTime ?: kotlin.time.Clock.System.now().toEpochMilliseconds()
 
                     // Calcular duración solo para llamadas exitosas
@@ -119,21 +144,21 @@ class CallHistoryManager(
                     // Crear CallLog
                     val callLog = CallLog(
                         id = callId,
-                        direction = callData.direction,
-                        to = callData.to,
-                        formattedTo = formatPhoneNumber(callData.to),
-                        from = callData.from ?: callData.getLocalParty(),
-                        formattedFrom = formatPhoneNumber(callData.from ?: callData.getLocalParty()),
+                        direction = effectiveDirection,
+                        to = effectiveTo,
+                        formattedTo = formatPhoneNumber(effectiveTo),
+                        from = effectiveFrom,
+                        formattedFrom = formatPhoneNumber(effectiveFrom),
                         contact = null,
                         formattedStartDate = formatStartDate(startTime),
                         duration = duration,
                         callType = callType,
-                        localAddress = callData.getLocalParty()
+                        localAddress = safeCallData.getLocalParty()
                     )
 
-                    log.d(TAG) { "📞 Adding call log: $callId | $callType | ${duration}s | ${callData.direction}" }
+                    log.d(TAG) { "[CALL] Adding call log: $callId | $callType | ${duration}s | $effectiveDirection" }
 
-                    // ✅ Verificar si ya existe
+                    // [OK] Verificar si ya existe
                     val existingIndex = _callLogs.indexOfFirst { it.id == callId }
 
                     if (existingIndex >= 0) {
@@ -143,23 +168,31 @@ class CallHistoryManager(
                         if (shouldUpdateExistingLog(existingLog, callType, duration)) {
                             _callLogs[existingIndex] = callLog
                             savedCallLogs[callId] = callLog
-                            log.d(TAG) { "✅ Updated existing call log: $callId ($callType)" }
+                            log.d(TAG) { "[OK] Updated existing call log: $callId ($callType)" }
                         } else {
-                            log.d(TAG) { "ℹ️  Keeping existing log: $callId (${existingLog.callType})" }
+                            log.d(TAG) { "ℹ  Keeping existing log: $callId (${existingLog.callType})" }
                             return@launch
                         }
                     } else {
                         // Agregar nuevo log al principio
                         _callLogs.add(0, callLog)
                         savedCallLogs[callId] = callLog
-                        log.d(TAG) { "✅ Added new call log: $callId ($callType)" }
+                        log.d(TAG) { "[OK] Added new call log: $callId ($callType)" }
                     }
 
                     // Actualizar Flow
                     _callLogsFlow.value = _callLogs.toList()
 
-                    // Persistir en BD
-                    saveCallLogToDatabase(callLog, callData, startTime, finalEndTime)
+                    // Persistir en BD con los datos corregidos para que la dirección
+                    // quede correcta también al releer desde la base de datos.
+                    val callDataForDb = if (isCallback)
+                        safeCallData.copy(
+                            direction = CallDirections.OUTGOING,
+                            to = effectiveTo,
+                            from = effectiveFrom
+                        )
+                    else safeCallData
+                    saveCallLogToDatabase(callLog, callDataForDb, startTime, finalEndTime)
 
                     // Mantener límite
                     if (_callLogs.size > RECENT_CALLS_LIMIT) {
@@ -169,7 +202,7 @@ class CallHistoryManager(
                     }
 
                 } catch (e: Exception) {
-                    log.e(TAG) { "❌ Error adding call log: ${e.message}" }
+                    log.e(TAG) { "[ERROR] Error adding call log: ${e.message}" }
                 }
             }
         }
@@ -177,7 +210,7 @@ class CallHistoryManager(
 
 
     /**
-     * ✅ NUEVO: Determinar si se debe actualizar un log existente
+     * [OK] NUEVO: Determinar si se debe actualizar un log existente
      */
     private fun shouldUpdateExistingLog(
         existingLog: CallLog,
@@ -214,7 +247,7 @@ class CallHistoryManager(
 
 
     /**
-     * ✅ NUEVO: Jerarquía de tipos de llamada (de menos a más significativo)
+     * [OK] NUEVO: Jerarquía de tipos de llamada (de menos a más significativo)
      */
     private fun isMoreSignificantCallType(newType: CallTypes, existingType: CallTypes): Boolean {
         val significanceOrder = listOf(
@@ -231,7 +264,7 @@ class CallHistoryManager(
     }
 
     /**
-     * ✅ NUEVO: Actualizar log existente manteniendo posición
+     * [OK] NUEVO: Actualizar log existente manteniendo posición
      */
     private fun updateExistingCallLog(callId: String, updatedLog: CallLog) {
         val index = _callLogs.indexOfFirst { it.id == callId }
@@ -242,7 +275,7 @@ class CallHistoryManager(
     }
 
     /**
-     * ✅ NUEVO: Agregar nuevo log manteniendo orden cronológico
+     * [OK] NUEVO: Agregar nuevo log manteniendo orden cronológico
      */
     private fun addNewCallLog(callLog: CallLog) {
         // Insertar al principio para los más recientes primero
@@ -258,7 +291,7 @@ class CallHistoryManager(
     }
 
     /**
-     * ✅ NUEVO: Crear objeto CallLog
+     * [OK] NUEVO: Crear objeto CallLog
      */
     private fun createCallLogObject(
         callData: CallData,
@@ -282,7 +315,7 @@ class CallHistoryManager(
     }
 
     /**
-     * ✅ MEJORADO: Guardar en BD con mejor gestión de duplicados
+     * [OK] MEJORADO: Guardar en BD con mejor gestión de duplicados
      */
     private suspend fun saveCallLogToDatabase(
         callLog: CallLog,
@@ -333,7 +366,7 @@ class CallHistoryManager(
             log.d(TAG) { "💾 Call log saved to database: ${callLog.id}" }
 
         } catch (e: Exception) {
-            log.e(TAG) { "❌ Error saving to database: ${e.message}" }
+            log.e(TAG) { "[ERROR] Error saving to database: ${e.message}" }
         }
     }
 
@@ -356,34 +389,34 @@ class CallHistoryManager(
 
 
     /**
-     * ✅ NUEVO: Método para cargar desde BD al inicializar
+     * [OK] NUEVO: Método para cargar desde BD al inicializar
      */
     suspend fun initializeFromDatabase() {
         try {
             log.d(TAG) {
-                "🔄 Initializing CallHistoryManager from database..."
+                "[SYNC] Initializing CallHistoryManager from database..."
             }
             loadCallLogsFromDatabase(300) // Cargar más registros
             log.d(TAG) {
-                "✅ CallHistoryManager initialized with ${_callLogs.size} logs"
+                "[OK] CallHistoryManager initialized with ${_callLogs.size} logs"
             }
         } catch (e: Exception) {
             log.e(TAG) {
-                "❌ Error initializing from database: ${e.message}"
+                "[ERROR] Error initializing from database: ${e.message}"
             }
         }
     }
 
 
     /**
-     * ✅ MEJORADO: Carga desde BD preservando datos existentes
+     * [OK] MEJORADO: Carga desde BD preservando datos existentes
      */
     suspend fun loadCallLogsFromDatabase(limit: Int = 200) {
         try {
             val dbManager = databaseManager ?: return
             val dbCallLogs = dbManager.getRecentCallLogs(limit).first()
 
-            log.d(TAG) { "📥 Loading ${dbCallLogs.size} logs from database..." }
+            log.d(TAG) { "[RECV] Loading ${dbCallLogs.size} logs from database..." }
 
             val existingIds = _callLogs.map { it.id }.toSet()
             var newCount = 0
@@ -402,10 +435,10 @@ class CallHistoryManager(
                 parseFormattedDate(it.formattedStartDate)
             }
 
-            log.d(TAG) { "✅ Loaded $newCount new logs. Total: ${_callLogs.size}" }
+            log.d(TAG) { "[OK] Loaded $newCount new logs. Total: ${_callLogs.size}" }
 
             } catch (e: Exception) {
-                log.e(TAG) { "❌ Error loading from database: ${e.message}" }
+                log.e(TAG) { "[ERROR] Error loading from database: ${e.message}" }
             }
         }
 
@@ -426,7 +459,7 @@ class CallHistoryManager(
     }
 
     /**
-     * ✅ NUEVO: Método para buscar log específico
+     * [OK] NUEVO: Método para buscar log específico
      */
     fun getCallLog(callId: String): CallLog? {
         return savedCallLogs[callId]
@@ -436,7 +469,7 @@ class CallHistoryManager(
     fun getMissedCalls(): List<CallLog> =
         _callLogs.filter { it.callType == CallTypes.MISSED }
     /**
-     * ✅ NUEVO: Método para actualizar duración de log existente
+     * [OK] NUEVO: Método para actualizar duración de log existente
      */
     fun updateCallLogDuration(callId: String, newDuration: Int) {
         savedCallLogs[callId]?.let { existingLog ->
@@ -448,7 +481,7 @@ class CallHistoryManager(
     }
 
     /**
-     * ✅ NUEVO: Método para actualizar tipo de llamada
+     * [OK] NUEVO: Método para actualizar tipo de llamada
      */
     fun updateCallLogType(callId: String, newType: CallTypes) {
         savedCallLogs[callId]?.let { existingLog ->
@@ -463,7 +496,7 @@ class CallHistoryManager(
 
 
     /**
-     * ✅ NUEVO: Limpiar solo logs antiguos (más seguro)
+     * [OK] NUEVO: Limpiar solo logs antiguos (más seguro)
      */
     fun clearOldCallLogs(daysToKeep: Int = 30) {
         scope.launch {
@@ -491,16 +524,16 @@ class CallHistoryManager(
 
 
     /**
-     * ✅ NUEVO: Sincroniza memoria con BD (útil para debugging)
+     * [OK] NUEVO: Sincroniza memoria con BD (útil para debugging)
      */
     suspend fun syncWithDatabase() {
         try {
             log.d(TAG) {
-                "🔄 Synchronizing with database..."
+                "[SYNC] Synchronizing with database..."
             }
             loadCallLogsFromDatabase()
             log.d(TAG) {
-                "✅ Synchronized with database. Total logs: ${_callLogs.size}"
+                "[OK] Synchronized with database. Total logs: ${_callLogs.size}"
             }
         } catch (e: Exception) {
             log.e(TAG) {
@@ -515,7 +548,7 @@ class CallHistoryManager(
         // Limpiar BD también
         scope.launch {
             try {
-//                databaseManager?.clearAllCallLogs()
+                databaseManager?.clearAllCallLogs()
                 log.d(tag = TAG) { "Call logs cleared from memory and database" }
             } catch (e: Exception) {
                 log.e(tag = TAG) { "Error clearing database: ${e.message}" }
@@ -526,7 +559,7 @@ class CallHistoryManager(
     // === DIAGNÓSTICO Y DEBUGGING ===
 
     /**
-     * ✅ NUEVO: Información de diagnóstico
+     * [OK] NUEVO: Información de diagnóstico
      */
     fun getDiagnosticInfo(): String {
         return buildString {
@@ -549,7 +582,7 @@ class CallHistoryManager(
     }
 
     /**
-     * ✅ NUEVO: Verificar integridad de datos
+     * [OK] NUEVO: Verificar integridad de datos
      */
     fun verifyDataIntegrity(): Boolean {
         val memoryIds =
@@ -644,7 +677,7 @@ private fun parseFormattedDate(formattedDate: String): Long {
     }
 }
 /**
- * ✅ Extensión para convertir CallLogWithContact a CallLog
+ * [OK] Extensión para convertir CallLogWithContact a CallLog
  */
 fun CallLogWithContact.toCallLog(): CallLog {
     return CallLog(

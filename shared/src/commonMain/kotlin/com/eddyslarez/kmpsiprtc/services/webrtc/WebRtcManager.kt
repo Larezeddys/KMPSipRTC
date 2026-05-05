@@ -6,6 +6,7 @@ import com.eddyslarez.kmpsiprtc.data.models.AudioUnitTypes
 import com.eddyslarez.kmpsiprtc.data.models.RecordingResult
 import com.eddyslarez.kmpsiprtc.data.models.SdpType
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
+import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 
 interface WebRtcManager {
     /**
@@ -76,6 +77,8 @@ interface WebRtcManager {
 
     fun setMuted(muted: Boolean)
     fun isMuted(): Boolean
+    fun setRemoteAudioEnabled(enabled: Boolean)
+    fun isRemoteAudioEnabled(): Boolean
     fun getLocalDescription(): String?
     fun diagnoseAudioIssues(): String
     fun prepareAudioForCall()
@@ -94,6 +97,24 @@ interface WebRtcManager {
      */
     fun setListener(listener: WebRtcEventListener?)
     fun prepareAudioForIncomingCall()
+
+    /**
+     * Android-only: activa el modo "gestionado por TelecomManager".
+     * Cuando está activo, el AudioController interno NO toca AudioManager.mode,
+     * audio focus, speakerphone ni Bluetooth SCO — deja que el framework Telecom
+     * los gestione. Imprescindible cuando la app usa ConnectionService/VoipConnection
+     * para que WebRTC no pelee con Telecom por el audio (y el micrófono funcione
+     * en llamadas entrantes desde push/segundo plano).
+     *
+     * @param managed true cuando hay una llamada activa gestionada por Telecom
+     * @param routeHandler opcional: handler que traduce setActiveRoute() a
+     *        Connection.setAudioRoute() en la capa app. Si es null, los cambios
+     *        de ruta se ignoran en modo telecom-managed.
+     */
+    fun setAndroidTelecomManaged(
+        managed: Boolean,
+        routeHandler: ((AudioUnitTypes) -> Boolean)? = null,
+    ) { /* default no-op para iOS/Desktop */ }
     suspend fun applyModifiedSdp(modifiedSdp: String): Boolean
     fun isInitialized(): Boolean
 
@@ -105,6 +126,95 @@ interface WebRtcManager {
      * @return true if successfully started sending tones, false otherwise
      */
     fun sendDtmfTones(tones: String, duration: Int = 100, gap: Int = 70): Boolean
+
+    /**
+     * Seleccionar dispositivo de entrada de audio por nombre (solo Desktop)
+     * @param deviceName Nombre del dispositivo de entrada
+     * @return true si se seleccionó correctamente
+     */
+    fun selectAudioInputDeviceByName(deviceName: String): Boolean
+
+    /**
+     * Seleccionar dispositivo de salida de audio por nombre (solo Desktop)
+     * @param deviceName Nombre del dispositivo de salida
+     * @return true si se seleccionó correctamente
+     */
+    fun selectAudioOutputDeviceByName(deviceName: String): Boolean
+
+    // ==================== STREAMING EN TIEMPO REAL ====================
+
+    /**
+     * Configurar listener para recibir audio en tiempo real
+     * @param listener Listener que recibirá datos PCM crudos, o null para desregistrar
+     */
+    fun setAudioStreamListener(listener: AudioStreamListener?)
+
+    /**
+     * Iniciar streaming de audio en tiempo real (independiente de grabación)
+     * @param callId Identificador único de la llamada
+     */
+    fun startAudioStreaming(callId: String)
+
+    /**
+     * Detener streaming de audio en tiempo real
+     */
+    fun stopAudioStreaming()
+
+    /**
+     * Verificar si el streaming de audio está activo
+     */
+    fun isAudioStreaming(): Boolean
+
+    // ==================== INYECCIÓN DE AUDIO PARA TRADUCCIÓN ====================
+
+    /**
+     * Habilitar o deshabilitar el audio local (micrófono) que se envía al peer remoto.
+     * Cuando se deshabilita, el micrófono real se silencia en el pipeline de WebRTC
+     * pero el streaming/captura de audio local continúa funcionando para poder
+     * enviar el audio al servidor de traducción.
+     *
+     * Diferencia con setMuted(): setMuted() es para el usuario (mute manual),
+     * setLocalAudioEnabled() es para el sistema de traducción (reemplazar mic con audio traducido).
+     *
+     * @param enabled true = audio del micrófono real se envía al remoto (normal),
+     *                false = micrófono silenciado en WebRTC (para inyectar audio traducido)
+     */
+    fun setLocalAudioEnabled(enabled: Boolean)
+
+    /**
+     * Verificar si el audio local está habilitado
+     */
+    fun isLocalAudioEnabled(): Boolean
+
+    /**
+     * Inyectar datos de audio PCM que se enviarán al peer remoto en lugar del micrófono.
+     * Solo funciona cuando setLocalAudioEnabled(false) ha sido llamado previamente.
+     *
+     * El audio inyectado reemplaza completamente lo que el remoto escucha.
+     * Se usa para enviar el audio traducido por IA al otro participante de la llamada.
+     *
+     * @param pcmData Audio PCM 16-bit little-endian, mono
+     * @param sampleRate Frecuencia de muestreo del audio (ej: 24000)
+     * @param channels Número de canales (normalmente 1 = mono)
+     * @param bitsPerSample Bits por muestra (normalmente 16)
+     */
+    fun injectLocalAudio(pcmData: ByteArray, sampleRate: Int, channels: Int = 1, bitsPerSample: Int = 16)
+
+    /**
+     * Inyectar datos de audio PCM que se reproducirán localmente (en el speaker del usuario)
+     * en lugar del audio remoto original.
+     * Solo funciona cuando setRemoteAudioEnabled(false) ha sido llamado previamente.
+     *
+     * Se usa para reproducir la voz traducida del participante remoto.
+     * Nota: En la mayoría de plataformas esto se maneja via TranslationAudioPlayer
+     * directamente, pero esta API permite inyección a nivel de WebRTC si es necesario.
+     *
+     * @param pcmData Audio PCM 16-bit little-endian, mono
+     * @param sampleRate Frecuencia de muestreo del audio (ej: 24000)
+     * @param channels Número de canales (normalmente 1 = mono)
+     * @param bitsPerSample Bits por muestra (normalmente 16)
+     */
+    fun injectRemoteAudio(pcmData: ByteArray, sampleRate: Int, channels: Int = 1, bitsPerSample: Int = 16)
 }
 interface WebRtcEventListener {
     /**

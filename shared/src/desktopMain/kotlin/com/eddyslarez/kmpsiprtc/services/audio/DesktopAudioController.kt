@@ -15,11 +15,16 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 
 class DesktopAudioController(
-    private val audioDeviceModule: AudioDeviceModule?,
+    private var audioDeviceModule: AudioDeviceModule?,
     private val onDeviceChanged: (AudioDevice?) -> Unit
 ) {
     private val TAG = "DesktopAudioController"
     private val coroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+
+    fun updateAudioDeviceModule(adm: AudioDeviceModule?) {
+        this.audioDeviceModule = adm
+        log.d(TAG) { "AudioDeviceModule updated: ${adm != null}" }
+    }
 
     private val audioDevices = CopyOnWriteArrayList<AudioDevice>()
     private var isStarted = false
@@ -131,6 +136,24 @@ class DesktopAudioController(
         log.d(TAG) { "Changing output device to: ${device.name}" }
         currentOutputDevice = device
 
+        // Aplicar cambio real en WebRTC AudioDeviceModule
+        val adm = audioDeviceModule
+        if (adm != null) {
+            try {
+                val nativeDevice = adm.playoutDevices.firstOrNull { it.name == device.name }
+                if (nativeDevice != null) {
+                    adm.setPlayoutDevice(nativeDevice)
+                    log.d(TAG) { "✅ WebRTC playout device set to: ${nativeDevice.name}" }
+                } else {
+                    log.w(TAG) { "WebRTC playout device not found by name: ${device.name}" }
+                }
+            } catch (e: Exception) {
+                log.e(TAG) { "Error setting WebRTC playout device: ${e.message}" }
+            }
+        } else {
+            log.w(TAG) { "AudioDeviceModule is null, cannot apply output device change to WebRTC" }
+        }
+
         val success = setActiveRoute(device.audioUnit.type)
         if (success) {
             onDeviceChanged(device)
@@ -141,6 +164,25 @@ class DesktopAudioController(
     fun changeInputDevice(device: AudioDevice): Boolean {
         log.d(TAG) { "Changing input device to: ${device.name}" }
         currentInputDevice = device
+
+        // Aplicar cambio real en WebRTC AudioDeviceModule
+        val adm = audioDeviceModule
+        if (adm != null) {
+            try {
+                val nativeDevice = adm.recordingDevices.firstOrNull { it.name == device.name }
+                if (nativeDevice != null) {
+                    adm.setRecordingDevice(nativeDevice)
+                    log.d(TAG) { "✅ WebRTC recording device set to: ${nativeDevice.name}" }
+                } else {
+                    log.w(TAG) { "WebRTC recording device not found by name: ${device.name}" }
+                }
+            } catch (e: Exception) {
+                log.e(TAG) { "Error setting WebRTC recording device: ${e.message}" }
+            }
+        } else {
+            log.w(TAG) { "AudioDeviceModule is null, cannot apply input device change to WebRTC" }
+        }
+
         onDeviceChanged(device)
         return true
     }

@@ -11,6 +11,7 @@ import com.eddyslarez.kmpsiprtc.data.models.SdpType
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.services.audio.AudioCaptureCallback
+import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 import com.eddyslarez.kmpsiprtc.services.audio.AudioTrackCapture
 import com.eddyslarez.kmpsiprtc.services.audio.IosAudioController
 import com.eddyslarez.kmpsiprtc.services.audio.createRemoteAudioCapture
@@ -176,6 +177,16 @@ class IosWebRtcManager : WebRtcManager {
         }
     }
 
+    override fun setRemoteAudioEnabled(enabled: Boolean) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.setRemoteAudioEnabled(enabled)
+    }
+
+    override fun isRemoteAudioEnabled(): Boolean {
+        if (!::peerConnectionController.isInitialized) return true
+        return peerConnectionController.isRemoteAudioEnabled()
+    }
+
     override fun setActiveAudioRoute(audioUnitType: AudioUnitTypes): Boolean {
         return if (::audioController.isInitialized) {
             audioController.setActiveRoute(audioUnitType)
@@ -317,6 +328,28 @@ class IosWebRtcManager : WebRtcManager {
         return peerConnectionController.isRecording()
     }
 
+    // ==================== STREAMING EN TIEMPO REAL ====================
+
+    override fun setAudioStreamListener(listener: AudioStreamListener?) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.setAudioStreamListener(listener)
+    }
+
+    override fun startAudioStreaming(callId: String) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.startStreaming(callId)
+    }
+
+    override fun stopAudioStreaming() {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.stopStreaming()
+    }
+
+    override fun isAudioStreaming(): Boolean {
+        if (!::peerConnectionController.isInitialized) return false
+        return peerConnectionController.isStreaming()
+    }
+
     // ==================== DTMF & MEDIA DIRECTION ====================
 
     override fun sendDtmfTones(tones: String, duration: Int, gap: Int): Boolean {
@@ -347,8 +380,35 @@ class IosWebRtcManager : WebRtcManager {
         }
     }
 
+    // ==================== DEVICE SELECTION BY NAME (no-op on iOS) ====================
+
+    override fun selectAudioInputDeviceByName(deviceName: String): Boolean = false
+    override fun selectAudioOutputDeviceByName(deviceName: String): Boolean = false
+
     override fun setListener(listener: WebRtcEventListener?) {
         this.webRtcEventListener = listener
+    }
+
+    // ==================== INYECCIÓN DE AUDIO PARA TRADUCCIÓN ====================
+
+    override fun setLocalAudioEnabled(enabled: Boolean) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.setLocalAudioEnabled(enabled)
+    }
+
+    override fun isLocalAudioEnabled(): Boolean {
+        if (!::peerConnectionController.isInitialized) return true
+        return peerConnectionController.isLocalAudioEnabled()
+    }
+
+    override fun injectLocalAudio(pcmData: ByteArray, sampleRate: Int, channels: Int, bitsPerSample: Int) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.injectLocalAudio(pcmData, sampleRate, channels, bitsPerSample)
+    }
+
+    override fun injectRemoteAudio(pcmData: ByteArray, sampleRate: Int, channels: Int, bitsPerSample: Int) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.injectRemoteAudio(pcmData, sampleRate, channels, bitsPerSample)
     }
 
     // ==================== PRIVATE HELPERS ====================

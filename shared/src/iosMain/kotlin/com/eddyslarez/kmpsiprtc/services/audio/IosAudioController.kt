@@ -13,6 +13,10 @@ import kotlinx.cinterop.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlin.concurrent.Volatile
+
 @OptIn(ExperimentalForeignApi::class)
 class IosAudioController(
     private val onDeviceChanged: (AudioDevice?) -> Unit
@@ -20,13 +24,23 @@ class IosAudioController(
     private val TAG = "IosAudioController"
     private val coroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
+    // Thread-safety usando Mutex (compatible con Kotlin/Native)
+    private val audioDevicesMutex = Mutex()
     private val audioDevices = mutableListOf<AudioDevice>()
+
     private var savedAudioCategory: String? = null
     private var isStarted = false
     private var audioSessionConfigured = false
 
     private val _availableDevices = MutableStateFlow<List<AudioDevice>>(emptyList())
     val availableDevices: StateFlow<List<AudioDevice>> = _availableDevices.asStateFlow()
+
+    // Flag para evitar escaneos concurrentes
+    @Volatile
+    private var isScanning = false
+
+    // Job de debounce para el observer de cambio de ruta
+    private var routeChangeJob: Job? = null
 
     // ==================== INITIALIZATION ====================
 
@@ -49,8 +63,10 @@ class IosAudioController(
             queue = null
         ) { notification ->
             log.d(TAG) { "Audio route changed" }
-            coroutineScope.launch {
-                delay(200)
+            // Debounce: cancelar job anterior si llega otro cambio rapido
+            routeChangeJob?.cancel()
+            routeChangeJob = coroutineScope.launch {
+                delay(300)
                 scanDevices()
                 onDeviceChanged(getCurrentOutputDevice())
             }
@@ -69,8 +85,7 @@ class IosAudioController(
         savedAudioCategory = audioSession.category
 
         if (!configureAudioSession()) {
-            log.e(TAG) { "Failed to configure audio session" }
-            return
+            log.w(TAG) { "Failed to configure audio session (CallKit may activate it later)" }
         }
 
         scanDevices()
@@ -273,9 +288,12 @@ class IosAudioController(
     }
 
     fun getAllDevices(): Pair<List<AudioDevice>, List<AudioDevice>> {
-        scanDevices()
-        val inputs = audioDevices.filter { !it.isOutput }
-        val outputs = audioDevices.filter { it.isOutput }
+        // CRÍTICO: Crear copia inmutable ANTES de filtrar
+        // Esto evita ConcurrentModificationException
+        val devicesCopy = audioDevices.toList()
+
+        val inputs = devicesCopy.filter { !it.isOutput }
+        val outputs = devicesCopy.filter { it.isOutput }
 
         log.d(TAG) { "All devices - Inputs: ${inputs.size}, Outputs: ${outputs.size}" }
         return Pair(inputs, outputs)
@@ -296,19 +314,25 @@ class IosAudioController(
     }
 
     fun getCurrentInputDevice(): AudioDevice? {
-        return audioDevices.firstOrNull { !it.isOutput && it.audioUnit.isCurrent }
+        // Crear copia para evitar ConcurrentModificationException
+        val devicesCopy = audioDevices.toList()
+        return devicesCopy.firstOrNull { !it.isOutput && it.audioUnit.isCurrent }
     }
 
     fun getCurrentOutputDevice(): AudioDevice? {
         val activeRoute = getActiveRoute()
-        return audioDevices.firstOrNull {
+        // Crear copia para evitar ConcurrentModificationException
+        val devicesCopy = audioDevices.toList()
+        return devicesCopy.firstOrNull {
             it.isOutput && it.audioUnit.type == activeRoute
         }
     }
 
     fun getAvailableAudioUnits(): Set<AudioUnit> {
         scanDevices()
-        return audioDevices.map { it.audioUnit }.toSet()
+        // Crear copia para evitar ConcurrentModificationException
+        val devicesCopy = audioDevices.toList()
+        return devicesCopy.map { it.audioUnit }.toSet()
     }
 
     fun getCurrentActiveAudioUnit(): AudioUnit? {
@@ -328,7 +352,9 @@ class IosAudioController(
     // ==================== PRIVATE HELPERS ====================
 
     private fun selectDefaultDeviceWithPriority() {
-        val availableTypes = audioDevices
+        // Crear copia para evitar ConcurrentModificationException
+        val devicesCopy = audioDevices.toList()
+        val availableTypes = devicesCopy
             .filter { it.isOutput }
             .map { it.audioUnit.type }
             .toSet()
@@ -357,43 +383,65 @@ class IosAudioController(
     }
 
     private fun scanDevices() {
-        audioDevices.clear()
-
-        val audioSession = AVAudioSession.sharedInstance()
-        val currentRoute = audioSession.currentRoute
-        val currentOutputPort = currentRoute.outputs.firstOrNull()?.let {
-            (it as AVAudioSessionPortDescription).portType
+        // Evitar escaneos concurrentes
+        if (isScanning) {
+            log.d(TAG) { "Already scanning, skipping..." }
+            return
         }
 
-        // Dispositivos siempre disponibles
-        audioDevices.add(createMicrophoneDevice())
-        audioDevices.add(createEarpieceDevice(currentOutputPort))
-        audioDevices.add(createSpeakerDevice(currentOutputPort))
+        isScanning = true
 
-        // Detectar dispositivos conectados
-        // Bluetooth
-        audioSession.availableInputs?.forEach { input ->
-            val port = input as? AVAudioSessionPortDescription
-            if (port?.portType == AVAudioSessionPortBluetoothHFP) {
-                audioDevices.add(createBluetoothDevice(port, currentOutputPort))
+        try {
+            // Construir lista local para evitar OOM por acceso concurrente a audioDevices
+            val newDevices = mutableListOf<AudioDevice>()
+
+            val audioSession = AVAudioSession.sharedInstance()
+            val currentRoute = audioSession.currentRoute
+            val currentOutputPort = currentRoute.outputs.firstOrNull()?.let {
+                (it as AVAudioSessionPortDescription).portType
             }
-        }
 
-        // Headphones/Headset
-        currentRoute.outputs.forEach { output ->
-            val port = output as? AVAudioSessionPortDescription
-            when (port?.portType) {
-                AVAudioSessionPortHeadphones -> {
-                    audioDevices.add(createHeadphonesDevice(port, currentOutputPort))
-                }
-                AVAudioSessionPortHeadsetMic -> {
-                    audioDevices.add(createHeadsetDevice(port, currentOutputPort))
+            // Dispositivos siempre disponibles
+            newDevices.add(createMicrophoneDevice())
+            newDevices.add(createEarpieceDevice(currentOutputPort))
+            newDevices.add(createSpeakerDevice(currentOutputPort))
+
+            // Detectar dispositivos conectados
+            // Bluetooth
+            audioSession.availableInputs?.forEach { input ->
+                (input as? AVAudioSessionPortDescription)?.let { port ->
+                    if (port.portType == AVAudioSessionPortBluetoothHFP) {
+                        newDevices.add(createBluetoothDevice(port, currentOutputPort))
+                    }
                 }
             }
-        }
 
-        _availableDevices.value = audioDevices.toList()
-        log.d(TAG) { "Total devices scanned: ${audioDevices.size}" }
+            // Headphones/Headset
+            currentRoute.outputs.forEach { output ->
+                (output as? AVAudioSessionPortDescription)?.let { port ->
+                    when (port.portType) {
+                        AVAudioSessionPortHeadphones -> {
+                            newDevices.add(createHeadphonesDevice(port, currentOutputPort))
+                        }
+                        AVAudioSessionPortHeadsetMic -> {
+                            newDevices.add(createHeadsetDevice(port, currentOutputPort))
+                        }
+                    }
+                }
+            }
+
+            // Reemplazar atomicamente la lista compartida
+            audioDevices.clear()
+            audioDevices.addAll(newDevices)
+
+            // Actualizar StateFlow con copia inmutable
+            _availableDevices.value = newDevices.toList()
+            log.d(TAG) { "Total devices scanned: ${newDevices.size}" }
+        } catch (e: Exception) {
+            log.e(TAG) { "Error scanning devices: ${e.message}" }
+        } finally {
+            isScanning = false
+        }
     }
 
     // ==================== DEVICE CREATION ====================
@@ -528,364 +576,6 @@ class IosAudioController(
             outputs.forEach { device ->
                 appendLine("  - ${device.name} (${device.audioUnit.type}) - Current: ${device.audioUnit.isCurrent}")
             }
-        }
-    }
-}
-
-// ==================== iOS WebRtcManager Completo ====================
-
-@OptIn(ExperimentalForeignApi::class)
-class IosWebRtcManager : WebRtcManager {
-    private val TAG = "IosWebRtcManager"
-    private val coroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-
-    // Controllers
-    private lateinit var peerConnectionController: IosPeerConnectionController
-    private lateinit var audioController: IosAudioController
-
-    // State
-    private val _isInitialized = MutableStateFlow(false)
-    private var webRtcEventListener: WebRtcEventListener? = null
-
-    val isInitialized: Boolean get() = _isInitialized.value
-
-    override fun initialize() {
-        log.d(TAG) { "🔧 Initializing WebRTC Manager..." }
-
-        if (_isInitialized.value) {
-            log.d(TAG) { "Already initialized" }
-            return
-        }
-
-        try {
-            // Initialize Audio Controller
-            audioController = IosAudioController(
-                onDeviceChanged = { device ->
-                    webRtcEventListener?.onAudioDeviceChanged(device)
-                }
-            )
-            audioController.initialize()
-
-            // Initialize PeerConnection Controller
-            peerConnectionController = IosPeerConnectionController(
-                onIceCandidate = { candidate, sdpMid, sdpMLineIndex ->
-                    webRtcEventListener?.onIceCandidate(candidate, sdpMid, sdpMLineIndex)
-                },
-                onConnectionStateChange = { state ->
-                    handleConnectionStateChange(state)
-                },
-                onRemoteAudioTrack = {
-                    webRtcEventListener?.onRemoteAudioTrack()
-                }
-            )
-            peerConnectionController.initialize()
-
-            _isInitialized.value = true
-            log.d(TAG) { "✅✅✅ WebRTC initialized successfully ✅✅✅" }
-
-        } catch (e: Exception) {
-            log.e(TAG) { "💥 Error initializing WebRTC: ${e.message}" }
-            e.printStackTrace()
-            _isInitialized.value = false
-        }
-    }
-
-    override fun isInitialized(): Boolean = _isInitialized.value
-
-    // ==================== CONNECTION MANAGEMENT ====================
-
-    override suspend fun createOffer(): String {
-        log.d(TAG) { "📝 Creating offer..." }
-        ensureInitialized()
-        audioController.startForCall()
-        return peerConnectionController.createOffer()
-    }
-
-    override suspend fun createAnswer(offerSdp: String): String {
-        log.d(TAG) { "📝 Creating answer..." }
-        ensureInitialized()
-        audioController.startForCall()
-        return peerConnectionController.createAnswer(offerSdp)
-    }
-
-    override suspend fun setRemoteDescription(sdp: String, type: SdpType) {
-        ensureInitialized()
-        peerConnectionController.setRemoteDescription(sdp, type)
-    }
-
-    override suspend fun addIceCandidate(candidate: String, sdpMid: String?, sdpMLineIndex: Int?) {
-        peerConnectionController.addIceCandidate(candidate, sdpMid, sdpMLineIndex)
-    }
-
-    override fun closePeerConnection() {
-        log.d(TAG) { "Closing peer connection" }
-        if (::peerConnectionController.isInitialized) {
-            peerConnectionController.closePeerConnection()
-        }
-        if (::audioController.isInitialized) {
-            audioController.stop()
-        }
-    }
-
-    override fun dispose() {
-        log.d(TAG) { "Disposing WebRTC Manager" }
-
-        try {
-            if (::audioController.isInitialized) {
-                audioController.stop()
-                audioController.dispose()
-            }
-
-            if (::peerConnectionController.isInitialized) {
-                peerConnectionController.dispose()
-            }
-
-            _isInitialized.value = false
-            coroutineScope.cancel()
-
-            log.d(TAG) { "✅ WebRTC Manager disposed successfully" }
-        } catch (e: Exception) {
-            log.e(TAG) { "Error during disposal: ${e.message}" }
-            e.printStackTrace()
-            _isInitialized.value = false
-        }
-    }
-
-    override fun getConnectionState(): WebRtcConnectionState {
-        return if (::peerConnectionController.isInitialized) {
-            peerConnectionController.getConnectionState()
-        } else {
-            WebRtcConnectionState.DISCONNECTED
-        }
-    }
-
-    override fun getLocalDescription(): String? {
-        return if (::peerConnectionController.isInitialized) {
-            peerConnectionController.getLocalDescription()
-        } else {
-            null
-        }
-    }
-
-    // ==================== AUDIO MANAGEMENT ====================
-
-    override fun setAudioEnabled(enabled: Boolean) {
-        if (!::peerConnectionController.isInitialized) return
-        peerConnectionController.setAudioEnabled(enabled)
-    }
-
-    override fun setMuted(muted: Boolean) {
-        if (!::peerConnectionController.isInitialized) return
-        peerConnectionController.setMuted(muted)
-    }
-
-    override fun isMuted(): Boolean {
-        return if (::peerConnectionController.isInitialized) {
-            peerConnectionController.isMuted()
-        } else {
-            false
-        }
-    }
-
-    override fun setActiveAudioRoute(audioUnitType: AudioUnitTypes): Boolean {
-        return if (::audioController.isInitialized) {
-            audioController.setActiveRoute(audioUnitType)
-        } else {
-            false
-        }
-    }
-
-    override fun getActiveAudioRoute(): AudioUnitTypes? {
-        return if (::audioController.isInitialized) {
-            audioController.getActiveRoute()
-        } else {
-            null
-        }
-    }
-
-    override fun getAvailableAudioRoutes(): Set<AudioUnitTypes> {
-        return if (::audioController.isInitialized) {
-            audioController.getAvailableRoutes()
-        } else {
-            emptySet()
-        }
-    }
-
-    override fun getAllAudioDevices(): Pair<List<AudioDevice>, List<AudioDevice>> {
-        return if (::audioController.isInitialized) {
-            audioController.getAllDevices()
-        } else {
-            Pair(emptyList(), emptyList())
-        }
-    }
-
-    override fun changeAudioOutputDeviceDuringCall(device: AudioDevice): Boolean {
-        return if (::audioController.isInitialized) {
-            audioController.changeOutputDevice(device)
-        } else {
-            false
-        }
-    }
-
-    override fun changeAudioInputDeviceDuringCall(device: AudioDevice): Boolean {
-        return if (::audioController.isInitialized) {
-            audioController.changeInputDevice(device)
-        } else {
-            false
-        }
-    }
-
-    override fun getCurrentInputDevice(): AudioDevice? {
-        return if (::audioController.isInitialized) {
-            audioController.getCurrentInputDevice()
-        } else {
-            null
-        }
-    }
-
-    override fun getCurrentOutputDevice(): AudioDevice? {
-        return if (::audioController.isInitialized) {
-            audioController.getCurrentOutputDevice()
-        } else {
-            null
-        }
-    }
-
-    override fun getAvailableAudioUnits(): Set<AudioUnit> {
-        return if (::audioController.isInitialized) {
-            audioController.getAvailableAudioUnits()
-        } else {
-            emptySet()
-        }
-    }
-
-    override fun getCurrentActiveAudioUnit(): AudioUnit? {
-        return if (::audioController.isInitialized) {
-            audioController.getCurrentActiveAudioUnit()
-        } else {
-            null
-        }
-    }
-
-    override fun onBluetoothConnectionChanged(isConnected: Boolean) {
-        if (::audioController.isInitialized) {
-            audioController.refreshDevices()
-        }
-    }
-
-    override fun refreshAudioDevicesWithBluetoothPriority() {
-        if (::audioController.isInitialized) {
-            audioController.refreshWithBluetoothPriority()
-        }
-    }
-
-    override fun applyAudioRouteChange(audioUnitType: AudioUnitTypes): Boolean {
-        return setActiveAudioRoute(audioUnitType)
-    }
-
-    override fun prepareAudioForCall() {
-        if (::audioController.isInitialized) {
-            audioController.startForCall()
-        }
-    }
-
-    override fun prepareAudioForIncomingCall() {
-        prepareAudioForCall()
-    }
-
-    override fun diagnoseAudioIssues(): String {
-        return buildString {
-            appendLine("=== iOS AUDIO DIAGNOSIS ===")
-            appendLine("Initialized: ${_isInitialized.value}")
-            appendLine("Connection State: ${getConnectionState()}")
-
-            if (::audioController.isInitialized) {
-                appendLine("\n--- Audio Controller ---")
-                appendLine(audioController.diagnose())
-            }
-
-            if (::peerConnectionController.isInitialized) {
-                appendLine("\n--- PeerConnection Controller ---")
-                appendLine(peerConnectionController.diagnose())
-            }
-        }
-    }
-
-    // ==================== RECORDING ====================
-
-    override fun startCallRecording(callId: String) {
-        if (!::peerConnectionController.isInitialized) return
-        peerConnectionController.startRecording(callId)
-    }
-
-    override suspend fun stopCallRecording(): RecordingResult? {
-        if (!::peerConnectionController.isInitialized) return null
-        return peerConnectionController.stopRecording()
-    }
-
-    override fun isRecordingCall(): Boolean {
-        if (!::peerConnectionController.isInitialized) return false
-        return peerConnectionController.isRecording()
-    }
-
-    // ==================== DTMF & MEDIA DIRECTION ====================
-
-    override fun sendDtmfTones(tones: String, duration: Int, gap: Int): Boolean {
-        return if (::peerConnectionController.isInitialized) {
-            peerConnectionController.sendDtmf(tones, duration, gap)
-        } else {
-            false
-        }
-    }
-
-    override suspend fun setMediaDirection(direction: WebRtcManager.MediaDirection) {
-        when (direction) {
-            WebRtcManager.MediaDirection.SENDRECV -> setAudioEnabled(true)
-            WebRtcManager.MediaDirection.SENDONLY -> setAudioEnabled(true)
-            WebRtcManager.MediaDirection.RECVONLY -> setAudioEnabled(false)
-            WebRtcManager.MediaDirection.INACTIVE -> setAudioEnabled(false)
-        }
-    }
-
-    override suspend fun applyModifiedSdp(modifiedSdp: String): Boolean {
-        return try {
-            ensureInitialized()
-            peerConnectionController.setLocalDescriptionDirect(modifiedSdp)
-            true
-        } catch (e: Exception) {
-            log.e(TAG) { "Failed to apply modified SDP: ${e.message}" }
-            false
-        }
-    }
-
-    override fun setListener(listener: WebRtcEventListener?) {
-        this.webRtcEventListener = listener
-    }
-
-    // ==================== PRIVATE HELPERS ====================
-
-    private fun handleConnectionStateChange(state: WebRtcConnectionState) {
-        when (state) {
-            WebRtcConnectionState.CONNECTED -> {
-                coroutineScope.launch(Dispatchers.Main) {
-                    setAudioEnabled(true)
-                }
-            }
-            WebRtcConnectionState.DISCONNECTED,
-            WebRtcConnectionState.FAILED,
-            WebRtcConnectionState.CLOSED -> {
-                if (::audioController.isInitialized) {
-                    audioController.stop()
-                }
-            }
-            else -> {}
-        }
-        webRtcEventListener?.onConnectionStateChange(state)
-    }
-
-    private fun ensureInitialized() {
-        if (!_isInitialized.value) {
-            throw IllegalStateException("WebRTC not initialized")
         }
     }
 }

@@ -1,6 +1,6 @@
 package com.eddyslarez.kmpsiprtc.data.models
 
-interface SipCallbacks {
+internal interface SipCallbacks {
     fun onCallTerminated() {}
     fun onRegistrationStateChanged(state: RegistrationState) {}
     fun onAccountRegistrationStateChanged(

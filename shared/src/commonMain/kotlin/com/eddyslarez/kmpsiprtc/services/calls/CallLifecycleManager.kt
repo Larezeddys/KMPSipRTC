@@ -15,13 +15,13 @@ import kotlinx.coroutines.launch
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.ExperimentalTime
 
-class CallLifecycleManager(
+internal class CallLifecycleManager(
     private val sipCoreManager: SipCoreManager,
     private val pushModeManager: PushModeManager?
 ) {
     companion object {
         private const val TAG = "CallLifecycleManager"
-        private const val RETURN_TO_PUSH_DELAY = 2000L
+        private const val RETURN_TO_PUSH_DELAY = 500L
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -40,7 +40,7 @@ class CallLifecycleManager(
      */
     @OptIn(ExperimentalTime::class)
     suspend fun onIncomingCallReceived(accountKey: String) {
-        log.d(tag = TAG) { "📞 Incoming call received for $accountKey" }
+        log.d(tag = TAG) { "[CALL] Incoming call received for $accountKey" }
 
         val accountInfo = sipCoreManager.activeAccounts[accountKey] ?: return
         val wasInPush = accountInfo.userAgent.value?.contains("Push", ignoreCase = true)
@@ -57,17 +57,16 @@ class CallLifecycleManager(
 
         log.d(tag = TAG) { "Saved state: wasInPush=$wasInPush for $accountKey" }
 
-        // Si estaba en push, cambiar a foreground para la llamada
+        // IMPORTANTE: NO cambiar a FOREGROUND si la llamada viene de push.
+        // La llamada puede funcionar en modo push (WebSocket ya conectado).
+        // Cambiar a foreground aqui causa problemas de registro durante la llamada.
+        // El cambio de modo se maneja DESPUES de que termine la llamada,
+        // en onCallEnded(), segun el estado de la app (foreground/background).
         if (wasInPush == true) {
-            scope.launch {
-                log.d(tag = TAG) { "Switching $accountKey to FOREGROUND for call" }
-                sipCoreManager.switchToForegroundMode(
-                    accountInfo.username,
-                    accountInfo.domain
-                )
-            }
+            log.d(tag = TAG) { "Incoming call from push - keeping PUSH mode during call for $accountKey" }
         }
     }
+
 
     /**
      * Llamada cuando termina una llamada
@@ -100,13 +99,13 @@ class CallLifecycleManager(
 
         val job = scope.launch {
             try {
-                log.d(tag = TAG) { "⏳ Scheduling return to PUSH for $accountKey in ${RETURN_TO_PUSH_DELAY}ms" }
+                log.d(tag = TAG) { "[WAIT] Scheduling return to PUSH for $accountKey in ${RETURN_TO_PUSH_DELAY}ms" }
                 delay(RETURN_TO_PUSH_DELAY)
 
                 // Verificar que no hay nueva llamada
                 val currentState = accountsInCall.get(accountKey)
                 if (currentState?.callEndTime != null) {
-                    log.d(tag = TAG) { "✅ Returning $accountKey to PUSH mode" }
+                    log.d(tag = TAG) { "[OK] Returning $accountKey to PUSH mode" }
 
                     val accountInfo = sipCoreManager.activeAccounts[accountKey]
                     if (accountInfo != null) {
@@ -115,14 +114,14 @@ class CallLifecycleManager(
                             accountInfo.domain
                         )
 
-                        log.d(tag = TAG) { "✅ $accountKey returned to PUSH successfully" }
+                        log.d(tag = TAG) { "[OK] $accountKey returned to PUSH successfully" }
                     }
 
                     // Limpiar estado
                     accountsInCall.remove(accountKey)
                     returnToPushJobs.remove(accountKey)
                 } else {
-                    log.d(tag = TAG) { "⚠️ New call detected for $accountKey, cancelling return to PUSH" }
+                    log.d(tag = TAG) { "[WARN] New call detected for $accountKey, cancelling return to PUSH" }
                 }
 
             } catch (e: CancellationException) {

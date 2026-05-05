@@ -73,6 +73,16 @@ interface SipAccountDao {
     @Query("UPDATE sip_accounts SET pushToken = :token, pushProvider = :provider, updatedAt = :timestamp WHERE id = :accountId")
     suspend fun updatePushInfo(accountId: String, token: String?, provider: String?, timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds())
 
+    @OptIn(ExperimentalTime::class)
+    @Query("UPDATE sip_accounts SET incomingRingtoneUri = :incomingUri, outgoingRingtoneUri = :outgoingUri, updatedAt = :timestamp WHERE username = :username AND domain = :domain")
+    suspend fun updateAccountRingtoneUris(
+        username: String,
+        domain: String,
+        incomingUri: String?,
+        outgoingUri: String?,
+        timestamp: Long = kotlin.time.Clock.System.now().toEpochMilliseconds()
+    )
+
     @Query("SELECT * FROM sip_accounts WHERE pushToken IS NOT NULL AND pushToken != '' AND enablePush = 1")
     fun getAccountsWithPush(): Flow<List<SipAccountEntity>>
 

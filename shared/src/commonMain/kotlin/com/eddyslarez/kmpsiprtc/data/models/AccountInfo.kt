@@ -14,6 +14,191 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlin.time.ExperimentalTime
 
+//class AccountInfo(
+//    val username: String,
+//    var password: String,
+//    val domain: String
+//) {
+//    private val TAG = "AccountInfo"
+//    private val accountMutex = Mutex()
+//    private val cseqMutex = Mutex()
+//
+//    // 🔁 Reemplazo de atomic por MutableStateFlow
+//    val reconnectCount = MutableStateFlow(0)
+//    var callId = MutableStateFlow<String?>(null)
+//    var fromTag = MutableStateFlow<String?>(null)
+//    var toTag = MutableStateFlow<String?>(null)
+//    private val _cseq = MutableStateFlow(1)
+//    fun canRegister(): Boolean = username.isNotEmpty() && password.isNotEmpty() && domain.isNotEmpty()
+//
+//    val fromHeader = MutableStateFlow<String?>(null)
+//    val toHeader = MutableStateFlow<String?>(null)
+//    val viaHeader = MutableStateFlow<String?>(null)
+//    val fromUri = MutableStateFlow<String?>(null)
+//    val toUri = MutableStateFlow<String?>(null)
+//    val remoteContact = MutableStateFlow<String?>(null)
+//    val userAgent = MutableStateFlow<String?>(null)
+//
+//    val authorizationHeader = MutableStateFlow<String?>(null)
+//    val challengeNonce = MutableStateFlow<String?>(null)
+//    val realm = MutableStateFlow<String?>(null)
+//    val authRetryCount = MutableStateFlow(0)
+//    val method = MutableStateFlow<String?>(null)
+//
+//    val useWebRTCFormat = MutableStateFlow(false)
+//    val remoteSdp = MutableStateFlow<String?>(null)
+//    val iceUfrag = MutableStateFlow<String?>(null)
+//    val icePwd = MutableStateFlow<String?>(null)
+//    val dtlsFingerprint = MutableStateFlow<String?>(null)
+//    val setupRole = MutableStateFlow<String?>(null)
+//
+//    // 👇 Este es el cambio que te interesa
+//    val currentCallData = MutableStateFlow<CallData?>(null)
+//
+//    val isRegistered = MutableStateFlow(false)
+//    val isCallConnected = MutableStateFlow(false)
+//    val hasIncomingCall = MutableStateFlow(false)
+//    val callStartTime = MutableStateFlow(0L)
+//
+//    val token = MutableStateFlow("")
+//    val provider = MutableStateFlow("")
+//
+//    val lastCseqUpdate = MutableStateFlow(0L)
+//    val lastAuthReset = MutableStateFlow(0L)
+//    val lastCallReset = MutableStateFlow(0L)
+//
+//    val reconnectionJob = MutableStateFlow<Job?>(null)
+//    val reconnectionScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+//
+//    companion object {
+//        private const val MAX_CSEQ_VALUE = Int.MAX_VALUE
+//        private const val MIN_CSEQ_VALUE = 1
+//        private const val CSEQ_RESET_THRESHOLD = MAX_CSEQ_VALUE - 1000
+//    }
+//
+//    val cseq: Int
+//        get() = _cseq.value
+//
+//    @OptIn(ExperimentalTime::class)
+//    suspend fun incrementCSeq(): Int = cseqMutex.withLock {
+//        var cseqVal = _cseq.value
+//        if (cseqVal >= CSEQ_RESET_THRESHOLD) {
+//            log.w(TAG) { "CSeq limit reached, resetting for ${getAccountIdentity()}" }
+//            cseqVal = MIN_CSEQ_VALUE
+//        } else {
+//            cseqVal++
+//        }
+//        _cseq.value = cseqVal
+//        lastCseqUpdate.value = kotlin.time.Clock.System.now().toEpochMilliseconds()
+//        log.d(TAG) { "CSeq incremented to $cseqVal" }
+//        return cseqVal
+//    }
+//
+//
+//    @OptIn(ExperimentalTime::class)
+//    suspend fun resetCSeq() = cseqMutex.withLock {
+//        _cseq.value = MIN_CSEQ_VALUE
+//        lastCseqUpdate.value = kotlin.time.Clock.System.now().toEpochMilliseconds()
+//        log.d(TAG) { "CSeq reset for ${getAccountIdentity()}" }
+//    }
+//
+//    @OptIn(ExperimentalTime::class)
+//    suspend fun resetAuthState() = accountMutex.withLock {
+//        authRetryCount.value = 0
+//        challengeNonce.value = null
+//        authorizationHeader.value = null
+//        realm.value = null
+//        method.value = null
+//        lastAuthReset.value = kotlin.time.Clock.System.now().toEpochMilliseconds()
+//        log.d(TAG) { "Auth state reset" }
+//    }
+//
+//    /**
+//     * NUEVO: Actualiza CSeq desde fuente externa (ej. mensaje SIP recibido)
+//     * Solo actualiza si el nuevo valor es mayor que el actual
+//     */
+//    @OptIn(ExperimentalTime::class)
+//    suspend fun updateCSeqFromExternal(newCSeq: Int, source: String = "external") = cseqMutex.withLock {
+//        try {
+//            // Validar que el nuevo valor es válido
+//            if (newCSeq !in MIN_CSEQ_VALUE..MAX_CSEQ_VALUE) {
+//                log.w(tag = TAG) { "Invalid external CSeq $newCSeq from $source for ${getAccountIdentity()}" }
+//                return@withLock false
+//            }
+//
+//            // Solo actualizar si es mayor (para mantener secuencia correcta)
+//            if (newCSeq > _cseq.value) {
+//                val oldCSeq = _cseq.value
+//                _cseq.value = newCSeq
+//                lastCseqUpdate.value = kotlin.time.Clock.System.now().toEpochMilliseconds()
+//
+//                log.d(tag = TAG) { "CSeq updated from $source: $oldCSeq -> ${_cseq.value} for ${getAccountIdentity()}" }
+//                return@withLock true
+//            } else {
+//                log.d(tag = TAG) { "External CSeq $newCSeq from $source <= current ${_cseq.value}, not updating" }
+//                return@withLock false
+//            }
+//
+//        } catch (e: Exception) {
+//            log.e(tag = TAG) { "Error updating CSeq from $source: ${e.message}" }
+//            return@withLock false
+//        }
+//    }
+//
+//    @OptIn(ExperimentalTime::class)
+//    suspend fun resetCallState() = accountMutex.withLock {
+//        isCallConnected.value = false
+//        hasIncomingCall.value = false
+//        callStartTime.value = 0L
+//        currentCallData.value = null
+//        lastCallReset.value = kotlin.time.Clock.System.now().toEpochMilliseconds()
+//        log.d(TAG) { "Call state reset" }
+//    }
+//
+//    suspend fun resetAllState() = accountMutex.withLock {
+//        resetCallState()
+//        resetAuthState()
+//        resetCSeq()
+//        isRegistered.value = false
+//        reconnectCount.value = 0
+//        log.d(TAG) { "Account state fully reset" }
+//    }
+//
+//    fun getAccountIdentity(): String = "$username@$domain"
+//
+//    @OptIn(ExperimentalTime::class)
+//    fun generateCallId(): String {
+//        val timestamp = kotlin.time.Clock.System.now().toEpochMilliseconds()
+//        val randomPart = (1..16).joinToString("") { Random.nextInt(16).toString(16) }
+//        return "${randomPart}_$timestamp@$domain"
+//    }
+//
+//    suspend fun cleanup() = accountMutex.withLock {
+//        reconnectionJob.value?.cancel()
+//
+////        webSocketClient.value?.let { ws ->
+////            try {
+////                ws.stopPingTimer()
+////                ws.stopRegistrationRenewalTimer()
+////                ws.close()
+////            } catch (e: Exception) {
+////                log.w(TAG) { "Error closing WS: ${e.message}" }
+////            }
+////        }
+////        webSocketClient.value = null
+//        resetAllState()
+//        log.d(TAG) { "Cleanup complete for ${getAccountIdentity()}" }
+//    }
+//
+//    override fun toString(): String {
+//        return "AccountInfo(${getAccountIdentity()}, reg=${isRegistered.value}, cseq=${_cseq.value}})"
+//    }
+//}
+////fun AccountInfo.isWebSocketHealthy(): Boolean {
+////    val ws = this.webSocketClient.value ?: return false
+////    return ws.isConnected() && this.isRegistered.value
+////}
+
 class AccountInfo(
     val username: String,
     var password: String,
@@ -23,11 +208,16 @@ class AccountInfo(
     private val accountMutex = Mutex()
     private val cseqMutex = Mutex()
 
+    // ✅ NUEVO: Identificadores locales para el Contact header WebSocket
+    // Se generan una vez por sesión y NO cambian hasta reconexión
+    val localContactHost: String = generateLocalHost()
+    val localContactId: String = generateShortId()
+
     // 🔁 Reemplazo de atomic por MutableStateFlow
     val reconnectCount = MutableStateFlow(0)
-    val callId = MutableStateFlow<String?>(null)
-    val fromTag = MutableStateFlow<String?>(null)
-    val toTag = MutableStateFlow<String?>(null)
+    var callId = MutableStateFlow<String?>(null)
+    var fromTag = MutableStateFlow<String?>(null)
+    var toTag = MutableStateFlow<String?>(null)
     private val _cseq = MutableStateFlow(1)
     fun canRegister(): Boolean = username.isNotEmpty() && password.isNotEmpty() && domain.isNotEmpty()
 
@@ -45,6 +235,21 @@ class AccountInfo(
     val authRetryCount = MutableStateFlow(0)
     val method = MutableStateFlow<String?>(null)
 
+    /**
+     * Tipo de challenge recibido del servidor (401 o 407).
+     * Determina si el header de respuesta debe ser Authorization o Proxy-Authorization.
+     * Se actualiza en cada challenge de autenticacion.
+     */
+    val lastChallengeType = MutableStateFlow(com.eddyslarez.kmpsiprtc.services.sip.AuthenticationHandler.ChallengeType.WWW_AUTHENTICATE)
+
+    /**
+     * Identificador unico de instancia para RFC 5626 (outbound) y RFC 5627 (GRUU).
+     * Persiste durante toda la vida de la aplicacion para permitir a OpenSIPS
+     * identificar este dispositivo de forma unica y reemplazar Contact correctamente
+     * cuando max_contacts=1.
+     */
+    val instanceId: String = "\"<urn:uuid:${generateUUID()}>\"" 
+
     val useWebRTCFormat = MutableStateFlow(false)
     val remoteSdp = MutableStateFlow<String?>(null)
     val iceUfrag = MutableStateFlow<String?>(null)
@@ -52,7 +257,6 @@ class AccountInfo(
     val dtlsFingerprint = MutableStateFlow<String?>(null)
     val setupRole = MutableStateFlow<String?>(null)
 
-    // 👇 Este es el cambio que te interesa
     val currentCallData = MutableStateFlow<CallData?>(null)
 
     val isRegistered = MutableStateFlow(false)
@@ -74,9 +278,42 @@ class AccountInfo(
         private const val MAX_CSEQ_VALUE = Int.MAX_VALUE
         private const val MIN_CSEQ_VALUE = 1
         private const val CSEQ_RESET_THRESHOLD = MAX_CSEQ_VALUE - 1000
+
+        // Generadores de identificadores locales unicos por sesion WebSocket
+        fun generateLocalHost(): String {
+            val chars = ('a'..'z')
+            val random = (0..11).map { chars.random() }.joinToString("")
+            return "$random.invalid"
+        }
+
+        fun generateShortId(): String {
+            val chars = (('a'..'z') + ('0'..'9'))
+            return (0..7).map { chars.random() }.joinToString("")
+        }
+
+        /**
+         * Genera un UUID v4 compatible con RFC 4122.
+         * Usado para +sip.instance (RFC 5626) que identifica
+         * de forma unica este dispositivo ante OpenSIPS.
+         */
+        fun generateUUID(): String {
+            val hexChars = "0123456789abcdef"
+            fun randomHex(count: Int): String =
+                (1..count).map { hexChars[Random.nextInt(hexChars.length)] }.joinToString("")
+
+            // Formato: 8-4-4-4-12 con version 4 y variant bits
+            val part1 = randomHex(8)
+            val part2 = randomHex(4)
+            val part3 = "4${randomHex(3)}"                      // version 4
+            val variant = "89ab"[Random.nextInt(4)]              // variant bits
+            val part4 = "$variant${randomHex(3)}"
+            val part5 = randomHex(12)
+            return "$part1-$part2-$part3-$part4-$part5"
+        }
     }
 
-    val cseq: Int get() = _cseq.value
+    val cseq: Int
+        get() = _cseq.value
 
     @OptIn(ExperimentalTime::class)
     suspend fun incrementCSeq(): Int = cseqMutex.withLock {
@@ -93,7 +330,6 @@ class AccountInfo(
         return cseqVal
     }
 
-
     @OptIn(ExperimentalTime::class)
     suspend fun resetCSeq() = cseqMutex.withLock {
         _cseq.value = MIN_CSEQ_VALUE
@@ -108,36 +344,28 @@ class AccountInfo(
         authorizationHeader.value = null
         realm.value = null
         method.value = null
+        lastChallengeType.value = com.eddyslarez.kmpsiprtc.services.sip.AuthenticationHandler.ChallengeType.WWW_AUTHENTICATE
         lastAuthReset.value = kotlin.time.Clock.System.now().toEpochMilliseconds()
         log.d(TAG) { "Auth state reset" }
     }
 
-    /**
-     * NUEVO: Actualiza CSeq desde fuente externa (ej. mensaje SIP recibido)
-     * Solo actualiza si el nuevo valor es mayor que el actual
-     */
     @OptIn(ExperimentalTime::class)
     suspend fun updateCSeqFromExternal(newCSeq: Int, source: String = "external") = cseqMutex.withLock {
         try {
-            // Validar que el nuevo valor es válido
             if (newCSeq !in MIN_CSEQ_VALUE..MAX_CSEQ_VALUE) {
                 log.w(tag = TAG) { "Invalid external CSeq $newCSeq from $source for ${getAccountIdentity()}" }
                 return@withLock false
             }
-
-            // Solo actualizar si es mayor (para mantener secuencia correcta)
             if (newCSeq > _cseq.value) {
                 val oldCSeq = _cseq.value
                 _cseq.value = newCSeq
                 lastCseqUpdate.value = kotlin.time.Clock.System.now().toEpochMilliseconds()
-
                 log.d(tag = TAG) { "CSeq updated from $source: $oldCSeq -> ${_cseq.value} for ${getAccountIdentity()}" }
                 return@withLock true
             } else {
                 log.d(tag = TAG) { "External CSeq $newCSeq from $source <= current ${_cseq.value}, not updating" }
                 return@withLock false
             }
-
         } catch (e: Exception) {
             log.e(tag = TAG) { "Error updating CSeq from $source: ${e.message}" }
             return@withLock false
@@ -174,17 +402,6 @@ class AccountInfo(
 
     suspend fun cleanup() = accountMutex.withLock {
         reconnectionJob.value?.cancel()
-
-//        webSocketClient.value?.let { ws ->
-//            try {
-//                ws.stopPingTimer()
-//                ws.stopRegistrationRenewalTimer()
-//                ws.close()
-//            } catch (e: Exception) {
-//                log.w(TAG) { "Error closing WS: ${e.message}" }
-//            }
-//        }
-//        webSocketClient.value = null
         resetAllState()
         log.d(TAG) { "Cleanup complete for ${getAccountIdentity()}" }
     }
@@ -193,7 +410,3 @@ class AccountInfo(
         return "AccountInfo(${getAccountIdentity()}, reg=${isRegistered.value}, cseq=${_cseq.value}})"
     }
 }
-//fun AccountInfo.isWebSocketHealthy(): Boolean {
-//    val ws = this.webSocketClient.value ?: return false
-//    return ws.isConnected() && this.isRegistered.value
-//}

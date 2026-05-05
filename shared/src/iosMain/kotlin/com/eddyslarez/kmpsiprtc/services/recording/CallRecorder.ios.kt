@@ -2,33 +2,47 @@ package com.eddyslarez.kmpsiprtc.services.recording
 
 import com.eddyslarez.kmpsiprtc.data.models.RecordingResult
 import com.eddyslarez.kmpsiprtc.platform.log
+import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 import com.eddyslarez.kmpsiprtc.utils.Lock
-import kotlinx.cinterop.*
-import kotlinx.coroutines.*
 import com.eddyslarez.kmpsiprtc.utils.synchronized
+import kotlinx.cinterop.*
 import platform.AVFAudio.*
 import platform.Foundation.*
-import platform.darwin.NSObject
+import kotlinx.coroutines.*
 import kotlin.concurrent.Volatile
 
 /**
  * Implementación de CallRecorder para iOS
  */
+@OptIn(ExperimentalForeignApi::class)
 class IosCallRecorder : CallRecorder {
     private val TAG = "IosCallRecorder"
 
     // Configuración de audio
-    private val SAMPLE_RATE = 8000.0 // 8kHz
+    private val SAMPLE_RATE = 48000.0 // 48kHz (WebRTC remote audio rate)
     private val CHANNELS = 1 // Mono
     private val BIT_DEPTH = 16
 
-    // Buffers de audio
+    // Buffers de audio con protección thread-safe
     private val localAudioBuffer = mutableListOf<ByteArray>()
     private val remoteAudioBuffer = mutableListOf<ByteArray>()
 
-    // Control de grabación
+    // Formato real del audio remoto (detectado en primer callback)
+    @Volatile
+    private var remoteSampleRate: Int = 48000
+
+    // Locks simples para callbacks de audio de alta frecuencia
+    private val localBufferLock = Lock()
+    private val remoteBufferLock = Lock()
+
+    // Listener para streaming en tiempo real
+    private var audioStreamListener: AudioStreamListener? = null
+
+    // Control de grabación y streaming
     @Volatile
     private var isRecording = false
+    @Volatile
+    private var isStreamingActive = false
     private var recordingJob: Job? = null
     private val recordingScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
@@ -36,8 +50,13 @@ class IosCallRecorder : CallRecorder {
     private var audioEngine: AVAudioEngine? = null
     private var currentCallId: String? = null
 
+    @Volatile
+    private var localNumber: String = ""
+    @Volatile
+    private var remoteNumber: String = ""
+    private var audioChunkListener: AudioChunkListener? = null
+
     // Directorio de salida
-    @OptIn(ExperimentalForeignApi::class)
     private val outputDir: String by lazy {
         val documentsPath = NSSearchPathForDirectoriesInDomains(
             NSDocumentDirectory,
@@ -59,7 +78,26 @@ class IosCallRecorder : CallRecorder {
         recordingsPath
     }
 
-    override fun startRecording(callId: String) {
+    private fun sanitizeNumber(number: String): String =
+        number.replace("+", "").replace(":", "-").replace("/", "-").replace(" ", "")
+
+    private fun sanitizeCallId(callId: String): String =
+        callId.replace(Regex("[^A-Za-z0-9._-]"), "-")
+
+    private fun buildFilePrefix(callId: String): String {
+        val safeCallId = sanitizeCallId(callId)
+        val local = sanitizeNumber(localNumber)
+        val remote = sanitizeNumber(remoteNumber)
+        return if (local.isNotEmpty() && remote.isNotEmpty()) {
+            "${safeCallId}__${local}_to_${remote}"
+        } else {
+            safeCallId
+        }
+    }
+
+    override fun startRecording(callId: String, localNumber: String, remoteNumber: String) {
+        this.localNumber = localNumber
+        this.remoteNumber = remoteNumber
         if (isRecording) {
             log.w(TAG) { "⚠️ Recording already in progress" }
             return
@@ -71,8 +109,8 @@ class IosCallRecorder : CallRecorder {
         isRecording = true
 
         // Limpiar buffers anteriores
-        localAudioBuffer.clear()
-        remoteAudioBuffer.clear()
+        synchronized(localBufferLock) { localAudioBuffer.clear() }
+        synchronized(remoteBufferLock) { remoteAudioBuffer.clear() }
 
         // Iniciar captura del micrófono
         startMicrophoneCapture()
@@ -80,7 +118,6 @@ class IosCallRecorder : CallRecorder {
         log.d(TAG) { "✅ Recording started" }
     }
 
-    @OptIn(ExperimentalForeignApi::class)
     private fun startMicrophoneCapture() {
         recordingJob = recordingScope.launch {
             try {
@@ -96,14 +133,17 @@ class IosCallRecorder : CallRecorder {
                 audioEngine = AVAudioEngine()
                 val inputNode = audioEngine?.inputNode ?: return@launch
 
-                val format = inputNode.outputFormatForBus(0u)
+                // Solicitar formato 48kHz explícitamente para que iOS resamplee si el hardware usa otra rate
+                val format = AVAudioFormat(standardFormatWithSampleRate = SAMPLE_RATE, channels = CHANNELS.toUInt())
 
                 inputNode.installTapOnBus(
                     bus = 0u,
-                    bufferSize = 1024u,
+                    bufferSize = 4096u,
                     format = format
                 ) { buffer, _ ->
-                    buffer?.let { captureAudioBuffer(it) }
+                    buffer?.let {
+                        captureAudioBuffer(it)
+                    }
                 }
 
                 audioEngine?.prepare()
@@ -113,30 +153,52 @@ class IosCallRecorder : CallRecorder {
 
             } catch (e: Exception) {
                 log.e(TAG) { "❌ Error capturing microphone: ${e.message}" }
+                e.printStackTrace()
             }
         }
     }
 
-    @OptIn(ExperimentalForeignApi::class, InternalCoroutinesApi::class)
     private fun captureAudioBuffer(buffer: AVAudioPCMBuffer) {
-        if (!isRecording) return
+        if (!isRecording && !isStreamingActive) return
 
-        val frameLength = buffer.frameLength.toInt()
-        if (frameLength == 0) return
+        try {
+            val frameLength = buffer.frameLength.toInt()
+            if (frameLength == 0) return
 
-        val channelData = buffer.floatChannelData ?: return
-        val data = channelData[0] ?: return
+            val channelData = buffer.floatChannelData ?: return
+            val data = channelData[0] ?: return
 
-        // Convertir float samples a PCM 16-bit
-        val byteArray = ByteArray(frameLength * 2)
-        for (i in 0 until frameLength) {
-            val sample = (data[i] * 32767.0f).toInt().coerceIn(-32768, 32767).toShort()
-            byteArray[i * 2] = (sample.toInt() and 0xFF).toByte()
-            byteArray[i * 2 + 1] = ((sample.toInt() shr 8) and 0xFF).toByte()
-        }
+            // Convertir float samples a PCM 16-bit
+            val byteArray = ByteArray(frameLength * 2)
+            for (i in 0 until frameLength) {
+                val sample = (data[i] * 32767.0f).toInt().coerceIn(-32768, 32767).toShort()
+                byteArray[i * 2] = (sample.toInt() and 0xFF).toByte()
+                byteArray[i * 2 + 1] = ((sample.toInt() shr 8) and 0xFF).toByte()
+            }
 
-        synchronized(localAudioBuffer as Lock) {
-            localAudioBuffer.add(byteArray)
+            // Guardar en buffer si está grabando
+            if (isRecording) {
+                synchronized(localBufferLock) {
+                    localAudioBuffer.add(byteArray)
+                }
+                // Emitir chunk para transcripción en tiempo real
+                audioChunkListener?.onLocalChunk(byteArray, SAMPLE_RATE.toInt())
+            }
+
+            // Enviar al listener si está haciendo streaming
+            if (isStreamingActive && audioStreamListener != null) {
+                try {
+                    audioStreamListener?.onLocalAudioData(
+                        byteArray, SAMPLE_RATE.toInt(), CHANNELS, BIT_DEPTH
+                    )
+                } catch (e: Exception) {
+                    log.e(TAG) { "Error sending local audio stream: ${e.message}" }
+                    audioStreamListener?.onStreamError(e.message ?: "Error sending local audio")
+                }
+            }
+        } catch (e: Exception) {
+            log.e(TAG) { "❌ Error processing audio buffer: ${e.message}" }
+            e.printStackTrace()
         }
     }
 
@@ -160,14 +222,21 @@ class IosCallRecorder : CallRecorder {
         val callId = currentCallId ?: "unknown"
         val timestamp = NSDate().timeIntervalSince1970.toLong() * 1000
 
-        // Guardar archivos
-        val localFile = saveAudioToFile(localAudioBuffer, "${callId}_local_${timestamp}.wav")
-        val remoteFile = saveAudioToFile(remoteAudioBuffer, "${callId}_remote_${timestamp}.wav")
-        val mixedFile = mixAndSaveAudio(localAudioBuffer, remoteAudioBuffer, "${callId}_mixed_${timestamp}.wav")
+        // Copiar buffers de forma segura antes de guardar
+        val localCopy = synchronized(localBufferLock) { localAudioBuffer.toList() }
+        val remoteCopy = synchronized(remoteBufferLock) { remoteAudioBuffer.toList() }
+
+        // Guardar archivos - local usa SAMPLE_RATE del mic, remote usa remoteSampleRate detectado
+        val prefix = buildFilePrefix(callId)
+        val localFile = saveAudioToFile(localCopy, "${prefix}_local_${timestamp}.wav", SAMPLE_RATE.toInt())
+        val remoteFile = saveAudioToFile(remoteCopy, "${prefix}_remote_${timestamp}.wav", remoteSampleRate)
+        val mixedFile = mixAndSaveAudio(localCopy, remoteCopy, "${prefix}_mixed_${timestamp}.wav")
 
         // Limpiar buffers
-        localAudioBuffer.clear()
-        remoteAudioBuffer.clear()
+        synchronized(localBufferLock) { localAudioBuffer.clear() }
+        synchronized(remoteBufferLock) { remoteAudioBuffer.clear() }
+        localNumber = ""
+        remoteNumber = ""
         currentCallId = null
 
         log.d(TAG) { "✅ Recording stopped and saved" }
@@ -178,22 +247,158 @@ class IosCallRecorder : CallRecorder {
         RecordingResult(localFile, remoteFile, mixedFile)
     }
 
-    @OptIn(InternalCoroutinesApi::class)
-    override fun captureRemoteAudio(audioData: ByteArray) {
-        if (!isRecording) return
+    override suspend fun forceFlushAndSave(): RecordingResult? = withContext(Dispatchers.Default) {
+        if (!isRecording) return@withContext null
+        val callId = currentCallId ?: return@withContext null
+        val timestamp = NSDate().timeIntervalSince1970.toLong() * 1000
 
-        synchronized(remoteAudioBuffer as  Lock) {
-            remoteAudioBuffer.add(audioData.copyOf())
+        val localCopy = synchronized(localBufferLock) { localAudioBuffer.toList() }
+        val remoteCopy = synchronized(remoteBufferLock) { remoteAudioBuffer.toList() }
+
+        val prefix = buildFilePrefix(callId)
+        val localFile = saveAudioToFile(localCopy, "${prefix}_local_${timestamp}.wav", SAMPLE_RATE.toInt())
+        val remoteFile = saveAudioToFile(remoteCopy, "${prefix}_remote_${timestamp}.wav", remoteSampleRate)
+        val mixedFile = mixAndSaveAudio(localCopy, remoteCopy, "${prefix}_mixed_${timestamp}.wav")
+
+        log.d(TAG) { "⚡ forceFlushAndSave: local=$localFile, remote=$remoteFile, mixed=$mixedFile" }
+        RecordingResult(localFile, remoteFile, mixedFile)
+    }
+
+    override fun captureRemoteAudio(
+        audioData: ByteArray,
+        sampleRate: Int,
+        channels: Int,
+        bitsPerSample: Int
+    ) {
+        if (!isRecording && !isStreamingActive) return
+
+        // Detectar sample rate real del audio remoto
+        remoteSampleRate = sampleRate
+
+        // Normalizar a mono 16-bit PCM
+        val normalized = normalizeToMono16bit(audioData, channels, bitsPerSample)
+
+        // Emitir chunk para transcripción en tiempo real
+        audioChunkListener?.onRemoteChunk(normalized, sampleRate)
+
+        // Guardar en buffer si está grabando
+        if (isRecording) {
+            synchronized(remoteBufferLock) {
+                remoteAudioBuffer.add(normalized)
+            }
+        }
+
+        // Enviar al listener si está haciendo streaming
+        if (isStreamingActive && audioStreamListener != null) {
+            try {
+                audioStreamListener?.onRemoteAudioData(
+                    normalized, sampleRate, 1, 16
+                )
+            } catch (e: Exception) {
+                log.e(TAG) { "Error sending remote audio stream: ${e.message}" }
+                audioStreamListener?.onStreamError(e.message ?: "Error sending remote audio")
+            }
         }
     }
 
+    /**
+     * Normaliza audio PCM a mono 16-bit little-endian.
+     */
+    private fun normalizeToMono16bit(data: ByteArray, channels: Int, bitsPerSample: Int): ByteArray {
+        if (channels == 1 && bitsPerSample == 16) return data.copyOf()
+
+        val bytesPerSample = bitsPerSample / 8
+        val frameSize = bytesPerSample * channels
+        val frameCount = data.size / frameSize
+        val output = ByteArray(frameCount * 2)
+        var outIdx = 0
+
+        for (f in 0 until frameCount) {
+            var sum = 0L
+            for (ch in 0 until channels) {
+                val offset = f * frameSize + ch * bytesPerSample
+                val sample16: Int = when (bitsPerSample) {
+                    16 -> {
+                        val lo = data[offset].toInt() and 0xFF
+                        val hi = data[offset + 1].toInt()
+                        (hi shl 8) or lo
+                    }
+                    32 -> {
+                        val b0 = data[offset].toInt() and 0xFF
+                        val b1 = data[offset + 1].toInt() and 0xFF
+                        val b2 = data[offset + 2].toInt() and 0xFF
+                        val b3 = data[offset + 3].toInt()
+                        val raw = (b3 shl 24) or (b2 shl 16) or (b1 shl 8) or b0
+                        val asFloat = Float.fromBits(raw)
+                        if (asFloat in -1.1f..1.1f) {
+                            (asFloat * 32767f).toInt().coerceIn(-32768, 32767)
+                        } else {
+                            (raw shr 16)
+                        }
+                    }
+                    else -> 0
+                }
+                sum += sample16
+            }
+            val mono = (sum / channels).coerceIn(-32768, 32767).toInt()
+            output[outIdx++] = (mono and 0xFF).toByte()
+            output[outIdx++] = ((mono shr 8) and 0xFF).toByte()
+        }
+        return output
+    }
+
     override fun isRecording(): Boolean = isRecording
+
+    // ==================== STREAMING EN TIEMPO REAL ====================
+
+    override fun setAudioStreamListener(listener: AudioStreamListener?) {
+        audioStreamListener = listener
+    }
+
+    override fun setAudioChunkListener(listener: AudioChunkListener?) {
+        audioChunkListener = listener
+    }
+
+    override fun startStreaming(callId: String) {
+        if (isStreamingActive) {
+            log.w(TAG) { "⚠️ Streaming already in progress" }
+            return
+        }
+
+        log.d(TAG) { "🎙️ Starting audio streaming for: $callId" }
+        currentCallId = callId
+        isStreamingActive = true
+
+        // Iniciar captura del micrófono si no está ya capturando
+        if (!isRecording) {
+            startMicrophoneCapture()
+        }
+
+        log.d(TAG) { "✅ Audio streaming started" }
+    }
+
+    override fun stopStreaming() {
+        if (!isStreamingActive) return
+        log.d(TAG) { "🛑 Stopping audio streaming..." }
+        isStreamingActive = false
+
+        // Si no está grabando tampoco, detener la captura del micrófono
+        if (!isRecording) {
+            audioEngine?.inputNode?.removeTapOnBus(0u)
+            audioEngine?.stop()
+            audioEngine = null
+            recordingJob?.cancel()
+        }
+
+        log.d(TAG) { "✅ Audio streaming stopped" }
+    }
+
+    override fun isStreaming(): Boolean = isStreamingActive
 
     override fun getCurrentCallId(): String? = currentCallId
 
     override fun getRecordingsDirectory(): String = outputDir
 
-    @OptIn(ExperimentalForeignApi::class)
     override fun getAllRecordings(): List<RecordingFileInfo> {
         val fileManager = NSFileManager.defaultManager
         val files = fileManager.contentsOfDirectoryAtPath(outputDir, error = null) as? List<*>
@@ -225,7 +430,6 @@ class IosCallRecorder : CallRecorder {
         } ?: emptyList()
     }
 
-    @OptIn(ExperimentalForeignApi::class)
     override fun deleteRecording(filePath: String): Boolean {
         return try {
             val fileManager = NSFileManager.defaultManager
@@ -236,7 +440,6 @@ class IosCallRecorder : CallRecorder {
         }
     }
 
-    @OptIn(ExperimentalForeignApi::class)
     override fun deleteAllRecordings(): Boolean {
         return try {
             val fileManager = NSFileManager.defaultManager
@@ -255,23 +458,21 @@ class IosCallRecorder : CallRecorder {
     override fun dispose() {
         log.d(TAG) { "Disposing CallRecorder" }
         isRecording = false
+        isStreamingActive = false
+        audioStreamListener = null
+        audioChunkListener = null
         audioEngine?.stop()
         audioEngine = null
         recordingJob?.cancel()
         recordingScope.cancel()
-        localAudioBuffer.clear()
-        remoteAudioBuffer.clear()
+
+        synchronized(localBufferLock) { localAudioBuffer.clear() }
+        synchronized(remoteBufferLock) { remoteAudioBuffer.clear() }
     }
 
     // ==================== GUARDADO DE ARCHIVOS ====================
 
-    @OptIn(ExperimentalForeignApi::class)
-    private fun saveAudioToFile(audioBuffer: List<ByteArray>, fileName: String): String? {
-        if (audioBuffer.isEmpty()) {
-            log.w(TAG) { "⚠️ Empty audio buffer for $fileName" }
-            return null
-        }
-
+    private fun saveAudioToFile(audioBuffer: List<ByteArray>, fileName: String, sampleRate: Int = SAMPLE_RATE.toInt()): String? {
         return try {
             val filePath = "$outputDir/$fileName"
             val totalAudioLen = audioBuffer.sumOf { it.size }
@@ -279,41 +480,47 @@ class IosCallRecorder : CallRecorder {
 
             val data = NSMutableData()
 
-            // Escribir encabezado WAV
-            val header = createWavHeader(totalAudioLen.toLong(), totalDataLen.toLong())
-            data.appendBytes(header.refTo(0) as COpaquePointer?, header.size.toULong())
+            // Escribir encabezado WAV con sample rate real
+            val header = createWavHeader(totalAudioLen.toLong(), totalDataLen.toLong(), sampleRate.toLong())
+            header.usePinned { pinned ->
+                data.appendBytes(pinned.addressOf(0), header.size.toULong())
+            }
 
             // Escribir datos de audio
             audioBuffer.forEach { chunk ->
-                data.appendBytes(chunk.refTo(0) as COpaquePointer?, chunk.size.toULong())
+                chunk.usePinned { pinned ->
+                    data.appendBytes(pinned.addressOf(0), chunk.size.toULong())
+                }
             }
 
             data.writeToFile(filePath, atomically = true)
 
-            log.d(TAG) { "✅ Saved: $filePath (${data.length / 1024u}KB)" }
+            log.d(TAG) { "✅ Saved: $filePath (${data.length / 1024u}KB) @ ${sampleRate}Hz" }
             filePath
         } catch (e: Exception) {
             log.e(TAG) { "❌ Error saving audio: ${e.message}" }
+            e.printStackTrace()
             null
         }
     }
 
-    @OptIn(ExperimentalForeignApi::class)
     private fun mixAndSaveAudio(
         localBuffer: List<ByteArray>,
         remoteBuffer: List<ByteArray>,
         fileName: String
     ): String? {
-        if (localBuffer.isEmpty() && remoteBuffer.isEmpty()) {
-            log.w(TAG) { "⚠️ Both buffers are empty" }
-            return null
-        }
-
         return try {
             val filePath = "$outputDir/$fileName"
 
             val localSamples = bufferToSamples(localBuffer)
-            val remoteSamples = bufferToSamples(remoteBuffer)
+            var remoteSamples = bufferToSamples(remoteBuffer)
+            val localRate = SAMPLE_RATE.toInt()
+
+            // Si los sample rates difieren, resamplear el remoto al rate local
+            if (remoteSampleRate != localRate && remoteSamples.isNotEmpty()) {
+                remoteSamples = resample(remoteSamples, remoteSampleRate, localRate)
+            }
+
             val maxLength = maxOf(localSamples.size, remoteSamples.size)
             val mixedSamples = ShortArray(maxLength)
 
@@ -330,21 +537,44 @@ class IosCallRecorder : CallRecorder {
             val totalDataLen = totalAudioLen + 36
 
             val data = NSMutableData()
-            val header = createWavHeader(totalAudioLen.toLong(), totalDataLen.toLong())
-            data.appendBytes(header.refTo(0) as COpaquePointer?, header.size.toULong())
-            data.appendBytes(mixedBytes.refTo(0) as COpaquePointer?, mixedBytes.size.toULong())
+            val header = createWavHeader(totalAudioLen.toLong(), totalDataLen.toLong(), localRate.toLong())
+            header.usePinned { pinned ->
+                data.appendBytes(pinned.addressOf(0), header.size.toULong())
+            }
+            mixedBytes.usePinned { pinned ->
+                data.appendBytes(pinned.addressOf(0), mixedBytes.size.toULong())
+            }
             data.writeToFile(filePath, atomically = true)
 
             log.d(TAG) { "✅ Mixed audio saved: $filePath (${data.length / 1024u}KB)" }
             filePath
         } catch (e: Exception) {
             log.e(TAG) { "❌ Error mixing audio: ${e.message}" }
+            e.printStackTrace()
             null
         }
     }
 
-    private fun createWavHeader(totalAudioLen: Long, totalDataLen: Long): ByteArray {
-        val sampleRate = SAMPLE_RATE.toLong()
+    /**
+     * Resample lineal simple de samples a un nuevo sample rate
+     */
+    private fun resample(samples: ShortArray, fromRate: Int, toRate: Int): ShortArray {
+        if (fromRate == toRate || samples.isEmpty()) return samples
+        val ratio = fromRate.toDouble() / toRate.toDouble()
+        val newLength = (samples.size / ratio).toInt()
+        val result = ShortArray(newLength)
+        for (i in result.indices) {
+            val srcPos = i * ratio
+            val srcIndex = srcPos.toInt()
+            val frac = srcPos - srcIndex
+            val s0 = samples[srcIndex.coerceIn(0, samples.lastIndex)].toInt()
+            val s1 = samples[(srcIndex + 1).coerceIn(0, samples.lastIndex)].toInt()
+            result[i] = (s0 + (s1 - s0) * frac).toInt().coerceIn(-32768, 32767).toShort()
+        }
+        return result
+    }
+
+    private fun createWavHeader(totalAudioLen: Long, totalDataLen: Long, sampleRate: Long = SAMPLE_RATE.toLong()): ByteArray {
         val channels = CHANNELS
         val byteRate = (16 * sampleRate * channels / 8)
 
@@ -366,7 +596,7 @@ class IosCallRecorder : CallRecorder {
             ((byteRate shr 8) and 0xff).toByte(),
             ((byteRate shr 16) and 0xff).toByte(),
             ((byteRate shr 24) and 0xff).toByte(),
-            (2 * 16 / 8).toByte(), 0, 16, 0,
+            (CHANNELS * BIT_DEPTH / 8).toByte(), 0, BIT_DEPTH.toByte(), 0,
             'd'.code.toByte(), 'a'.code.toByte(), 't'.code.toByte(), 'a'.code.toByte(),
             (totalAudioLen and 0xff).toByte(),
             ((totalAudioLen shr 8) and 0xff).toByte(),

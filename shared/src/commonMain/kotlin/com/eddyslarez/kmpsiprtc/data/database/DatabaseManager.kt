@@ -168,7 +168,9 @@ class DatabaseManager private constructor() {
         domain: String,
         displayName: String? = null,
         pushToken: String? = null,
-        pushProvider: String? = null
+        pushProvider: String? = null,
+        incomingRingtoneUri: String? = null,
+        outgoingRingtoneUri: String? = null
     ): SipAccountEntity {
         return repository.createOrUpdateAccount(
             username = username,
@@ -176,7 +178,23 @@ class DatabaseManager private constructor() {
             domain = domain,
             displayName = displayName,
             pushToken = pushToken,
-            pushProvider = pushProvider
+            pushProvider = pushProvider,
+            incomingRingtoneUri = incomingRingtoneUri,
+            outgoingRingtoneUri = outgoingRingtoneUri
+        )
+    }
+
+    suspend fun updateAccountRingtoneUris(
+        username: String,
+        domain: String,
+        incomingUri: String?,
+        outgoingUri: String?
+    ) {
+        repository.updateAccountRingtoneUris(
+            username = username,
+            domain = domain,
+            incomingUri = incomingUri,
+            outgoingUri = outgoingUri
         )
     }
 

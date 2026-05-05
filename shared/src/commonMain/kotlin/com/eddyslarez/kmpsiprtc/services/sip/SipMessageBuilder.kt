@@ -5,18 +5,27 @@ import com.eddyslarez.kmpsiprtc.data.models.CallData
 import com.eddyslarez.kmpsiprtc.data.models.CallDirections
 import com.eddyslarez.kmpsiprtc.utils.generateId
 import com.eddyslarez.kmpsiprtc.platform.log
-
 object SipMessageBuilder {
-    // Constants
+    // Constantes SIP
     private const val SIP_VERSION = "SIP/2.0"
     private const val SIP_TRANSPORT = "WS"
     private const val MAX_FORWARDS = 70
-    private const val DEFAULT_EXPIRES = 604800
+    // Mantener registro largo para compatibilidad con modelos legacy y OpenSIPS.
+    // 259200s = 3 dias.
+    private const val DEFAULT_EXPIRES = 259200
     private const val UNREGISTER_EXPIRES = 0
     private const val TAG = "SipMessageBuilder"
 
     /**
      * Build REGISTER message with optional push notification support
+     *
+     * @param pushProduction true = entorno de produccion (APNS produccion, RuStore produccion),
+     *                       false = sandbox/debug.
+     *                       IMPORTANTE: Solo se envia ;pn-production=false cuando es DEBUG.
+     *                       En produccion NO se envia el parametro (OpenSIPS asume produccion
+     *                       por defecto cuando no recibe el parametro).
+     *                       Esto es estricto: OpenSIPS detecta cuando se envia production=false
+     *                       y enruta al sandbox, asi que en release simplemente se omite.
      */
     suspend fun buildRegisterMessage(
         accountInfo: AccountInfo,
@@ -24,23 +33,27 @@ object SipMessageBuilder {
         fromTag: String,
         isAppInBackground: Boolean,
         isAuthenticated: Boolean = false,
+        pushProduction: Boolean = true,
     ): String {
         val uri = "sip:${accountInfo.domain}"
         val builder = StringBuilder()
 
-        // Log para debug
         log.d(tag = TAG) {
             "Building REGISTER message:" +
                     "\nAccount: ${accountInfo.username}@${accountInfo.domain}" +
                     "\nIs App In Background: $isAppInBackground" +
                     "\nToken: ${accountInfo.token.value}" +
                     "\nProvider: ${accountInfo.provider.value}" +
-                    "\nUser Agent: ${accountInfo.userAgent.value}"
+                    "\nUser Agent: ${accountInfo.userAgent.value}" +
+                    "\nLocalContactHost: ${accountInfo.localContactHost}" +
+                    "\nLocalContactId: ${accountInfo.localContactId}" +
+                    "\nPush Production: $pushProduction"
         }
+
         val currentCSeq = accountInfo.incrementCSeq()
 
         builder.append("REGISTER $uri $SIP_VERSION\r\n")
-        builder.append("Via: $SIP_VERSION/$SIP_TRANSPORT ${accountInfo.domain};branch=z9hG4bK${generateId()}\r\n")
+        builder.append("Via: $SIP_VERSION/$SIP_TRANSPORT ${accountInfo.localContactHost};branch=z9hG4bK${generateId()}\r\n")
         builder.append("Max-Forwards: $MAX_FORWARDS\r\n")
         builder.append("From: <sip:${accountInfo.username}@${accountInfo.domain}>;tag=$fromTag\r\n")
         builder.append("To: <sip:${accountInfo.username}@${accountInfo.domain}>\r\n")
@@ -48,72 +61,120 @@ object SipMessageBuilder {
         builder.append("CSeq: $currentCSeq REGISTER\r\n")
         builder.append("User-Agent: ${accountInfo.userAgent.value}\r\n")
 
-        // Contact header based on mode
-        builder.append("Contact: <sip:${accountInfo.username}@${accountInfo.domain}")
+        builder.append("Contact: <sip:${accountInfo.localContactId}@${accountInfo.localContactHost}")
 
         if (isAppInBackground) {
-            log.d(tag = TAG) { "Adding push notification parameters to Contact header" }
+            log.d(tag = TAG) { "Adding push notification parameters to Contact header (pushProduction=$pushProduction)" }
+            // pn-prid y pn-provider son obligatorios para push (RFC 8599)
             builder.append(";pn-prid=${accountInfo.token.value};pn-provider=${accountInfo.provider.value}")
+
+            // ESTRICTO: Solo enviar pn-production=false en DEBUG.
+            // En RELEASE (pushProduction=true) NO enviar el parametro.
+            // OpenSIPS asume produccion por defecto cuando no recibe pn-production.
+            if (!pushProduction) {
+                builder.append(";pn-production=false")
+                log.d(tag = TAG) { "DEBUG mode: enviando pn-production=false" }
+            } else {
+                log.d(tag = TAG) { "RELEASE mode: omitiendo pn-production (OpenSIPS asume produccion)" }
+            }
         } else {
             log.d(tag = TAG) { "Building Contact header WITHOUT push notification parameters" }
         }
 
-        builder.append(";transport=ws>;expires=$DEFAULT_EXPIRES\r\n")
+        builder.append(";transport=ws;ob>")
+        builder.append(";+sip.instance=${accountInfo.instanceId}")
+
+        if (isAppInBackground) {
+            builder.append(";+sip.pnsreg")
+        }
+        builder.append(";expires=$DEFAULT_EXPIRES\r\n")
         builder.append("Expires: $DEFAULT_EXPIRES\r\n")
 
-        // Authorization if needed
+        // RFC 3261: Usar Authorization para 401, Proxy-Authorization para 407
         if (isAuthenticated && accountInfo.authorizationHeader.value != null) {
-            builder.append("Authorization: ${accountInfo.authorizationHeader.value}\r\n")
+            val headerName = AuthenticationHandler.getAuthHeaderName(accountInfo.lastChallengeType.value)
+            builder.append("$headerName: ${accountInfo.authorizationHeader.value}\r\n")
         }
 
         builder.append("Content-Length: 0\r\n\r\n")
 
         val finalMessage = builder.toString()
 
-        // Log del mensaje final para verificar
+        val includesPnPrid = finalMessage.contains(";pn-prid=")
+        val includesPnProduction = finalMessage.contains(";pn-production=")
+        val contactHeader = finalMessage
+            .lineSequence()
+            .firstOrNull { it.startsWith("Contact:", ignoreCase = true) }
+            ?: "Contact: <missing>"
+
         log.d(tag = TAG) {
-            "Final REGISTER message Contact header contains push params: ${
-                finalMessage.contains("pn-prid")
-            }"
+            "Final REGISTER for ${accountInfo.username}@${accountInfo.domain}: " +
+                "pn-prid=$includesPnPrid, pn-production=$includesPnProduction"
         }
+        log.d(tag = TAG) { contactHeader }
 
         return finalMessage
     }
 
-
     /**
      * Build authenticated REGISTER message
+     *
+     * @param pushProduction true = produccion (no se envia pn-production),
+     *                       false = sandbox/debug (se envia pn-production=false).
+     *                       Se pasa directamente a buildRegisterMessage.
      */
     suspend fun buildAuthenticatedRegisterMessage(
         accountInfo: AccountInfo,
-        isAppInBackground: Boolean
+        isAppInBackground: Boolean,
+        pushProduction: Boolean = true,
     ): String {
         return buildRegisterMessage(
             accountInfo = accountInfo,
             callId = accountInfo.callId.value ?: generateId(),
             fromTag = accountInfo.fromTag.value ?: generateId(),
             isAppInBackground = isAppInBackground,
-            isAuthenticated = true
+            isAuthenticated = true,
+            pushProduction = pushProduction,
         )
     }
 
-
     /**
-     * Build unregister message (expires=0)
+     * Construye mensaje UNREGISTER (Expires: 0) para desregistrar el Contact.
+     * IMPORTANTE para OpenSIPS con max_contacts=1: enviar UNREGISTER antes de
+     * re-registrar desde otra conexion evita "phantom registrations".
+     * Construido directamente (no con replace) para robustez.
      */
     suspend fun buildUnregisterMessage(
         accountInfo: AccountInfo,
         callId: String,
         fromTag: String
     ): String {
-        return buildRegisterMessage(
-            accountInfo = accountInfo,
-            callId = callId,
-            fromTag = fromTag,
-            isAppInBackground = false,
-            isAuthenticated = accountInfo.authorizationHeader.value != null
-        ).replace("Expires: $DEFAULT_EXPIRES", "Expires: $UNREGISTER_EXPIRES")
-            .replace("expires=$DEFAULT_EXPIRES", "expires=$UNREGISTER_EXPIRES")
+        val uri = "sip:${accountInfo.domain}"
+        val builder = StringBuilder()
+        val currentCSeq = accountInfo.incrementCSeq()
+
+        builder.append("REGISTER $uri $SIP_VERSION\r\n")
+        builder.append("Via: $SIP_VERSION/$SIP_TRANSPORT ${accountInfo.localContactHost};branch=z9hG4bK${generateId()}\r\n")
+        builder.append("Max-Forwards: $MAX_FORWARDS\r\n")
+        builder.append("From: <sip:${accountInfo.username}@${accountInfo.domain}>;tag=$fromTag\r\n")
+        builder.append("To: <sip:${accountInfo.username}@${accountInfo.domain}>\r\n")
+        builder.append("Call-ID: $callId\r\n")
+        builder.append("CSeq: $currentCSeq REGISTER\r\n")
+        builder.append("User-Agent: ${accountInfo.userAgent.value}\r\n")
+        builder.append("Contact: <sip:${accountInfo.localContactId}@${accountInfo.localContactHost};transport=ws;ob>")
+        builder.append(";+sip.instance=${accountInfo.instanceId}")
+        builder.append(";expires=$UNREGISTER_EXPIRES\r\n")
+        builder.append("Expires: $UNREGISTER_EXPIRES\r\n")
+
+        // Incluir autenticacion si esta disponible
+        if (accountInfo.authorizationHeader.value != null) {
+            val headerName = AuthenticationHandler.getAuthHeaderName(accountInfo.lastChallengeType.value)
+            builder.append("$headerName: ${accountInfo.authorizationHeader.value}\r\n")
+        }
+
+        builder.append("Content-Length: 0\r\n\r\n")
+
+        return builder.toString()
     }
 
     /**
@@ -128,30 +189,33 @@ object SipMessageBuilder {
         val target = callData.to
         val uri = "sip:${target}@${accountInfo.domain}"
         val branch = "z9hG4bK${generateId()}"
-        val md5Hash= callData.md5Hash
+        val md5Hash = callData.md5Hash
         val currentCSeq = accountInfo.incrementCSeq()
 
-        // Store branch for future reference
         callData.inviteViaBranch = branch
-        callData.via = "$SIP_VERSION/$SIP_TRANSPORT ${accountInfo.domain};branch=$branch"
+        // ✅ CORREGIDO: Via usa localContactHost
+        callData.via = "$SIP_VERSION/$SIP_TRANSPORT ${accountInfo.localContactHost};branch=$branch"
 
         val builder = StringBuilder()
         builder.append("INVITE $uri $SIP_VERSION\r\n")
-        builder.append("Via: $SIP_VERSION/$SIP_TRANSPORT ${accountInfo.domain};branch=$branch\r\n")
+        // ✅ CORREGIDO: Via usa localContactHost
+        builder.append("Via: $SIP_VERSION/$SIP_TRANSPORT ${accountInfo.localContactHost};branch=$branch\r\n")
         builder.append("Max-Forwards: $MAX_FORWARDS\r\n")
         builder.append("From: <sip:${accountInfo.username}@${accountInfo.domain}>;tag=${callData.inviteFromTag}\r\n")
         builder.append("To: <$uri>\r\n")
         builder.append("Call-ID: ${callData.callId}\r\n")
         builder.append("CSeq: $currentCSeq INVITE\r\n")
-        builder.append("Contact: <sip:${accountInfo.username}@${accountInfo.domain};transport=ws>\r\n")
-
+        // Contact con ;ob (RFC 5626 outbound) para llamadas
+        builder.append("Contact: <sip:${accountInfo.localContactId}@${accountInfo.localContactHost};transport=ws;ob>\r\n")
 
         if (md5Hash.isNotEmpty()) {
             builder.append("X-MD5: $md5Hash\r\n")
         }
 
+        // RFC 3261: Usar Authorization para 401, Proxy-Authorization para 407
         if (isAuthenticated && accountInfo.authorizationHeader.value != null) {
-            builder.append("Authorization: ${accountInfo.authorizationHeader.value}\r\n")
+            val headerName = AuthenticationHandler.getAuthHeaderName(accountInfo.lastChallengeType.value)
+            builder.append("$headerName: ${accountInfo.authorizationHeader.value}\r\n")
         }
 
         builder.append("Content-Type: application/sdp\r\n")
@@ -173,10 +237,7 @@ object SipMessageBuilder {
     /**
      * Build call control messages (BYE, CANCEL, ACK)
      */
-    /**
-     * Build call control messages (BYE, CANCEL, ACK) - CORREGIDO
-     */
-    private suspend fun  buildCallControlMessage(
+    private suspend fun buildCallControlMessage(
         method: String,
         accountInfo: AccountInfo,
         callData: CallData,
@@ -186,25 +247,23 @@ object SipMessageBuilder {
         val currentCSeq = accountInfo.incrementCSeq()
         log.d(tag = TAG) { "currentCSeq $currentCSeq" }
 
-        // CRÍTICO: URI y headers diferentes según dirección de llamada
         when (callData.direction) {
             CallDirections.OUTGOING -> {
-                // Para llamadas salientes, el target es el destinatario
                 val targetUri = "sip:${callData.to}@${accountInfo.domain}"
                 builder.append("$method $targetUri $SIP_VERSION\r\n")
 
-                // Via header
                 if (useOriginalVia && method == "CANCEL" && callData.inviteViaBranch.isNotEmpty()) {
-                    builder.append("Via: $SIP_VERSION/$SIP_TRANSPORT ${accountInfo.domain};branch=${callData.inviteViaBranch}\r\n")
+                    // ✅ CORREGIDO: Via usa localContactHost
+                    builder.append("Via: $SIP_VERSION/$SIP_TRANSPORT ${accountInfo.localContactHost};branch=${callData.inviteViaBranch}\r\n")
                 } else {
                     val branch = if (method == "CANCEL") callData.inviteViaBranch else "z9hG4bK${generateId()}"
-                    builder.append("Via: $SIP_VERSION/$SIP_TRANSPORT ${accountInfo.domain};branch=$branch\r\n")
+                    // ✅ CORREGIDO: Via usa localContactHost
+                    builder.append("Via: $SIP_VERSION/$SIP_TRANSPORT ${accountInfo.localContactHost};branch=$branch\r\n")
                 }
 
                 builder.append("Max-Forwards: $MAX_FORWARDS\r\n")
                 builder.append("From: <sip:${accountInfo.username}@${accountInfo.domain}>;tag=${callData.inviteFromTag}\r\n")
 
-                // To header - CRÍTICO: incluir toTag si existe
                 if (callData.inviteToTag.isNotEmpty() && method != "CANCEL") {
                     builder.append("To: <$targetUri>;tag=${callData.inviteToTag}\r\n")
                 } else {
@@ -213,7 +272,6 @@ object SipMessageBuilder {
             }
 
             CallDirections.INCOMING -> {
-                // CRÍTICO: Para llamadas entrantes, usar el contactUri del caller
                 val targetUri = if (callData.remoteContactUri?.isNotEmpty() == true) {
                     callData.remoteContactUri!!
                 } else {
@@ -221,13 +279,10 @@ object SipMessageBuilder {
                 }
 
                 builder.append("$method $targetUri $SIP_VERSION\r\n")
-
-                // Via header - usar nuevo branch
                 val branch = "z9hG4bK${generateId()}"
-                builder.append("Via: $SIP_VERSION/$SIP_TRANSPORT ${accountInfo.domain};branch=$branch\r\n")
+                // ✅ CORREGIDO: Via usa localContactHost
+                builder.append("Via: $SIP_VERSION/$SIP_TRANSPORT ${accountInfo.localContactHost};branch=$branch\r\n")
                 builder.append("Max-Forwards: $MAX_FORWARDS\r\n")
-
-                // CRÍTICO: Intercambiar From/To para llamadas entrantes
                 builder.append("From: <sip:${accountInfo.username}@${accountInfo.domain}>;tag=${callData.toTag}\r\n")
                 builder.append("To: <sip:${callData.from}@${accountInfo.domain}>;tag=${callData.fromTag}\r\n")
             }
@@ -236,12 +291,21 @@ object SipMessageBuilder {
         builder.append("Call-ID: ${callData.callId}\r\n")
 
         val cseqValue = if (method == "CANCEL") {
-            val originalCseqHeader = SipMessageParser.extractHeader(
-                callData.originalCallInviteMessage.split("\r\n"), "CSeq"
-            )
-            log.d(tag = TAG) { "originalCseqHeader $originalCseqHeader" }
-
-            originalCseqHeader.split(" ")[0].trim().toInt()
+            if (callData.originalCallInviteMessage.isNotEmpty()) {
+                val originalCseqHeader = SipMessageParser.extractHeader(
+                    callData.originalCallInviteMessage.split("\r\n"), "CSeq"
+                )
+                log.d(tag = TAG) { "originalCseqHeader '$originalCseqHeader'" }
+                if (originalCseqHeader.isNotEmpty()) {
+                    originalCseqHeader.split(" ")[0].trim().toIntOrNull() ?: (currentCSeq - 1)
+                } else {
+                    log.w(tag = TAG) { "CSeq header not found in original INVITE, using fallback" }
+                    currentCSeq - 1
+                }
+            } else {
+                log.w(tag = TAG) { "originalCallInviteMessage is empty, using fallback CSeq" }
+                currentCSeq - 1
+            }
         } else {
             currentCSeq
         }
@@ -285,7 +349,6 @@ object SipMessageBuilder {
                 val toTagStr = if (method == "CANCEL") "" else ";tag=${callData.inviteToTag}"
                 builder.append("To: <$toUri>$toTagStr\r\n")
             }
-
             callData.direction == CallDirections.INCOMING -> {
                 builder.append("From: <sip:${accountInfo.username}@${accountInfo.domain}>;tag=${callData.inviteToTag}\r\n")
                 builder.append("To: <sip:${callData.from}@${accountInfo.domain}>;tag=${callData.inviteFromTag}\r\n")
@@ -304,75 +367,52 @@ object SipMessageBuilder {
      */
     suspend fun buildCancelMessage(accountInfo: AccountInfo, callData: CallData): String =
         buildCallControlMessage("CANCEL", accountInfo, callData, useOriginalVia = true)
-//    /**
-//     * Build CANCEL message - CORREGIDO para usar headers exactos del INVITE original
-//     */
-//    fun buildCancelMessage(accountInfo: AccountInfo, callData: CallData): String {
-//        try {
-//            log.d(tag = "SipMessageBuilder") { "Building CANCEL for call: ${callData.callId}" }
-//
-//            // CRÍTICO: Verificar que tenemos el mensaje INVITE original
-//            if (callData.originalCallInviteMessage.isEmpty()) {
-//                log.e(tag = "SipMessageBuilder") { "ERROR: No original INVITE message stored for CANCEL" }
-//                throw IllegalStateException("Cannot build CANCEL without original INVITE")
-//            }
-//
-//            val originalLines = callData.originalCallInviteMessage.split("\r\n")
-//            val originalFirstLine = originalLines.firstOrNull() ?: throw IllegalStateException("Invalid original INVITE")
-//
-//            // Extraer headers exactos del INVITE original
-//            val originalVia = SipMessageParser.extractHeader(originalLines, "Via")
-//            val originalFrom = SipMessageParser.extractHeader(originalLines, "From")
-//            val originalTo = SipMessageParser.extractHeader(originalLines, "To")
-//            val originalCallId = SipMessageParser.extractHeader(originalLines, "Call-ID")
-//            val originalCSeq = SipMessageParser.extractHeader(originalLines, "CSeq")
-//
-//            // CRÍTICO: Extraer solo el número de secuencia del CSeq original
-//            val originalCSeqNumber = (originalCSeq.split(" ").firstOrNull()?.trim() + 1)
-//                ?: throw IllegalStateException("Invalid CSeq in original INVITE")
-//
-//            // CRÍTICO: Extraer URI del INVITE original
-//            val requestUri = originalFirstLine.substringAfter("INVITE ").substringBefore(" SIP/2.0").trim()
-//
-//            log.d(tag = "SipMessageBuilder") {
-//                "CANCEL details - URI: $requestUri, CSeq: $originalCSeqNumber, Via: ${originalVia.take(50)}..."
-//            }
-//
-//            return buildString {
-//                // Request line - EXACTAMENTE la misma URI que el INVITE
-//                append("CANCEL $requestUri SIP/2.0\r\n")
-//
-//                // CRÍTICO: Headers EXACTAMENTE iguales al INVITE original
-//                append("Via: $originalVia\r\n")
-//                append("Max-Forwards: $MAX_FORWARDS\r\n")
-//                append("From: $originalFrom\r\n")
-//                append("To: $originalTo\r\n")  // SIN tag en CANCEL
-//                append("Call-ID: $originalCallId\r\n")
-//                append("CSeq: $originalCSeqNumber CANCEL\r\n")  // Mismo número, método CANCEL
-//                append("Content-Length: 0\r\n\r\n")
-//            }
-//
-//        } catch (e: Exception) {
-//            log.e(tag = "SipMessageBuilder") { "Error building CANCEL: ${e.message}" }
-//            throw e
-//        }
-//    }
 
     /**
      * Build ACK message
      */
-    fun buildAckMessage(accountInfo: AccountInfo, callData: CallData): String {
-        val target = callData.to
-        val uri = "sip:${target}@${accountInfo.domain}"
+    fun buildAckMessage(
+        accountInfo: AccountInfo,
+        callData: CallData,
+        // En re-INVITE multi-llamada el cseq global puede haber avanzado antes de que llegue
+        // el 200 OK, por lo que el ACK debe usar el CSeq EXACTO del 200 OK, no el global.
+        explicitCSeq: Int? = null,
+        // El Request-URI del ACK para re-INVITE debe ser el Contact del 200 OK (RFC 3261 §17.1.1.3)
+        explicitRequestUri: String? = null
+    ): String {
+        val defaultUri = when (callData.direction) {
+            CallDirections.OUTGOING -> "sip:${callData.to}@${accountInfo.domain}"
+            CallDirections.INCOMING -> {
+                callData.remoteContactUri
+                    ?.takeIf { it.isNotBlank() }
+                    ?: "sip:${callData.from}@${accountInfo.domain}"
+            }
+        }
+        val requestUri = explicitRequestUri ?: defaultUri
+        val cseq = explicitCSeq ?: accountInfo.cseq
+
+        val fromTag = when (callData.direction) {
+            CallDirections.OUTGOING -> callData.inviteFromTag
+            CallDirections.INCOMING -> callData.toTag ?: callData.inviteToTag
+        }
+        val toUri = when (callData.direction) {
+            CallDirections.OUTGOING -> "sip:${callData.to}@${accountInfo.domain}"
+            CallDirections.INCOMING -> "sip:${callData.from}@${accountInfo.domain}"
+        }
+        val toTag = when (callData.direction) {
+            CallDirections.OUTGOING -> callData.inviteToTag
+            CallDirections.INCOMING -> callData.fromTag ?: callData.inviteFromTag
+        }
 
         return buildString {
-            append("ACK $uri $SIP_VERSION\r\n")
-            append("Via: $SIP_VERSION/$SIP_TRANSPORT ${accountInfo.domain};branch=z9hG4bK${generateId()}\r\n")
+            append("ACK $requestUri $SIP_VERSION\r\n")
+            // ✅ CORREGIDO: Via usa localContactHost
+            append("Via: $SIP_VERSION/$SIP_TRANSPORT ${accountInfo.localContactHost};branch=z9hG4bK${generateId()}\r\n")
             append("Max-Forwards: $MAX_FORWARDS\r\n")
-            append("From: <sip:${accountInfo.username}@${accountInfo.domain}>;tag=${callData.inviteFromTag}\r\n")
-            append("To: <$uri>;tag=${callData.inviteToTag}\r\n")
+            append("From: <sip:${accountInfo.username}@${accountInfo.domain}>;tag=$fromTag\r\n")
+            append("To: <$toUri>;tag=$toTag\r\n")
             append("Call-ID: ${callData.callId}\r\n")
-            append("CSeq: ${accountInfo.cseq} ACK\r\n")
+            append("CSeq: $cseq ACK\r\n")
             append("Content-Length: 0\r\n\r\n")
         }
     }
@@ -394,7 +434,7 @@ object SipMessageBuilder {
         return buildString {
             append("$SIP_VERSION $statusCode $reasonPhrase\r\n")
 
-            // CRÍTICO: Via header exactamente como vino
+            // CRÍTICO: Via header exactamente como vino del servidor
             append("Via: ${callData.via}\r\n")
 
             // CRÍTICO: From header exactamente como vino (incluyendo tag)
@@ -408,12 +448,10 @@ object SipMessageBuilder {
             append("\r\n")
 
             append("Call-ID: ${callData.callId}\r\n")
-
-            // CRÍTICO: CSeq debe coincidir con el request
             append("CSeq: ${callData.lastCSeqValue} $method\r\n")
 
             if (includeContact) {
-                append("Contact: <sip:${accountInfo.username}@${accountInfo.domain};transport=ws>\r\n")
+                append("Contact: <sip:${accountInfo.localContactId}@${accountInfo.localContactHost};transport=ws;ob>\r\n")
             }
 
             contentType?.let {
@@ -426,7 +464,7 @@ object SipMessageBuilder {
         }
     }
 
-    // Response builders using the common function
+    // Response builders
     fun buildTryingResponse(accountInfo: AccountInfo, callData: CallData): String =
         buildSipResponse(100, "Trying", accountInfo, callData, includeToTag = false)
 
@@ -458,7 +496,7 @@ object SipMessageBuilder {
         buildSipResponse(487, "Request Terminated", accountInfo, callData)
 
     /**
-     * Build generic OK responses for requests
+     * Build generic OK responses for requests (BYE, CANCEL)
      */
     private fun buildGenericOkResponse(lines: List<String>): String {
         val viaHeader = SipMessageParser.extractHeader(lines, "Via")
@@ -524,22 +562,22 @@ object SipMessageBuilder {
             CallDirections.OUTGOING -> {
                 val targetUri = "sip:${callData.to}@${accountInfo.domain}"
                 builder.append("INVITE $targetUri $SIP_VERSION\r\n")
-                builder.append("Via: $SIP_VERSION/$SIP_TRANSPORT ${accountInfo.domain};branch=z9hG4bK${generateId()}\r\n")
+                // ✅ CORREGIDO: Via usa localContactHost
+                builder.append("Via: $SIP_VERSION/$SIP_TRANSPORT ${accountInfo.localContactHost};branch=z9hG4bK${generateId()}\r\n")
                 builder.append("Max-Forwards: $MAX_FORWARDS\r\n")
                 builder.append("From: <sip:${accountInfo.username}@${accountInfo.domain}>;tag=${callData.inviteFromTag}\r\n")
                 builder.append("To: <$targetUri>;tag=${callData.inviteToTag}\r\n")
             }
 
             CallDirections.INCOMING -> {
-                // CRÍTICO: Para re-INVITE en llamadas entrantes
                 val targetUri = if (callData.remoteContactUri?.isNotEmpty() == true) {
                     callData.remoteContactUri!!
                 } else {
                     "sip:${callData.from}@${accountInfo.domain}"
                 }
-
                 builder.append("INVITE $targetUri $SIP_VERSION\r\n")
-                builder.append("Via: $SIP_VERSION/$SIP_TRANSPORT ${accountInfo.domain};branch=z9hG4bK${generateId()}\r\n")
+                // ✅ CORREGIDO: Via usa localContactHost
+                builder.append("Via: $SIP_VERSION/$SIP_TRANSPORT ${accountInfo.localContactHost};branch=z9hG4bK${generateId()}\r\n")
                 builder.append("Max-Forwards: $MAX_FORWARDS\r\n")
                 builder.append("From: <sip:${accountInfo.username}@${accountInfo.domain}>;tag=${callData.toTag}\r\n")
                 builder.append("To: <sip:${callData.from}@${accountInfo.domain}>;tag=${callData.fromTag}\r\n")
@@ -548,7 +586,7 @@ object SipMessageBuilder {
 
         builder.append("Call-ID: ${callData.callId}\r\n")
         builder.append("CSeq: $currentCSeq INVITE\r\n")
-        builder.append("Contact: <sip:${accountInfo.username}@${accountInfo.domain};transport=ws>\r\n")
+        builder.append("Contact: <sip:${accountInfo.localContactId}@${accountInfo.localContactHost};transport=ws;ob>\r\n")
         builder.append("Content-Type: application/sdp\r\n")
         builder.append("Content-Length: ${sdp.length}\r\n\r\n")
         builder.append(sdp)
@@ -580,13 +618,11 @@ object SipMessageBuilder {
                 callData.inviteFromTag
             }
 
-            // Normalizar el dígito DTMF
             val normalizedDigit = when (dtmfEvent.lowercaseChar()) {
                 'a', 'b', 'c', 'd' -> dtmfEvent.uppercaseChar()
                 else -> dtmfEvent
             }
 
-            // Contenido DTMF según RFC 2833
             val dtmfContent = buildString {
                 append("Signal=${normalizedDigit}\r\n")
                 append("Duration=${duration}\r\n")
@@ -607,7 +643,7 @@ object SipMessageBuilder {
 
                 append("Call-ID: ${callData.callId}\r\n")
                 append("CSeq: $currentCSeq INFO\r\n")
-                append("Contact: <sip:${accountInfo.username}@${accountInfo.domain};transport=ws>\r\n")
+                append("Contact: <sip:${accountInfo.localContactId}@${accountInfo.localContactHost};transport=ws;ob>\r\n")
                 append("User-Agent: ${accountInfo.userAgent.value}\r\n")
                 append("Content-Type: application/dtmf-relay\r\n")
                 append("Content-Length: ${dtmfContent.length}\r\n")

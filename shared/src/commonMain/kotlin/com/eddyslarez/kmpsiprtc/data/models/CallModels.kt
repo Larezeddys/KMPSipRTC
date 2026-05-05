@@ -1,6 +1,7 @@
 package com.eddyslarez.kmpsiprtc.data.models
 
 import com.eddyslarez.kmpsiprtc.platform.log
+import com.eddyslarez.kmpsiprtc.services.unified.CallType
 import kotlinx.serialization.Serializable
 import kotlin.time.ExperimentalTime
 
@@ -28,6 +29,11 @@ enum class RegistrationState {
     FAILED
 }
 
+/**
+ * Datos de una llamada SIP activa. Intencionalmente mutable (`var` properties)
+ * porque MultiCallManager comparte la misma referencia entre componentes
+ * y los campos SIP se actualizan durante el ciclo de vida de la llamada.
+ */
 @Serializable
 data class CallData @OptIn(ExperimentalTime::class) constructor(
     var callId: String = "",
@@ -35,6 +41,8 @@ data class CallData @OptIn(ExperimentalTime::class) constructor(
     val to: String = "",
     val direction: CallDirections = CallDirections.OUTGOING,
     val startTime: Long = kotlin.time.Clock.System.now().toEpochMilliseconds(),
+    val callType: CallType = CallType.SIP_EXTERNAL,
+    val roomId: String? = null,
     var toTag: String? = null,
     var fromTag: String? = null,
     var remoteContactUri: String? = null,
@@ -52,6 +60,10 @@ data class CallData @OptIn(ExperimentalTime::class) constructor(
     var lastCSeqValue: Int = 0,
     var sipName: String = "",
     val md5Hash: String = "",
+    var isCallback: Boolean = false,
+    var assertedIdentity: String? = null,  // Valor del header P-Asserted-Identity
+    var rawToUri: String? = null,           // To URI original (.invalid) para debugging
+    var rawFromUri: String? = null          // From URI original completo
 ) {
     fun storeInviteMessage(message: String) {
         originalInviteMessage = message

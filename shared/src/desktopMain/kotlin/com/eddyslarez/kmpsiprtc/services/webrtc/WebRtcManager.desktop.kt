@@ -8,11 +8,15 @@ import com.eddyslarez.kmpsiprtc.data.models.RecordingResult
 import com.eddyslarez.kmpsiprtc.data.models.SdpType
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
 import com.eddyslarez.kmpsiprtc.platform.log
+import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 import com.eddyslarez.kmpsiprtc.services.audio.DesktopAudioController
 import dev.onvoid.webrtc.*
 import dev.onvoid.webrtc.media.audio.AudioDeviceModule
 import dev.onvoid.webrtc.media.audio.AudioLayer
 import dev.onvoid.webrtc.media.audio.AudioOptions
+import dev.onvoid.webrtc.media.video.VideoDevice
+import dev.onvoid.webrtc.media.video.VideoTrack
+import dev.onvoid.webrtc.media.video.desktop.ScreenCapturer
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -70,6 +74,9 @@ class DesktopWebRtcManager : WebRtcManager {
             )
             audioController.initialize()
 
+            // Pasar el AudioDeviceModule real del PeerConnectionController al AudioController
+            audioController.updateAudioDeviceModule(peerConnectionController.getAudioDeviceModule())
+
             _isInitialized.value = true
             log.d(TAG) { "✅✅✅ WebRTC initialized successfully ✅✅✅" }
 
@@ -81,6 +88,79 @@ class DesktopWebRtcManager : WebRtcManager {
     }
 
     override fun isInitialized(): Boolean = _isInitialized.value
+
+    // ==================== DATA CHANNEL (para conferencias) ====================
+
+    fun createPublisherDataChannel(label: String = "_reliable") {
+        peerConnectionController.createPublisherDataChannel(label)
+    }
+
+    fun sendDataChannelMessage(data: ByteArray): Boolean {
+        return peerConnectionController.sendDataChannelMessage(data)
+    }
+
+    fun setDataChannelMessageListener(listener: ((ByteArray) -> Unit)?) {
+        peerConnectionController.dataChannelMessageListener = listener
+    }
+
+    // ==================== VIDEO (para conferencias) ====================
+
+    fun enumerateVideoDevices(): List<VideoDevice> {
+        return peerConnectionController.enumerateVideoDevices()
+    }
+
+    fun addLocalVideoTrack(device: VideoDevice? = null): VideoTrack? {
+        ensureInitialized()
+        if (!peerConnectionController.hasPeerConnection()) {
+            peerConnectionController.createNewPeerConnection()
+        }
+        return peerConnectionController.addLocalVideoTrack(device)
+    }
+
+    fun removeLocalVideoTrack() {
+        peerConnectionController.removeLocalVideoTrack()
+    }
+
+    fun getLocalVideoTrack(): VideoTrack? {
+        return peerConnectionController.getLocalVideoTrack()
+    }
+
+    fun enumerateScreenShareSources(): List<Pair<String, String>> {
+        var capturer: ScreenCapturer? = null
+        return try {
+            capturer = ScreenCapturer()
+            capturer.getDesktopSources().mapIndexed { index, source ->
+                source.id.toString() to (source.title?.takeIf { it.isNotBlank() } ?: "Screen ${index + 1}")
+            }
+        } catch (e: Exception) {
+            log.w(TAG) { "Error enumerando pantallas: ${e.message}" }
+            emptyList()
+        } finally {
+            try {
+                capturer?.dispose()
+            } catch (_: Throwable) {}
+        }
+    }
+
+    fun addLocalScreenShareTrack(sourceId: String? = null): VideoTrack? {
+        ensureInitialized()
+        if (!peerConnectionController.hasPeerConnection()) {
+            peerConnectionController.createNewPeerConnection()
+        }
+        return peerConnectionController.addLocalScreenShareTrack(sourceId)
+    }
+
+    fun removeLocalScreenShareTrack() {
+        peerConnectionController.removeLocalScreenShareTrack()
+    }
+
+    fun getLocalScreenShareTrack(): VideoTrack? {
+        return peerConnectionController.getLocalScreenShareTrack()
+    }
+
+    fun setOnRemoteVideoTrack(listener: ((VideoTrack) -> Unit)?) {
+        peerConnectionController.onRemoteVideoTrack = listener
+    }
 
     // ==================== CONNECTION MANAGEMENT ====================
 
@@ -187,6 +267,16 @@ class DesktopWebRtcManager : WebRtcManager {
         }
     }
 
+    override fun setRemoteAudioEnabled(enabled: Boolean) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.setRemoteAudioEnabled(enabled)
+    }
+
+    override fun isRemoteAudioEnabled(): Boolean {
+        if (!::peerConnectionController.isInitialized) return true
+        return peerConnectionController.isRemoteAudioEnabled()
+    }
+
     override fun setActiveAudioRoute(audioUnitType: AudioUnitTypes): Boolean {
         return if (::audioController.isInitialized) {
             audioController.setActiveRoute(audioUnitType)
@@ -267,6 +357,32 @@ class DesktopWebRtcManager : WebRtcManager {
         }
     }
 
+    override fun selectAudioInputDeviceByName(deviceName: String): Boolean {
+        if (!::audioController.isInitialized) return false
+        val (inputs, _) = audioController.getAllDevices()
+        val device = inputs.firstOrNull { it.name == deviceName }
+        return if (device != null) {
+            log.d(TAG) { "Selecting input device by name: $deviceName" }
+            audioController.changeInputDevice(device)
+        } else {
+            log.w(TAG) { "Input device not found by name: $deviceName" }
+            false
+        }
+    }
+
+    override fun selectAudioOutputDeviceByName(deviceName: String): Boolean {
+        if (!::audioController.isInitialized) return false
+        val (_, outputs) = audioController.getAllDevices()
+        val device = outputs.firstOrNull { it.name == deviceName }
+        return if (device != null) {
+            log.d(TAG) { "Selecting output device by name: $deviceName" }
+            audioController.changeOutputDevice(device)
+        } else {
+            log.w(TAG) { "Output device not found by name: $deviceName" }
+            false
+        }
+    }
+
     override fun onBluetoothConnectionChanged(isConnected: Boolean) {
         if (::audioController.isInitialized) {
             audioController.refreshDevices()
@@ -328,6 +444,28 @@ class DesktopWebRtcManager : WebRtcManager {
         return peerConnectionController.isRecording()
     }
 
+    // ==================== STREAMING EN TIEMPO REAL ====================
+
+    override fun setAudioStreamListener(listener: AudioStreamListener?) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.setAudioStreamListener(listener)
+    }
+
+    override fun startAudioStreaming(callId: String) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.startStreaming(callId)
+    }
+
+    override fun stopAudioStreaming() {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.stopStreaming()
+    }
+
+    override fun isAudioStreaming(): Boolean {
+        if (!::peerConnectionController.isInitialized) return false
+        return peerConnectionController.isStreaming()
+    }
+
     // ==================== DTMF & MEDIA DIRECTION ====================
 
     override fun sendDtmfTones(tones: String, duration: Int, gap: Int): Boolean {
@@ -360,6 +498,28 @@ class DesktopWebRtcManager : WebRtcManager {
 
     override fun setListener(listener: WebRtcEventListener?) {
         this.webRtcEventListener = listener
+    }
+
+    // ==================== INYECCIÓN DE AUDIO PARA TRADUCCIÓN ====================
+
+    override fun setLocalAudioEnabled(enabled: Boolean) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.setLocalAudioEnabled(enabled)
+    }
+
+    override fun isLocalAudioEnabled(): Boolean {
+        if (!::peerConnectionController.isInitialized) return true
+        return peerConnectionController.isLocalAudioEnabled()
+    }
+
+    override fun injectLocalAudio(pcmData: ByteArray, sampleRate: Int, channels: Int, bitsPerSample: Int) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.injectLocalAudio(pcmData, sampleRate, channels, bitsPerSample)
+    }
+
+    override fun injectRemoteAudio(pcmData: ByteArray, sampleRate: Int, channels: Int, bitsPerSample: Int) {
+        if (!::peerConnectionController.isInitialized) return
+        peerConnectionController.injectRemoteAudio(pcmData, sampleRate, channels, bitsPerSample)
     }
 
     // ==================== PRIVATE HELPERS ====================
@@ -1070,3 +1230,4 @@ class DesktopWebRtcManager : WebRtcManager {
 //        return peerConnection
 //    }
 //}
+

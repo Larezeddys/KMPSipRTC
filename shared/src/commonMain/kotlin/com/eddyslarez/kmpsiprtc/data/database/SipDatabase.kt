@@ -18,7 +18,7 @@ import com.eddyslarez.kmpsiprtc.data.database.entities.*
         CallStateHistoryEntity::class,
         AppConfigEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = true
 )
 @TypeConverters(DatabaseConverters::class)

@@ -62,14 +62,14 @@ class DatabaseInspector(
             buildString {
                 appendLine("┌─ DATABASE STATUS ─────────────────────────────┐")
                 val stats = databaseManager.getGeneralStatistics()
-                appendLine("  Initialized: ✅")
+                appendLine("  Initialized: [OK]")
                 appendLine("  Total Tables: 6 (expected)")
-                appendLine("  Database Health: ${if (stats.totalAccounts >= 0) "✅ OK" else "❌ ERROR"}")
+                appendLine("  Database Health: ${if (stats.totalAccounts >= 0) "[OK] OK" else "[ERROR] ERROR"}")
                 appendLine("└───────────────────────────────────────────────┘")
             }
         } catch (e: Exception) {
             "┌─ DATABASE STATUS ─────────────────────────────┐\n" +
-                    "  ❌ ERROR: ${e.message}\n" +
+                    "  [ERROR] ERROR: ${e.message}\n" +
                     "└───────────────────────────────────────────────┘"
         }
     }
@@ -93,8 +93,8 @@ class DatabaseInspector(
                         appendLine("  ${index + 1}. ${account.username}@${account.domain}")
                         appendLine("     • ID: ${account.id}")
                         appendLine("     • State: ${account.registrationState}")
-                        appendLine("     • Active: ${if (account.isActive) "✅" else "❌"}")
-                        appendLine("     • Push Token: ${if (account.pushToken.isNullOrEmpty()) "❌ None" else "✅ Set"}")
+                        appendLine("     • Active: ${if (account.isActive) "[OK]" else "[ERROR]"}")
+                        appendLine("     • Push Token: ${if (account.pushToken.isNullOrEmpty()) "[ERROR] None" else "[OK] Set"}")
                         appendLine("     • Created: ${formatTimestamp(account.createdAt)}")
                         appendLine("     • Updated: ${formatTimestamp(account.updatedAt)}")
                         if (account.registrationExpiry > 0) {
@@ -103,12 +103,12 @@ class DatabaseInspector(
                         }
                         appendLine()
                     }
-                } else appendLine("  ⚠️  No accounts found in database")
+                } else appendLine("  [WARN]  No accounts found in database")
                 appendLine("└───────────────────────────────────────────────┘")
             }
         } catch (e: Exception) {
             "┌─ SIP ACCOUNTS ────────────────────────────────┐\n" +
-                    "  ❌ ERROR: ${e.message}\n" +
+                    "  [ERROR] ERROR: ${e.message}\n" +
                     "└───────────────────────────────────────────────┘"
         }
     }
@@ -152,13 +152,13 @@ class DatabaseInspector(
                     }
 
                     val orphanLogs = recentLogs.filter { it.callLog.accountId.isEmpty() }
-                    if (orphanLogs.isNotEmpty()) appendLine("  ⚠️  Warning: ${orphanLogs.size} call logs without account")
-                } else appendLine("  ℹ️  No call logs found")
+                    if (orphanLogs.isNotEmpty()) appendLine("  [WARN]  Warning: ${orphanLogs.size} call logs without account")
+                } else appendLine("  ℹ  No call logs found")
                 appendLine("└───────────────────────────────────────────────┘")
             }
         } catch (e: Exception) {
             "┌─ CALL LOGS ───────────────────────────────────┐\n" +
-                    "  ❌ ERROR: ${e.message}\n" +
+                    "  [ERROR] ERROR: ${e.message}\n" +
                     "└───────────────────────────────────────────────┘"
         }
     }
@@ -182,15 +182,15 @@ class DatabaseInspector(
                         appendLine("     • Phone: ${contact.phoneNumber}")
                         appendLine("     • Email: ${contact.email ?: "N/A"}")
                         appendLine("     • Company: ${contact.company ?: "N/A"}")
-                        appendLine("     • Blocked: ${if (contact.isBlocked) "❌ Yes" else "✅ No"}")
+                        appendLine("     • Blocked: ${if (contact.isBlocked) "[ERROR] Yes" else "[OK] No"}")
                         appendLine()
                     }
-                } else appendLine("  ℹ️  No contacts found")
+                } else appendLine("  ℹ  No contacts found")
                 appendLine("└───────────────────────────────────────────────┘")
             }
         } catch (e: Exception) {
             "┌─ CONTACTS ────────────────────────────────────┐\n" +
-                    "  ❌ ERROR: ${e.message}\n" +
+                    "  [ERROR] ERROR: ${e.message}\n" +
                     "└───────────────────────────────────────────────┘"
         }
     }
@@ -204,23 +204,23 @@ class DatabaseInspector(
                 appendLine("┌─ CONFIGURATION ───────────────────────────────┐")
                 val config = databaseManager.getAppConfig()
                 if (config != null) {
-                    appendLine("  Configuration Found: ✅")
-                    appendLine("  • Incoming Ringtone: ${if (config.incomingRingtoneUri.isNullOrEmpty()) "❌ Not set" else "✅ Set"}")
-                    appendLine("  • Outgoing Ringtone: ${if (config.outgoingRingtoneUri.isNullOrEmpty()) "❌ Not set" else "✅ Set"}")
+                    appendLine("  Configuration Found: [OK]")
+                    appendLine("  • Incoming Ringtone: ${if (config.incomingRingtoneUri.isNullOrEmpty()) "[ERROR] Not set" else "[OK] Set"}")
+                    appendLine("  • Outgoing Ringtone: ${if (config.outgoingRingtoneUri.isNullOrEmpty()) "[ERROR] Not set" else "[OK] Set"}")
                     appendLine("  • Default Domain: ${config.defaultDomain ?: "N/A"}")
                     appendLine("  • WebSocket URL: ${config.webSocketUrl ?: "N/A"}")
                     appendLine("  • User Agent: ${config.userAgent ?: "N/A"}")
-                    appendLine("  • Logs Enabled: ${if (config.enableLogs) "✅" else "❌"}")
-                    appendLine("  • Auto-Reconnect: ${if (config.enableAutoReconnect) "✅" else "❌"}")
+                    appendLine("  • Logs Enabled: ${if (config.enableLogs) "[OK]" else "[ERROR]"}")
+                    appendLine("  • Auto-Reconnect: ${if (config.enableAutoReconnect) "[OK]" else "[ERROR]"}")
                     appendLine("  • Ping Interval: ${config.pingIntervalMs}ms")
                 } else {
-                    appendLine("  ⚠️  No configuration found")
+                    appendLine("  [WARN]  No configuration found")
                 }
                 appendLine("└───────────────────────────────────────────────┘")
             }
         } catch (e: Exception) {
             "┌─ CONFIGURATION ───────────────────────────────┐\n" +
-                    "  ❌ ERROR: ${e.message}\n" +
+                    "  [ERROR] ERROR: ${e.message}\n" +
                     "└───────────────────────────────────────────────┘"
         }
     }
@@ -249,9 +249,9 @@ class DatabaseInspector(
                 val contactsWithoutPhone = contacts.filter { it.phoneNumber.isEmpty() }
                 if (contactsWithoutPhone.isNotEmpty()) issues.add("${contactsWithoutPhone.size} contacts without phone number")
 
-                if (issues.isEmpty()) appendLine("  ✅ All data integrity checks passed")
+                if (issues.isEmpty()) appendLine("  [OK] All data integrity checks passed")
                 else {
-                    appendLine("  ⚠️  Found ${issues.size} integrity issues:")
+                    appendLine("  [WARN]  Found ${issues.size} integrity issues:")
                     issues.forEach { appendLine("  • $it") }
                 }
 
@@ -259,7 +259,7 @@ class DatabaseInspector(
             }
         } catch (e: Exception) {
             "┌─ DATA INTEGRITY ──────────────────────────────┐\n" +
-                    "  ❌ ERROR: ${e.message}\n" +
+                    "  [ERROR] ERROR: ${e.message}\n" +
                     "└───────────────────────────────────────────────┘"
         }
     }
@@ -272,7 +272,7 @@ class DatabaseInspector(
             buildString {
                 appendLine("┌─ MEMORY ↔ DATABASE SYNC ──────────────────────┐")
                 if (sipCoreManager == null) {
-                    appendLine("  ⚠️  SipCoreManager not available")
+                    appendLine("  [WARN]  SipCoreManager not available")
                     appendLine("└───────────────────────────────────────────────┘")
                     return@buildString
                 }
@@ -293,14 +293,14 @@ class DatabaseInspector(
                     !memoryAccounts.containsKey(accountKey)
                 }
 
-                if (missingInDb.isEmpty() && missingInMemory.isEmpty()) appendLine("\n  ✅ Perfect sync - all accounts match")
+                if (missingInDb.isEmpty() && missingInMemory.isEmpty()) appendLine("\n  [OK] Perfect sync - all accounts match")
                 else {
                     if (missingInDb.isNotEmpty()) {
-                        appendLine("\n  ⚠️  ${missingInDb.size} accounts in memory but not in database:")
+                        appendLine("\n  [WARN]  ${missingInDb.size} accounts in memory but not in database:")
                         missingInDb.forEach { appendLine("     • $it") }
                     }
                     if (missingInMemory.isNotEmpty()) {
-                        appendLine("\n  ⚠️  ${missingInMemory.size} accounts in database but not in memory:")
+                        appendLine("\n  [WARN]  ${missingInMemory.size} accounts in database but not in memory:")
                         missingInMemory.forEach { appendLine("     • ${it.username}@${it.domain}") }
                     }
                 }
@@ -311,7 +311,7 @@ class DatabaseInspector(
                     val dbAccount = dbAccounts.find { it.username == username && it.domain == domain }
                     val memoryState = sipCoreManager.getRegistrationState(accountKey)
                     val dbState = dbAccount?.registrationState ?: RegistrationState.NONE
-                    val icon = if (memoryState == dbState) "✅" else "⚠️"
+                    val icon = if (memoryState == dbState) "[OK]" else "[WARN]"
                     appendLine("  $icon $accountKey")
                     appendLine("     Memory: $memoryState | DB: $dbState")
                 }
@@ -320,7 +320,7 @@ class DatabaseInspector(
             }
         } catch (e: Exception) {
             "┌─ MEMORY ↔ DATABASE SYNC ──────────────────────┐\n" +
-                    "  ❌ ERROR: ${e.message}\n" +
+                    "  [ERROR] ERROR: ${e.message}\n" +
                     "└───────────────────────────────────────────────┘"
         }
     }
@@ -352,7 +352,7 @@ class DatabaseInspector(
             }
         } catch (e: Exception) {
             "┌─ GENERAL STATISTICS ──────────────────────────┐\n" +
-                    "  ❌ ERROR: ${e.message}\n" +
+                    "  [ERROR] ERROR: ${e.message}\n" +
                     "└───────────────────────────────────────────────┘"
         }
     }
@@ -386,9 +386,9 @@ class DatabaseInspector(
                 val groupedByCallId = callLogs.groupBy { it.callLog.callId }
                 val duplicates = groupedByCallId.filter { it.value.size > 1 }
 
-                if (duplicates.isEmpty()) appendLine("  ✅ No duplicate call logs found")
+                if (duplicates.isEmpty()) appendLine("  [OK] No duplicate call logs found")
                 else {
-                    appendLine("  ⚠️  Found ${duplicates.size} duplicate call IDs:")
+                    appendLine("  [WARN]  Found ${duplicates.size} duplicate call IDs:")
                     duplicates.entries.take(5).forEach { (callId, logs) ->
                         appendLine("     • $callId: ${logs.size} entries")
                     }
@@ -417,13 +417,13 @@ class DatabaseInspector(
                 val missingInMemory = dbIds - memoryIds
 
                 when {
-                    missingInDb.isEmpty() && missingInMemory.isEmpty() -> appendLine("\n  ✅ Perfect consistency")
+                    missingInDb.isEmpty() && missingInMemory.isEmpty() -> appendLine("\n  [OK] Perfect consistency")
                     missingInDb.isNotEmpty() -> {
-                        appendLine("\n  ⚠️  ${missingInDb.size} calls in memory not in database")
+                        appendLine("\n  [WARN]  ${missingInDb.size} calls in memory not in database")
                         appendLine("     This means recent calls are NOT being saved!")
                     }
                     missingInMemory.isNotEmpty() -> {
-                        appendLine("\n  ℹ️  ${missingInMemory.size} calls in database not in memory")
+                        appendLine("\n  ℹ  ${missingInMemory.size} calls in database not in memory")
                         appendLine("     This is normal after app restart")
                     }
                 }
@@ -447,9 +447,9 @@ class DatabaseInspector(
                 appendLine("  Total accounts: ${accounts.size}")
                 if (accounts.isEmpty()) issues.add("No SIP accounts found")
                 if (issues.isNotEmpty()) {
-                    appendLine("\n  ⚠️  Issues found:")
+                    appendLine("\n  [WARN]  Issues found:")
                     issues.forEach { appendLine("     • $it") }
-                } else appendLine("\n  ✅ All essential data present")
+                } else appendLine("\n  [OK] All essential data present")
                 appendLine("└───────────────────────────────────────────────┘")
             }
         } catch (e: Exception) {
@@ -472,9 +472,9 @@ class DatabaseInspector(
                 val invalidTimestamps = callLogs.filter { it.callLog.startTime <= 0 || (it.callLog.endTime != null && it.callLog.endTime!! < it.callLog.startTime) }
                 if (invalidTimestamps.isNotEmpty()) issues.add("${invalidTimestamps.size} call logs have invalid timestamps")
 
-                if (issues.isEmpty()) appendLine("  ✅ All referential integrity checks passed")
+                if (issues.isEmpty()) appendLine("  [OK] All referential integrity checks passed")
                 else {
-                    appendLine("  ⚠️  Issues found:")
+                    appendLine("  [WARN]  Issues found:")
                     issues.forEach { appendLine("     • $it") }
                 }
                 appendLine("└───────────────────────────────────────────────┘")
@@ -500,7 +500,7 @@ class DatabaseInspector(
             val veryOldLogs = callLogs.filter { now - it.callLog.startTime > (90 * 24 * 60 * 60 * 1000L) }
             if (veryOldLogs.isNotEmpty()) recommendations.add("Consider cleaning ${veryOldLogs.size} logs older than 90 days")
 
-            if (recommendations.isEmpty()) appendLine("  ✅ No actions needed - database is healthy")
+            if (recommendations.isEmpty()) appendLine("  [OK] No actions needed - database is healthy")
             else {
                 appendLine("  Recommended actions:")
                 recommendations.forEach { appendLine("     • $it") }
@@ -521,7 +521,7 @@ class DatabaseInspector(
                 val config = databaseManager.getAppConfig()
                 if (config == null) {
                     databaseManager.createOrUpdateAppConfig()
-                    appendLine("✅ Created default app configuration")
+                    appendLine("[OK] Created default app configuration")
                     repairsPerformed++
                 }
 
@@ -529,19 +529,19 @@ class DatabaseInspector(
                 val groupedByCallId = callLogs.groupBy { it.callLog.callId }
                 val duplicates = groupedByCallId.filter { it.value.size > 1 }
                 if (duplicates.isNotEmpty()) {
-                    appendLine("⚠️  Found ${duplicates.size} duplicate sets")
+                    appendLine("[WARN]  Found ${duplicates.size} duplicate sets")
                     appendLine("   (Manual cleanup recommended)")
                 }
 
                 callHistoryManager.syncWithDatabase()
-                appendLine("✅ Synchronized memory with database")
+                appendLine("[OK] Synchronized memory with database")
                 repairsPerformed++
 
                 appendLine()
                 appendLine("═══════════════════════════════════════════════")
                 appendLine("Repairs performed: $repairsPerformed")
             } catch (e: Exception) {
-                appendLine("❌ Error during repair: ${e.message}")
+                appendLine("[ERROR] Error during repair: ${e.message}")
             }
         }
     }
@@ -566,12 +566,12 @@ class DatabaseInspector(
                     pushToken = "test_token",
                     pushProvider = "fcm"
                 )
-                appendLine("  ✅ Account created: ${account.id}")
+                appendLine("  [OK] Account created: ${account.id}")
 
                 // Test 2: Leer cuenta
                 appendLine("\n  Test 2: Reading account...")
                 val readAccount = databaseManager.getSipAccountByCredentials("test_user", "test.domain")
-                appendLine("  ${if (readAccount != null) "✅" else "❌"} Account read: ${readAccount?.username}")
+                appendLine("  ${if (readAccount != null) "[OK]" else "[ERROR]"} Account read: ${readAccount?.username}")
 
                 // Test 3: Crear call log
                 appendLine("\n  Test 3: Creating call log...")
@@ -589,12 +589,12 @@ class DatabaseInspector(
                     callType = CallTypes.SUCCESS,
                     endTime = kotlin.time.Clock.System.now().toEpochMilliseconds() + 30000
                 )
-                appendLine("  ✅ Call log created: ${callLog.id}")
+                appendLine("  [OK] Call log created: ${callLog.id}")
 
                 // Test 4: Leer call log
                 appendLine("\n  Test 4: Reading call log...")
                 val callLogs = databaseManager.getRecentCallLogs(1).first()
-                appendLine("  ${if (callLogs.isNotEmpty()) "✅" else "❌"} Call log read")
+                appendLine("  ${if (callLogs.isNotEmpty()) "[OK]" else "[ERROR]"} Call log read")
 
                 // Test 5: Crear contacto
                 appendLine("\n  Test 5: Creating contact...")
@@ -604,7 +604,7 @@ class DatabaseInspector(
                     firstName = "Test",
                     lastName = "Contact"
                 )
-                appendLine("  ✅ Contact created: ${contact.id}")
+                appendLine("  [OK] Contact created: ${contact.id}")
 
                 // Test 6: Actualizar configuración
                 appendLine("\n  Test 6: Updating configuration...")
@@ -612,19 +612,19 @@ class DatabaseInspector(
                     enableLogs = true,
                     enableAutoReconnect = true
                 )
-                appendLine("  ✅ Configuration updated")
+                appendLine("  [OK] Configuration updated")
 
                 // Limpiar datos de prueba
                 appendLine("\n  Cleaning up test data...")
                 databaseManager.deleteSipAccount(account.id)
-                appendLine("  ✅ Test data cleaned")
+                appendLine("  [OK] Test data cleaned")
 
-                appendLine("\n  ✅ ALL READ/WRITE TESTS PASSED")
+                appendLine("\n  [OK] ALL READ/WRITE TESTS PASSED")
                 appendLine("└───────────────────────────────────────────────┘")
             }
         } catch (e: Exception) {
             "┌─ READ/WRITE TEST ─────────────────────────────┐\n" +
-                    "  ❌ TEST FAILED: ${e.message}\n" +
+                    "  [ERROR] TEST FAILED: ${e.message}\n" +
                     "  Stack trace: ${e.stackTraceToString()}\n" +
                     "└───────────────────────────────────────────────┘"
         }
@@ -710,15 +710,15 @@ class DatabaseInspector(
 //
 //                val stats = databaseManager.getGeneralStatistics()
 //
-//                appendLine("  Initialized: ✅")
+//                appendLine("  Initialized: [OK]")
 //                appendLine("  Total Tables: 6 (expected)")
-//                appendLine("  Database Health: ${if (stats.totalAccounts >= 0) "✅ OK" else "❌ ERROR"}")
+//                appendLine("  Database Health: ${if (stats.totalAccounts >= 0) "[OK] OK" else "[ERROR] ERROR"}")
 //
 //                appendLine("└───────────────────────────────────────────────┘")
 //            }
 //        } catch (e: Exception) {
 //            "┌─ DATABASE STATUS ─────────────────────────────┐\n" +
-//                    "  ❌ ERROR: ${e.message}\n" +
+//                    "  [ERROR] ERROR: ${e.message}\n" +
 //                    "└───────────────────────────────────────────────┘"
 //        }
 //    }
@@ -743,8 +743,8 @@ class DatabaseInspector(
 //                        appendLine("  ${index + 1}. ${account.username}@${account.domain}")
 //                        appendLine("     • ID: ${account.id}")
 //                        appendLine("     • State: ${account.registrationState}")
-//                        appendLine("     • Active: ${if (account.isActive) "✅" else "❌"}")
-//                        appendLine("     • Push Token: ${if (account.pushToken.isNullOrEmpty()) "❌ None" else "✅ Set"}")
+//                        appendLine("     • Active: ${if (account.isActive) "[OK]" else "[ERROR]"}")
+//                        appendLine("     • Push Token: ${if (account.pushToken.isNullOrEmpty()) "[ERROR] None" else "[OK] Set"}")
 //                        appendLine("     • Created: ${formatTimestamp(account.createdAt)}")
 //                        appendLine("     • Updated: ${formatTimestamp(account.updatedAt)}")
 //
@@ -755,14 +755,14 @@ class DatabaseInspector(
 //                        appendLine()
 //                    }
 //                } else {
-//                    appendLine("  ⚠️  No accounts found in database")
+//                    appendLine("  [WARN]  No accounts found in database")
 //                }
 //
 //                appendLine("└───────────────────────────────────────────────┘")
 //            }
 //        } catch (e: Exception) {
 //            "┌─ SIP ACCOUNTS ────────────────────────────────┐\n" +
-//                    "  ❌ ERROR: ${e.message}\n" +
+//                    "  [ERROR] ERROR: ${e.message}\n" +
 //                    "└───────────────────────────────────────────────┘"
 //        }
 //    }
@@ -816,17 +816,17 @@ class DatabaseInspector(
 //                    // Verificar si hay call logs sin accountId
 //                    val orphanLogs = recentLogs.filter { it.callLog.accountId.isEmpty() }
 //                    if (orphanLogs.isNotEmpty()) {
-//                        appendLine("  ⚠️  Warning: ${orphanLogs.size} call logs without account")
+//                        appendLine("  [WARN]  Warning: ${orphanLogs.size} call logs without account")
 //                    }
 //                } else {
-//                    appendLine("  ℹ️  No call logs found")
+//                    appendLine("  ℹ  No call logs found")
 //                }
 //
 //                appendLine("└───────────────────────────────────────────────┘")
 //            }
 //        } catch (e: Exception) {
 //            "┌─ CALL LOGS ───────────────────────────────────┐\n" +
-//                    "  ❌ ERROR: ${e.message}\n" +
+//                    "  [ERROR] ERROR: ${e.message}\n" +
 //                    "└───────────────────────────────────────────────┘"
 //        }
 //    }
@@ -852,18 +852,18 @@ class DatabaseInspector(
 //                        appendLine("     • Phone: ${contact.phoneNumber}")
 //                        appendLine("     • Email: ${contact.email ?: "N/A"}")
 //                        appendLine("     • Company: ${contact.company ?: "N/A"}")
-//                        appendLine("     • Blocked: ${if (contact.isBlocked) "❌ Yes" else "✅ No"}")
+//                        appendLine("     • Blocked: ${if (contact.isBlocked) "[ERROR] Yes" else "[OK] No"}")
 //                        appendLine()
 //                    }
 //                } else {
-//                    appendLine("  ℹ️  No contacts found")
+//                    appendLine("  ℹ  No contacts found")
 //                }
 //
 //                appendLine("└───────────────────────────────────────────────┘")
 //            }
 //        } catch (e: Exception) {
 //            "┌─ CONTACTS ────────────────────────────────────┐\n" +
-//                    "  ❌ ERROR: ${e.message}\n" +
+//                    "  [ERROR] ERROR: ${e.message}\n" +
 //                    "└───────────────────────────────────────────────┘"
 //        }
 //    }
@@ -879,29 +879,29 @@ class DatabaseInspector(
 //                val config = databaseManager.getAppConfig()
 //
 //                if (config != null) {
-//                    appendLine("  Configuration Found: ✅")
+//                    appendLine("  Configuration Found: [OK]")
 //                    appendLine("\n  Settings:")
-//                    appendLine("  • Incoming Ringtone: ${if (config.incomingRingtoneUri.isNullOrEmpty()) "❌ Not set" else "✅ Set"}")
-//                    appendLine("  • Outgoing Ringtone: ${if (config.outgoingRingtoneUri.isNullOrEmpty()) "❌ Not set" else "✅ Set"}")
+//                    appendLine("  • Incoming Ringtone: ${if (config.incomingRingtoneUri.isNullOrEmpty()) "[ERROR] Not set" else "[OK] Set"}")
+//                    appendLine("  • Outgoing Ringtone: ${if (config.outgoingRingtoneUri.isNullOrEmpty()) "[ERROR] Not set" else "[OK] Set"}")
 //                    appendLine("  • Default Domain: ${config.defaultDomain ?: "N/A"}")
 //                    appendLine("  • WebSocket URL: ${config.webSocketUrl ?: "N/A"}")
 //                    appendLine("  • User Agent: ${config.userAgent ?: "N/A"}")
-//                    appendLine("  • Logs Enabled: ${if (config.enableLogs) "✅" else "❌"}")
-//                    appendLine("  • Auto-Reconnect: ${if (config.enableAutoReconnect) "✅" else "❌"}")
+//                    appendLine("  • Logs Enabled: ${if (config.enableLogs) "[OK]" else "[ERROR]"}")
+//                    appendLine("  • Auto-Reconnect: ${if (config.enableAutoReconnect) "[OK]" else "[ERROR]"}")
 //                    appendLine("  • Ping Interval: ${config.pingIntervalMs}ms")
 //                } else {
-//                    appendLine("  ⚠️  No configuration found")
+//                    appendLine("  [WARN]  No configuration found")
 //                    appendLine("  Creating default configuration...")
 //
 //                    val newConfig = databaseManager.createOrUpdateAppConfig()
-//                    appendLine("  ✅ Default configuration created")
+//                    appendLine("  [OK] Default configuration created")
 //                }
 //
 //                appendLine("└───────────────────────────────────────────────┘")
 //            }
 //        } catch (e: Exception) {
 //            "┌─ CONFIGURATION ───────────────────────────────┐\n" +
-//                    "  ❌ ERROR: ${e.message}\n" +
+//                    "  [ERROR] ERROR: ${e.message}\n" +
 //                    "└───────────────────────────────────────────────┘"
 //        }
 //    }
@@ -949,9 +949,9 @@ class DatabaseInspector(
 //                }
 //
 //                if (issues.isEmpty()) {
-//                    appendLine("  ✅ All data integrity checks passed")
+//                    appendLine("  [OK] All data integrity checks passed")
 //                } else {
-//                    appendLine("  ⚠️  Found ${issues.size} integrity issues:")
+//                    appendLine("  [WARN]  Found ${issues.size} integrity issues:")
 //                    issues.forEach { issue ->
 //                        appendLine("  • $issue")
 //                    }
@@ -961,7 +961,7 @@ class DatabaseInspector(
 //            }
 //        } catch (e: Exception) {
 //            "┌─ DATA INTEGRITY ──────────────────────────────┐\n" +
-//                    "  ❌ ERROR: ${e.message}\n" +
+//                    "  [ERROR] ERROR: ${e.message}\n" +
 //                    "└───────────────────────────────────────────────┘"
 //        }
 //    }
@@ -975,7 +975,7 @@ class DatabaseInspector(
 //                appendLine("┌─ MEMORY ↔ DATABASE SYNC ──────────────────────┐")
 //
 //                if (sipCoreManager == null) {
-//                    appendLine("  ⚠️  SipCoreManager not available")
+//                    appendLine("  [WARN]  SipCoreManager not available")
 //                    appendLine("└───────────────────────────────────────────────┘")
 //                    return@buildString
 //                }
@@ -999,15 +999,15 @@ class DatabaseInspector(
 //                }
 //
 //                if (missingInDb.isEmpty() && missingInMemory.isEmpty()) {
-//                    appendLine("\n  ✅ Perfect sync - all accounts match")
+//                    appendLine("\n  [OK] Perfect sync - all accounts match")
 //                } else {
 //                    if (missingInDb.isNotEmpty()) {
-//                        appendLine("\n  ⚠️  ${missingInDb.size} accounts in memory but not in database:")
+//                        appendLine("\n  [WARN]  ${missingInDb.size} accounts in memory but not in database:")
 //                        missingInDb.forEach { appendLine("     • $it") }
 //                    }
 //
 //                    if (missingInMemory.isNotEmpty()) {
-//                        appendLine("\n  ⚠️  ${missingInMemory.size} accounts in database but not in memory:")
+//                        appendLine("\n  [WARN]  ${missingInMemory.size} accounts in database but not in memory:")
 //                        missingInMemory.forEach {
 //                            appendLine("     • ${it.username}@${it.domain}")
 //                        }
@@ -1026,7 +1026,7 @@ class DatabaseInspector(
 //                    val dbState = dbAccount?.registrationState ?: RegistrationState.NONE
 //
 //                    val match = memoryState == dbState
-//                    val icon = if (match) "✅" else "⚠️"
+//                    val icon = if (match) "[OK]" else "[WARN]"
 //
 //                    appendLine("  $icon $accountKey")
 //                    appendLine("     Memory: $memoryState | DB: $dbState")
@@ -1036,7 +1036,7 @@ class DatabaseInspector(
 //            }
 //        } catch (e: Exception) {
 //            "┌─ MEMORY ↔ DATABASE SYNC ──────────────────────┐\n" +
-//                    "  ❌ ERROR: ${e.message}\n" +
+//                    "  [ERROR] ERROR: ${e.message}\n" +
 //                    "└───────────────────────────────────────────────┘"
 //        }
 //    }
@@ -1071,7 +1071,7 @@ class DatabaseInspector(
 //            }
 //        } catch (e: Exception) {
 //            "┌─ GENERAL STATISTICS ──────────────────────────┐\n" +
-//                    "  ❌ ERROR: ${e.message}\n" +
+//                    "  [ERROR] ERROR: ${e.message}\n" +
 //                    "└───────────────────────────────────────────────┘"
 //        }
 //    }
@@ -1096,12 +1096,12 @@ class DatabaseInspector(
 //                    pushToken = "test_token",
 //                    pushProvider = "fcm"
 //                )
-//                appendLine("  ✅ Account created: ${account.id}")
+//                appendLine("  [OK] Account created: ${account.id}")
 //
 //                // Test 2: Leer cuenta
 //                appendLine("\n  Test 2: Reading account...")
 //                val readAccount = databaseManager.getSipAccountByCredentials("test_user", "test.domain")
-//                appendLine("  ${if (readAccount != null) "✅" else "❌"} Account read: ${readAccount?.username}")
+//                appendLine("  ${if (readAccount != null) "[OK]" else "[ERROR]"} Account read: ${readAccount?.username}")
 //
 //                // Test 3: Crear call log
 //                appendLine("\n  Test 3: Creating call log...")
@@ -1119,12 +1119,12 @@ class DatabaseInspector(
 //                    callType = CallTypes.SUCCESS,
 //                    endTime = Clock.System.now().toEpochMilliseconds() + 30000
 //                )
-//                appendLine("  ✅ Call log created: ${callLog.id}")
+//                appendLine("  [OK] Call log created: ${callLog.id}")
 //
 //                // Test 4: Leer call log
 //                appendLine("\n  Test 4: Reading call log...")
 //                val callLogs = databaseManager.getRecentCallLogs(1).first()
-//                appendLine("  ${if (callLogs.isNotEmpty()) "✅" else "❌"} Call log read")
+//                appendLine("  ${if (callLogs.isNotEmpty()) "[OK]" else "[ERROR]"} Call log read")
 //
 //                // Test 5: Crear contacto
 //                appendLine("\n  Test 5: Creating contact...")
@@ -1134,7 +1134,7 @@ class DatabaseInspector(
 //                    firstName = "Test",
 //                    lastName = "Contact"
 //                )
-//                appendLine("  ✅ Contact created: ${contact.id}")
+//                appendLine("  [OK] Contact created: ${contact.id}")
 //
 //                // Test 6: Actualizar configuración
 //                appendLine("\n  Test 6: Updating configuration...")
@@ -1142,19 +1142,19 @@ class DatabaseInspector(
 //                    enableLogs = true,
 //                    enableAutoReconnect = true
 //                )
-//                appendLine("  ✅ Configuration updated")
+//                appendLine("  [OK] Configuration updated")
 //
 //                // Limpiar datos de prueba
 //                appendLine("\n  Cleaning up test data...")
 //                databaseManager.deleteSipAccount(account.id)
-//                appendLine("  ✅ Test data cleaned")
+//                appendLine("  [OK] Test data cleaned")
 //
-//                appendLine("\n  ✅ ALL READ/WRITE TESTS PASSED")
+//                appendLine("\n  [OK] ALL READ/WRITE TESTS PASSED")
 //                appendLine("└───────────────────────────────────────────────┘")
 //            }
 //        } catch (e: Exception) {
 //            "┌─ READ/WRITE TEST ─────────────────────────────┐\n" +
-//                    "  ❌ TEST FAILED: ${e.message}\n" +
+//                    "  [ERROR] TEST FAILED: ${e.message}\n" +
 //                    "  Stack trace: ${e.stackTraceToString()}\n" +
 //                    "└───────────────────────────────────────────────┘"
 //        }

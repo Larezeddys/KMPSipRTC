@@ -8,8 +8,6 @@ import javax.sound.sampled.*
 actual fun createAudioManager(): AudioManager = DesktopAudioManagerImpl()
 
 class DesktopAudioManagerImpl : AudioManager {
-    private var incomingClip: Clip? = null
-    private var outgoingClip: Clip? = null
     private var incomingRingtoneJob: Job? = null
     private var outgoingRingtoneJob: Job? = null
     private var vibrationJob: Job? = null
@@ -23,6 +21,10 @@ class DesktopAudioManagerImpl : AudioManager {
     @Volatile private var shouldStopIncoming = false
     @Volatile private var shouldStopOutgoing = false
     @Volatile private var isVibrating = false
+
+    // Referencia al SourceDataLine activo para poder cerrarlo al detener
+    @Volatile private var activeIncomingLine: SourceDataLine? = null
+    @Volatile private var activeOutgoingLine: SourceDataLine? = null
 
     private var currentVibrationPattern = "default"
 
@@ -39,328 +41,300 @@ class DesktopAudioManagerImpl : AudioManager {
     override fun setVibrationPattern(patternName: String) {
         if (VibrationPatterns.patterns.containsKey(patternName)) {
             currentVibrationPattern = patternName
-            println("Vibration pattern set to: $patternName (Desktop - visual only)")
         }
     }
 
     override fun setIncomingRingtone(path: String) {
         incomingRingtonePath = path
-        println("Incoming ringtone path set: $path")
     }
 
     override fun setOutgoingRingtone(path: String) {
         outgoingRingtonePath = path
-        println("Outgoing ringtone path set: $path")
+    }
+
+    /**
+     * Reproduce un archivo de audio usando SourceDataLine (streaming).
+     * Más confiable que Clip para archivos WAV y otros formatos PCM.
+     * Retorna true si la reproducción terminó normalmente, false si fue interrumpida o falló.
+     */
+    private fun playAudioStreaming(path: String, shouldStop: () -> Boolean, lineRef: (SourceDataLine?) -> Unit): Boolean {
+        var audioStream: AudioInputStream? = null
+        var convertedStream: AudioInputStream? = null
+        var line: SourceDataLine? = null
+
+        try {
+            // Abrir el audio input stream según el tipo de path
+            audioStream = openAudioInputStream(path)
+            if (audioStream == null) {
+                println("AudioManager: No se pudo abrir audio stream para: $path")
+                return false
+            }
+
+            val baseFormat = audioStream.format
+            println("AudioManager: Formato original: $baseFormat")
+
+            // Convertir a formato reproducible (PCM_SIGNED, 16-bit)
+            val playableFormat = AudioFormat(
+                AudioFormat.Encoding.PCM_SIGNED,
+                baseFormat.sampleRate,
+                16,
+                baseFormat.channels,
+                baseFormat.channels * 2,
+                baseFormat.sampleRate,
+                false // little-endian
+            )
+
+            convertedStream = if (baseFormat.encoding != AudioFormat.Encoding.PCM_SIGNED ||
+                baseFormat.sampleSizeInBits != 16) {
+                if (AudioSystem.isConversionSupported(playableFormat, baseFormat)) {
+                    println("AudioManager: Convirtiendo formato a: $playableFormat")
+                    AudioSystem.getAudioInputStream(playableFormat, audioStream)
+                } else {
+                    println("AudioManager: Conversión no soportada, usando formato original")
+                    audioStream
+                }
+            } else {
+                audioStream
+            }
+
+            val formatToUse = convertedStream.format
+            println("AudioManager: Formato final: $formatToUse")
+
+            // Abrir SourceDataLine
+            val dataLineInfo = DataLine.Info(SourceDataLine::class.java, formatToUse)
+            if (!AudioSystem.isLineSupported(dataLineInfo)) {
+                println("AudioManager: Línea de audio no soportada para formato: $formatToUse")
+                return false
+            }
+
+            line = AudioSystem.getLine(dataLineInfo) as SourceDataLine
+            line.open(formatToUse)
+            lineRef(line)
+            line.start()
+
+            println("AudioManager: Reproduciendo audio...")
+
+            // Streaming: leer y escribir en bloques
+            val buffer = ByteArray(4096)
+            var bytesRead: Int
+            while (!shouldStop()) {
+                bytesRead = convertedStream.read(buffer, 0, buffer.size)
+                if (bytesRead == -1) break
+                line.write(buffer, 0, bytesRead)
+            }
+
+            if (!shouldStop()) {
+                // Solo hacer drain si no fue interrumpido
+                line.drain()
+            }
+
+            println("AudioManager: Reproducción completada")
+            return !shouldStop()
+
+        } catch (e: UnsupportedAudioFileException) {
+            println("AudioManager: Formato de audio no soportado: ${e.message}")
+            e.printStackTrace()
+            return false
+        } catch (e: Exception) {
+            if (!shouldStop()) {
+                println("AudioManager: Error reproduciendo audio: ${e.message}")
+                e.printStackTrace()
+            }
+            return false
+        } finally {
+            lineRef(null)
+            try { line?.stop() } catch (_: Exception) {}
+            try { line?.close() } catch (_: Exception) {}
+            try { convertedStream?.close() } catch (_: Exception) {}
+            // Solo cerrar audioStream si es diferente de convertedStream
+            if (convertedStream !== audioStream) {
+                try { audioStream?.close() } catch (_: Exception) {}
+            }
+        }
+    }
+
+    /**
+     * Abre un AudioInputStream desde diferentes tipos de rutas:
+     * - jar: URLs (recursos dentro del JAR)
+     * - http/https URLs
+     * - Rutas de classpath (empezando con /)
+     * - Archivos locales
+     */
+    private fun openAudioInputStream(path: String): AudioInputStream? {
+        return try {
+            when {
+                path.startsWith("jar:") || path.startsWith("http://") || path.startsWith("https://") -> {
+                    // Usar stream bufferizado para mejorar compatibilidad con SPI (p.ej. MP3)
+                    val url = java.net.URL(path)
+                    val buffered = BufferedInputStream(url.openStream())
+                    AudioSystem.getAudioInputStream(buffered)
+                }
+                path.startsWith("/") -> {
+                    // Intentar como recurso de classpath primero
+                    val resourceUrl = this::class.java.getResource(path)
+                    if (resourceUrl != null) {
+                        val buffered = BufferedInputStream(resourceUrl.openStream())
+                        AudioSystem.getAudioInputStream(buffered)
+                    } else {
+                        val buffered = BufferedInputStream(File(path).inputStream())
+                        AudioSystem.getAudioInputStream(buffered)
+                    }
+                }
+                else -> {
+                    val buffered = BufferedInputStream(File(path).inputStream())
+                    AudioSystem.getAudioInputStream(buffered)
+                }
+            }
+        } catch (e: Exception) {
+            println("AudioManager: Error abriendo audio stream: ${e.message}")
+            e.printStackTrace()
+            null
+        }
     }
 
     override fun playRingtone(syncVibration: Boolean) {
-        if (isIncomingRingtonePlaying) {
-            println("Incoming ringtone already playing")
-            return
-        }
+        if (isIncomingRingtonePlaying) return
 
         stopOutgoingRingtone()
 
-        val path = incomingRingtonePath
-        if (path == null) {
-            println("No incoming ringtone path set")
+        val path = incomingRingtonePath ?: run {
+            println("AudioManager: No incoming ringtone path set")
             return
         }
 
         isIncomingRingtonePlaying = true
         shouldStopIncoming = false
 
-        println("Starting incoming ringtone: $path")
+        println("AudioManager: Iniciando ringtone entrante: $path")
 
         incomingRingtoneJob = audioScope.launch {
             try {
+                if (syncVibration) {
+                    startSynchronizedVibration()
+                } else {
+                    startVibration()
+                }
+
                 var loopCount = 0
                 while (!shouldStopIncoming && isIncomingRingtonePlaying) {
                     loopCount++
-                    println("Incoming ringtone loop iteration: $loopCount")
+                    println("AudioManager: Ringtone entrante iteración: $loopCount")
 
-                    val clip = createAudioClip(path)
-                    if (clip == null) {
-                        println("Failed to create audio clip")
+                    val played = playAudioStreaming(
+                        path,
+                        shouldStop = { shouldStopIncoming || !isIncomingRingtonePlaying },
+                        lineRef = { activeIncomingLine = it }
+                    )
+
+                    if (!played && !shouldStopIncoming) {
+                        println("AudioManager: Fallo reproducción, deteniendo loop")
                         break
                     }
 
-                    incomingClip = clip
-
-                    try {
-                        if (syncVibration) {
-                            startSynchronizedVibration()
-                        } else {
-                            startVibration()
-                        }
-
-                        clip.start()
-
-                        // Esperar mientras reproduce
-                        while (clip.isRunning && !shouldStopIncoming && isIncomingRingtonePlaying) {
-                            delay(100)
-                        }
-
-                        println("Clip finished playing")
-
-                    } catch (e: Exception) {
-                        println("Error during playback: ${e.message}")
-                        e.printStackTrace()
-                    } finally {
-                        try {
-                            if (clip.isRunning) clip.stop()
-                            clip.close()
-                        } catch (e: Exception) {
-                            println("Error closing clip: ${e.message}")
-                        }
-                        incomingClip = null
-                    }
-
+                    // Pausa entre repeticiones
                     if (!shouldStopIncoming && isIncomingRingtonePlaying) {
                         delay(800)
                     }
                 }
-
-                println("Ringtone loop ended after $loopCount iterations")
-
+            } catch (e: CancellationException) {
+                // Cancelación normal
             } catch (e: Exception) {
-                println("Error in incoming ringtone coroutine: ${e.message}")
-                e.printStackTrace()
+                println("AudioManager: Error en coroutine de ringtone: ${e.message}")
             } finally {
                 isIncomingRingtonePlaying = false
                 shouldStopIncoming = false
                 stopVibration()
-                incomingClip?.close()
-                incomingClip = null
             }
-        }
-    }
-
-    private fun startSynchronizedVibration() {
-        if (isVibrating) return
-
-        isVibrating = true
-        println("Starting synchronized vibration (Desktop - simulated)")
-
-        vibrationJob = audioScope.launch {
-            try {
-                while (isVibrating && isIncomingRingtonePlaying && !shouldStopIncoming) {
-                    vibrateToRhythm()
-                    delay(100)
-                }
-            } catch (e: Exception) {
-                println("Error in synchronized vibration: ${e.message}")
-            } finally {
-                stopVibration()
-            }
-        }
-    }
-
-    private suspend fun vibrateToRhythm() {
-        val pattern = VibrationPatterns.patterns[currentVibrationPattern]
-            ?: VibrationPatterns.patterns["default"]!!
-
-        try {
-            // En desktop, podríamos simular vibración visualmente
-            // o simplemente logear el patrón
-            println("Vibration pulse (pattern: $currentVibrationPattern)")
-
-            val totalDuration = pattern.pattern.sum()
-            delay(totalDuration)
-        } catch (e: Exception) {
-            println("Error in rhythm vibration: ${e.message}")
-        }
-    }
-
-    private fun startVibration() {
-        if (isVibrating) return
-
-        isVibrating = true
-        println("Starting vibration (Desktop - simulated)")
-
-        vibrationJob = audioScope.launch {
-            try {
-                val pattern = VibrationPatterns.patterns[currentVibrationPattern]
-                    ?: VibrationPatterns.patterns["default"]!!
-
-                while (isVibrating && isIncomingRingtonePlaying && !shouldStopIncoming) {
-                    println("Vibration pulse")
-                    delay(pattern.pattern.sum())
-                }
-            } catch (e: Exception) {
-                println("Error in vibration: ${e.message}")
-            } finally {
-                stopVibration()
-            }
-        }
-    }
-
-    private fun stopVibration() {
-        if (!isVibrating) return
-        isVibrating = false
-
-        try {
-            vibrationJob?.cancel()
-            vibrationJob = null
-            println("Vibration stopped")
-        } catch (e: Exception) {
-            println("Error stopping vibration: ${e.message}")
-        }
-    }
-
-    private fun createAudioClip(path: String): Clip? {
-        return try {
-            // Intentar cargar desde recursos
-            val audioInputStream = if (path.startsWith("http://") || path.startsWith("https://")) {
-                // URL externa
-                val url = java.net.URL(path)
-                AudioSystem.getAudioInputStream(BufferedInputStream(url.openStream()))
-            } else if (path.startsWith("/")) {
-                // Recurso en classpath
-                val resourceStream = this::class.java.getResourceAsStream(path)
-                if (resourceStream != null) {
-                    AudioSystem.getAudioInputStream(BufferedInputStream(resourceStream))
-                } else {
-                    // Intentar como archivo
-                    AudioSystem.getAudioInputStream(File(path))
-                }
-            } else {
-                // Archivo local
-                AudioSystem.getAudioInputStream(File(path))
-            }
-
-            val clip = AudioSystem.getClip()
-            clip.open(audioInputStream)
-            println("Audio clip created successfully")
-            clip
-        } catch (e: Exception) {
-            println("Error creating audio clip: ${e.message}")
-            e.printStackTrace()
-            null
         }
     }
 
     override fun playOutgoingRingtone() {
-        if (isOutgoingRingtonePlaying) {
-            println("Outgoing ringtone already playing")
-            return
-        }
+        if (isOutgoingRingtonePlaying) return
 
         stopRingtone()
 
-        val path = outgoingRingtonePath
-        if (path == null) {
-            println("No outgoing ringtone path set")
+        val path = outgoingRingtonePath ?: run {
+            println("AudioManager: No outgoing ringtone path set")
             return
         }
 
         isOutgoingRingtonePlaying = true
         shouldStopOutgoing = false
 
-        println("Starting outgoing ringtone: $path")
+        println("AudioManager: Iniciando ringback: $path")
 
         outgoingRingtoneJob = audioScope.launch {
             try {
                 var loopCount = 0
                 while (!shouldStopOutgoing && isOutgoingRingtonePlaying) {
                     loopCount++
-                    println("Outgoing ringtone loop iteration: $loopCount")
+                    println("AudioManager: Ringback iteración: $loopCount")
 
-                    val clip = createAudioClip(path)
-                    if (clip == null) {
-                        println("Failed to create outgoing audio clip")
+                    val played = playAudioStreaming(
+                        path,
+                        shouldStop = { shouldStopOutgoing || !isOutgoingRingtonePlaying },
+                        lineRef = { activeOutgoingLine = it }
+                    )
+
+                    if (!played && !shouldStopOutgoing) {
+                        println("AudioManager: Fallo reproducción ringback, deteniendo loop")
                         break
-                    }
-
-                    outgoingClip = clip
-
-                    try {
-                        clip.start()
-
-                        while (clip.isRunning && !shouldStopOutgoing && isOutgoingRingtonePlaying) {
-                            delay(100)
-                        }
-
-                    } catch (e: Exception) {
-                        println("Error during outgoing playback: ${e.message}")
-                    } finally {
-                        try {
-                            if (clip.isRunning) clip.stop()
-                            clip.close()
-                        } catch (e: Exception) {
-                            println("Error closing outgoing clip: ${e.message}")
-                        }
-                        outgoingClip = null
                     }
 
                     if (!shouldStopOutgoing && isOutgoingRingtonePlaying) {
                         delay(1000)
                     }
                 }
-
-                println("Outgoing ringtone loop ended after $loopCount iterations")
-
+            } catch (e: CancellationException) {
+                // Cancelación normal
             } catch (e: Exception) {
-                println("Error in outgoing coroutine: ${e.message}")
-                e.printStackTrace()
+                println("AudioManager: Error en coroutine de ringback: ${e.message}")
             } finally {
                 isOutgoingRingtonePlaying = false
                 shouldStopOutgoing = false
-                outgoingClip?.close()
-                outgoingClip = null
             }
         }
     }
 
     override fun stopRingtone() {
-        println("Stopping incoming ringtone")
         shouldStopIncoming = true
         isIncomingRingtonePlaying = false
         stopVibration()
 
         try {
+            // Cerrar línea activa para interrumpir reproducción inmediatamente
+            activeIncomingLine?.let { line ->
+                try { line.stop() } catch (_: Exception) {}
+                try { line.close() } catch (_: Exception) {}
+            }
+            activeIncomingLine = null
+
             incomingRingtoneJob?.cancel()
             incomingRingtoneJob = null
-
-            incomingClip?.let { clip ->
-                try {
-                    if (clip.isRunning) clip.stop()
-                    clip.close()
-                } catch (e: Exception) {
-                    println("Error stopping clip: ${e.message}")
-                }
-            }
-            incomingClip = null
         } catch (e: Exception) {
-            println("Error stopping ringtone: ${e.message}")
+            println("AudioManager: Error deteniendo ringtone: ${e.message}")
         }
     }
 
     override fun stopOutgoingRingtone() {
-        println("Stopping outgoing ringtone")
         shouldStopOutgoing = true
         isOutgoingRingtonePlaying = false
 
         try {
+            activeOutgoingLine?.let { line ->
+                try { line.stop() } catch (_: Exception) {}
+                try { line.close() } catch (_: Exception) {}
+            }
+            activeOutgoingLine = null
+
             outgoingRingtoneJob?.cancel()
             outgoingRingtoneJob = null
-
-            outgoingClip?.let { clip ->
-                try {
-                    if (clip.isRunning) clip.stop()
-                    clip.close()
-                } catch (e: Exception) {
-                    println("Error stopping outgoing clip: ${e.message}")
-                }
-            }
-            outgoingClip = null
         } catch (e: Exception) {
-            println("Error stopping outgoing ringtone: ${e.message}")
+            println("AudioManager: Error deteniendo ringback: ${e.message}")
         }
     }
 
     override fun stopAllRingtones() {
-        println("Stopping ALL ringtones")
         shouldStopIncoming = true
         shouldStopOutgoing = true
         isIncomingRingtonePlaying = false
@@ -368,30 +342,24 @@ class DesktopAudioManagerImpl : AudioManager {
         stopVibration()
 
         try {
+            activeIncomingLine?.let { line ->
+                try { line.stop() } catch (_: Exception) {}
+                try { line.close() } catch (_: Exception) {}
+            }
+            activeIncomingLine = null
+
+            activeOutgoingLine?.let { line ->
+                try { line.stop() } catch (_: Exception) {}
+                try { line.close() } catch (_: Exception) {}
+            }
+            activeOutgoingLine = null
+
             incomingRingtoneJob?.cancel()
             outgoingRingtoneJob?.cancel()
             incomingRingtoneJob = null
             outgoingRingtoneJob = null
-
-            incomingClip?.let { clip ->
-                try {
-                    if (clip.isRunning) clip.stop()
-                    clip.close()
-                } catch (e: Exception) {}
-            }
-            incomingClip = null
-
-            outgoingClip?.let { clip ->
-                try {
-                    if (clip.isRunning) clip.stop()
-                    clip.close()
-                } catch (e: Exception) {}
-            }
-            outgoingClip = null
-
-            println("All ringtones stopped successfully")
         } catch (e: Exception) {
-            println("Error in stopAllRingtones: ${e.message}")
+            println("AudioManager: Error en stopAllRingtones: ${e.message}")
         }
     }
 
@@ -411,7 +379,7 @@ class DesktopAudioManagerImpl : AudioManager {
         return isVibrating
     }
 
-   override  fun getDiagnosticInfo(): String {
+    override fun getDiagnosticInfo(): String {
         return buildString {
             appendLine("=== AUDIO MANAGER DIAGNOSTIC (Desktop) ===")
             appendLine("Incoming playing: $isIncomingRingtonePlaying")
@@ -421,17 +389,65 @@ class DesktopAudioManagerImpl : AudioManager {
             appendLine("Should stop outgoing: $shouldStopOutgoing")
             appendLine("Incoming job active: ${incomingRingtoneJob?.isActive}")
             appendLine("Outgoing job active: ${outgoingRingtoneJob?.isActive}")
-            appendLine("Vibration job active: ${vibrationJob?.isActive}")
-            appendLine("Current vibration pattern: $currentVibrationPattern")
-            appendLine("Incoming clip: ${incomingClip != null}")
-            appendLine("Outgoing clip: ${outgoingClip != null}")
+            appendLine("Active incoming line: ${activeIncomingLine != null}")
+            appendLine("Active outgoing line: ${activeOutgoingLine != null}")
             appendLine("Audio scope active: ${audioScope.isActive}")
+            appendLine("Incoming path: $incomingRingtonePath")
+            appendLine("Outgoing path: $outgoingRingtonePath")
         }
     }
 
-   override  fun cleanup() {
+    override fun cleanup() {
         stopAllRingtones()
         audioScope.cancel()
     }
-}
 
+    // --- Vibration (simulada en Desktop) ---
+
+    private fun startSynchronizedVibration() {
+        if (isVibrating) return
+        isVibrating = true
+
+        vibrationJob = audioScope.launch {
+            try {
+                while (isVibrating && isIncomingRingtonePlaying && !shouldStopIncoming) {
+                    val pattern = VibrationPatterns.patterns[currentVibrationPattern]
+                        ?: VibrationPatterns.patterns["default"]!!
+                    delay(pattern.pattern.sum())
+                }
+            } catch (_: CancellationException) {
+            } catch (e: Exception) {
+                println("AudioManager: Error en vibración: ${e.message}")
+            } finally {
+                isVibrating = false
+            }
+        }
+    }
+
+    private fun startVibration() {
+        if (isVibrating) return
+        isVibrating = true
+
+        vibrationJob = audioScope.launch {
+            try {
+                while (isVibrating && isIncomingRingtonePlaying && !shouldStopIncoming) {
+                    val pattern = VibrationPatterns.patterns[currentVibrationPattern]
+                        ?: VibrationPatterns.patterns["default"]!!
+                    delay(pattern.pattern.sum())
+                }
+            } catch (_: CancellationException) {
+            } catch (e: Exception) {
+                println("AudioManager: Error en vibración: ${e.message}")
+            } finally {
+                isVibrating = false
+            }
+        }
+    }
+
+    private fun stopVibration() {
+        if (!isVibrating) return
+        isVibrating = false
+        vibrationJob?.cancel()
+        vibrationJob = null
+    }
+}
