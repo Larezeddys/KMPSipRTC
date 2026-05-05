@@ -299,7 +299,10 @@ internal object CallStateManager {
 
         updateCallState(
             newState = CallState.STREAMS_RUNNING,
-            callId = callId
+            callId = callId,
+            // CONNECTED and STREAMS_RUNNING are intentionally emitted back-to-back
+            // after the SIP 200 OK. Do not let the anti-spam interval drop this state.
+            forceUpdate = true
         )
     }
 

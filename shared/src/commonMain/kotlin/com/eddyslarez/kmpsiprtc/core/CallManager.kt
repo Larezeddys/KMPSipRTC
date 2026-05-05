@@ -927,10 +927,12 @@ class CallManager(
 
         sipCoreManager.callStartTimeMillis = kotlin.time.Clock.System.now().toEpochMilliseconds()
 
-        sipCoreManager.currentAccountInfo?.currentCallData?.let { callData ->
-            CallStateManager.streamsRunning(callData.value?.callId ?: generateId())
+        if (activeCallData == null) {
+            log.w(TAG) { "handleWebRtcConnected: no active call found for STREAMS_RUNNING" }
+            return
         }
 
+        CallStateManager.streamsRunning(activeCallData.callId)
         sipCoreManager.notifyCallStateChanged(CallState.STREAMS_RUNNING)
     }
 
