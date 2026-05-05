@@ -57,6 +57,9 @@ expect class ConferenceLiveKitManager() {
     /** Habilita/deshabilita screen share */
     suspend fun setScreenShareEnabled(enabled: Boolean)
 
+    /** Levanta o baja la mano local y lo publica a la sala */
+    suspend fun setHandRaised(raised: Boolean)
+
     // --- Dispositivos ---
 
     /** Carga y retorna los dispositivos disponibles */
@@ -70,6 +73,9 @@ expect class ConferenceLiveKitManager() {
 
     /** Selecciona un speaker por ID */
     suspend fun selectSpeaker(deviceId: String)
+
+    /** Selecciona una pantalla/ventana para compartir por ID */
+    suspend fun selectScreenShareSource(deviceId: String)
 
     // --- Video track handles para rendering ---
 

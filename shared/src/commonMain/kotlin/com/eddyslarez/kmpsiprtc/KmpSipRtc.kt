@@ -1640,6 +1640,25 @@ class KmpSipRtc private constructor() {
     }
 
     /**
+     * Establece el estado de mute de forma absoluta (no toggle). Idempotente:
+     * si el track ya estaba en ese estado, no hay efecto secundario.
+     */
+    fun setMute(muted: Boolean) {
+        checkInitialized()
+        log.d(tag = TAG) { "Setting mute = $muted" }
+        sipCoreManager?.webRtcManager?.setMuted(muted)
+
+        getCurrentCallInfo()?.let { callInfo ->
+            val mutedCallInfo = callInfo.copy(isMuted = muted)
+            try {
+                callListener?.onMuteStateChanged(muted, mutedCallInfo)
+            } catch (e: Exception) {
+                log.e(tag = TAG) { "Error in CallListener onMuteStateChanged: ${e.message}" }
+            }
+        }
+    }
+
+    /**
      * Verifica si está silenciado
      */
     fun isMuted(): Boolean {

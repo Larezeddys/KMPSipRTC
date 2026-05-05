@@ -784,6 +784,14 @@ class AudioController(
     // ==================== MUTE CONTROL ====================
 
     fun setMicrophoneMute(muted: Boolean) {
+        // 🛂 Telecom-managed: NO tocar AudioManager.isMicrophoneMute. Telecom es dueño
+        // del flag de sistema; tocarlo aquí dispara onCallAudioStateChanged y crea un
+        // feedback loop con la app. El track-level mute (localAudioTrack.setEnabled)
+        // hecho por PeerConnectionController ya silencia el TX a WebRTC.
+        if (telecomManaged) {
+            log.d(TAG) { "🛂 setMicrophoneMute($muted) skipped (Telecom-managed; track-level mute applies)" }
+            return
+        }
         audioManager?.isMicrophoneMute = muted
         log.d(TAG) { "Microphone muted: $muted" }
     }

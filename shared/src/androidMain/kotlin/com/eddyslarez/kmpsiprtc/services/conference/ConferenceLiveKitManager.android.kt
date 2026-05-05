@@ -8,10 +8,10 @@ import io.livekit.android.events.collect
 import io.livekit.android.room.Room
 import io.livekit.android.room.participant.Participant
 import io.livekit.android.room.track.CameraPosition
+import io.livekit.android.room.track.DataPublishReliability
 import io.livekit.android.room.track.LocalVideoTrack
 import io.livekit.android.room.track.Track
 import io.livekit.android.room.track.VideoTrack
-import livekit.org.webrtc.DataChannel
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -41,6 +41,9 @@ actual class ConferenceLiveKitManager actual constructor() {
 
     private val _chatMessages = MutableStateFlow<List<LkChatMessage>>(emptyList())
     actual val chatMessages: StateFlow<List<LkChatMessage>> = _chatMessages.asStateFlow()
+
+    private val raisedHands = mutableMapOf<String, Long>()
+    private var localHandRaised = false
 
     /**
      * Debe llamarse antes de connect() para proveer el contexto Android.
@@ -102,6 +105,8 @@ actual class ConferenceLiveKitManager actual constructor() {
             _participants.value = emptyList()
             _videoTracks.value = emptyList()
             _mediaState.value = LkMediaState()
+            raisedHands.clear()
+            localHandRaised = false
         }
     }
 
@@ -126,6 +131,34 @@ actual class ConferenceLiveKitManager actual constructor() {
         _mediaState.value = _mediaState.value.copy(screenShareEnabled = enabled)
         updateParticipants()
         updateVideoTracks()
+    }
+
+    actual suspend fun setHandRaised(raised: Boolean) {
+        val lkRoom = room ?: return
+        val lp = lkRoom.localParticipant
+        val identity = lp.identity?.value ?: return
+        val name = (lp.name ?: identity).replace("\"", "\\\"")
+        val now = System.currentTimeMillis()
+
+        localHandRaised = raised
+        if (raised) {
+            raisedHands[identity] = now
+        } else {
+            raisedHands.remove(identity)
+        }
+
+        val type = if (raised) "hand/raise" else "hand/lower"
+        val payload = """{"type":"$type","at":$now,"participantIdentity":"$identity","author":"$name"}""".encodeToByteArray()
+        try {
+            lp.publishData(
+                data = payload,
+                reliability = DataPublishReliability.RELIABLE
+            )
+        } catch (e: Exception) {
+            log.e(tag = TAG) { "Error enviando estado de mano: ${e.message}" }
+        }
+
+        updateParticipants()
     }
 
     actual suspend fun loadDevices(): LkDevices {
@@ -174,6 +207,10 @@ actual class ConferenceLiveKitManager actual constructor() {
         log.d(tag = TAG) { "selectSpeaker: $deviceId, speakerOn=$useSpeaker" }
     }
 
+    actual suspend fun selectScreenShareSource(deviceId: String) {
+        log.d(tag = TAG) { "selectScreenShareSource: $deviceId (gestionado por SDK)" }
+    }
+
     actual fun getVideoTrackHandle(participantIdentity: String): LkVideoTrackHandle? {
         return _videoTracks.value.firstOrNull {
             it.participantIdentity == participantIdentity && !it.isScreenShare
@@ -197,7 +234,7 @@ actual class ConferenceLiveKitManager actual constructor() {
         try {
             lkRoom.localParticipant.publishData(
                 data = bytes,
-                reliability = DataChannel.DataReliability.RELIABLE
+                reliability = DataPublishReliability.RELIABLE
             )
 
             // Agregar mensaje local al historial
@@ -285,6 +322,12 @@ actual class ConferenceLiveKitManager actual constructor() {
         try {
             val text = data.decodeToString()
             val jsonObj = Json.parseToJsonElement(text).jsonObject
+            val type = jsonObj["type"]?.jsonPrimitive?.contentOrNull
+            if (type == "hand/raise" || type == "hand/lower") {
+                handleHandDataMessage(jsonObj, participant)
+                return
+            }
+
             val author = jsonObj["author"]?.jsonPrimitive?.contentOrNull ?: participant?.name ?: "?"
             val message = jsonObj["message"]?.jsonPrimitive?.contentOrNull ?: return
 
@@ -308,6 +351,32 @@ actual class ConferenceLiveKitManager actual constructor() {
         } catch (e: Exception) {
             log.w(tag = TAG) { "Error parseando data recibida: ${e.message}" }
         }
+    }
+
+    private fun handleHandDataMessage(jsonObj: JsonObject, participant: Participant?) {
+        val senderIdentity = participant?.identity?.value ?: return
+        val localIdentity = room?.localParticipant?.identity?.value ?: ""
+        val type = jsonObj["type"]?.jsonPrimitive?.contentOrNull ?: return
+        val at = jsonObj["at"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: System.currentTimeMillis()
+
+        when (type) {
+            "hand/raise" -> {
+                if (senderIdentity != localIdentity) {
+                    raisedHands[senderIdentity] = at
+                }
+            }
+            "hand/lower" -> {
+                val target = jsonObj["target"]?.jsonPrimitive?.contentOrNull
+                if (target == localIdentity) {
+                    localHandRaised = false
+                    raisedHands.remove(localIdentity)
+                } else {
+                    raisedHands.remove(target ?: senderIdentity)
+                }
+            }
+        }
+
+        updateParticipants()
     }
 
     private fun updateParticipants() {
@@ -384,6 +453,8 @@ actual class ConferenceLiveKitManager actual constructor() {
             isAudioEnabled = hasAudio,
             isVideoEnabled = hasVideo,
             isScreenSharing = hasScreenShare,
+            isHandRaised = if (isLocal) localHandRaised else raisedHands.containsKey(identityStr),
+            handRaisedAt = raisedHands[identityStr],
             videoTrackSid = videoSid,
             screenShareTrackSid = screenSid,
         )

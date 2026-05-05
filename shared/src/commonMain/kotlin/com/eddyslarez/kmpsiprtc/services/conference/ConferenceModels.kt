@@ -17,6 +17,8 @@ data class LkParticipant(
     val isAudioEnabled: Boolean = false,
     val isVideoEnabled: Boolean = false,
     val isScreenSharing: Boolean = false,
+    val isHandRaised: Boolean = false,
+    val handRaisedAt: Long? = null,
     val videoTrackSid: String? = null,
     val screenShareTrackSid: String? = null,
 )
@@ -57,9 +59,11 @@ data class LkDevices(
     val cameras: List<LkDevice> = emptyList(),
     val microphones: List<LkDevice> = emptyList(),
     val speakers: List<LkDevice> = emptyList(),
+    val screenShareSources: List<LkDevice> = emptyList(),
     val selectedCameraId: String? = null,
     val selectedMicrophoneId: String? = null,
     val selectedSpeakerId: String? = null,
+    val selectedScreenShareSourceId: String? = null,
 )
 
 /**

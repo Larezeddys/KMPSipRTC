@@ -14,6 +14,7 @@ import dev.onvoid.webrtc.*
 import dev.onvoid.webrtc.media.*
 import dev.onvoid.webrtc.media.audio.*
 import dev.onvoid.webrtc.media.video.*
+import dev.onvoid.webrtc.media.video.desktop.ScreenCapturer
 import kotlinx.coroutines.*
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
@@ -54,6 +55,9 @@ class DesktopPeerConnectionController(
     private var videoDeviceSource: VideoDeviceSource? = null
     private var localVideoTrack: VideoTrack? = null
     private var videoSender: RTCRtpSender? = null
+    private var screenVideoSource: VideoDesktopSource? = null
+    private var localScreenTrack: VideoTrack? = null
+    private var screenSender: RTCRtpSender? = null
     // Callback para cuando llega un video track remoto
     var onRemoteVideoTrack: ((VideoTrack) -> Unit)? = null
 
@@ -953,12 +957,81 @@ class DesktopPeerConnectionController(
 
     fun getLocalVideoTrack(): VideoTrack? = localVideoTrack
 
+    fun addLocalScreenShareTrack(sourceId: String? = null): VideoTrack? {
+        val factory = peerConnectionFactory ?: return null
+        val pc = peerConnection ?: return null
+
+        if (localScreenTrack != null) {
+            return localScreenTrack
+        }
+
+        var capturer: ScreenCapturer? = null
+        return try {
+            capturer = ScreenCapturer()
+            val sources = capturer.getDesktopSources()
+            val screen = sources.firstOrNull { it.id.toString() == sourceId } ?: sources.firstOrNull()
+            if (screen == null) {
+                log.w(TAG) { "No hay pantallas disponibles para compartir" }
+                return null
+            }
+
+            val source = VideoDesktopSource().apply {
+                setSourceId(screen.id, false)
+                setFrameRate(15)
+                setMaxFrameSize(1280, 720)
+            }
+            screenVideoSource = source
+
+            val track = factory.createVideoTrack("screen0", source)
+            localScreenTrack = track
+            screenSender = pc.addTrack(track, listOf("stream0"))
+
+            source.start()
+
+            log.d(TAG) { "✅ Screen share track added (${screen.title})" }
+            track
+        } catch (e: Exception) {
+            log.e(TAG) { "Error adding screen share track: ${e.message}" }
+            e.printStackTrace()
+            removeLocalScreenShareTrack()
+            null
+        } finally {
+            try {
+                capturer?.dispose()
+            } catch (_: Throwable) {}
+        }
+    }
+
+    fun removeLocalScreenShareTrack() {
+        try {
+            screenVideoSource?.stop()
+            screenVideoSource?.dispose()
+        } catch (_: Throwable) {}
+        screenVideoSource = null
+
+        try {
+            screenSender?.let { peerConnection?.removeTrack(it) }
+        } catch (_: Throwable) {}
+        screenSender = null
+
+        try {
+            localScreenTrack?.setEnabled(false)
+            localScreenTrack?.dispose()
+        } catch (_: Throwable) {}
+        localScreenTrack = null
+
+        log.d(TAG) { "Screen share track removed" }
+    }
+
+    fun getLocalScreenShareTrack(): VideoTrack? = localScreenTrack
+
     fun closePeerConnection() {
         log.d(TAG) { "Closing PeerConnection" }
 
         stopInjectionPacer()
 
         // Limpiar video
+        removeLocalScreenShareTrack()
         removeLocalVideoTrack()
 
         try {

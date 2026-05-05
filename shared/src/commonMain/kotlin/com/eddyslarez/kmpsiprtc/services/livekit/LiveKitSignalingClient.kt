@@ -63,13 +63,18 @@ class LiveKitSignalingClient {
 
             // Extraer host, puerto y path base de la URL
             val isSecure = wsUrl.startsWith("wss://")
+            val hasExplicitWsScheme = wsUrl.startsWith("ws://") || wsUrl.startsWith("wss://")
             val withoutScheme = wsUrl.removePrefix("ws://").removePrefix("wss://")
             val hostPortPath = withoutScheme.split("/", limit = 2)
             val hostPort = hostPortPath[0]
             val basePath = if (hostPortPath.size > 1) "/${hostPortPath[1].trimEnd('/')}" else ""
             val hostParts = hostPort.split(":")
             val host = hostParts[0]
-            val port = if (hostParts.size > 1) hostParts[1].toIntOrNull() ?: 7880 else 7880
+            val port = if (hostParts.size > 1) {
+                hostParts[1].toIntOrNull() ?: defaultPort(isSecure, hasExplicitWsScheme)
+            } else {
+                defaultPort(isSecure, hasExplicitWsScheme)
+            }
 
             val connectBlock: suspend DefaultClientWebSocketSession.() -> Unit = {
                 wsSession = this
@@ -115,6 +120,9 @@ class LiveKitSignalingClient {
             receiveJob = scope.launch {
                 try {
                     val path = "${basePath}/rtc?access_token=${jwt}&auto_subscribe=1&protocol=9"
+                    log.d(tag = TAG) {
+                        "LiveKit WebSocket target: ${if (isSecure) "wss" else "ws"}://$host:$port$path"
+                    }
                     if (isSecure) {
                         httpClient!!.wss(
                             host = host,
@@ -217,6 +225,14 @@ class LiveKitSignalingClient {
     fun isConnected(): Boolean = _connectionState.value is LiveKitConnectionState.Connected
 
     // --- Internal ---
+
+    private fun defaultPort(isSecure: Boolean, hasExplicitWsScheme: Boolean): Int {
+        return when {
+            isSecure -> 443
+            hasExplicitWsScheme -> 80
+            else -> 7880
+        }
+    }
 
     private suspend fun sendBinary(data: ByteArray) {
         val session = wsSession

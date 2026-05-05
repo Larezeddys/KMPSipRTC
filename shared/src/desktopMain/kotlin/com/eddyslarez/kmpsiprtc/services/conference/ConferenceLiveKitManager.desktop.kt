@@ -48,6 +48,7 @@ actual class ConferenceLiveKitManager actual constructor() {
     private var localName: String = ""
     private var subscriberReady = false
     private val pendingOffers = mutableListOf<String>()
+    private var selectedScreenShareSourceId: String? = null
 
     // Estado interno
     private val _participants = MutableStateFlow<List<LkParticipant>>(emptyList())
@@ -69,6 +70,8 @@ actual class ConferenceLiveKitManager actual constructor() {
 
     // Tracking de participantes remotos (del signaling)
     private val remoteParticipants = mutableMapOf<String, LkParticipant>()
+    private val raisedHands = mutableMapOf<String, Long>()
+    private var localHandRaised = false
 
     @OptIn(ExperimentalTime::class)
     private fun currentTimeMs(): Long = Clock.System.now().toEpochMilliseconds()
@@ -111,6 +114,8 @@ actual class ConferenceLiveKitManager actual constructor() {
                         sid = info.sid,
                         isLocal = false,
                         isAudioEnabled = true,
+                        isHandRaised = raisedHands.containsKey(info.identity),
+                        handRaisedAt = raisedHands[info.identity],
                     )
                     log.d(tag = TAG) { "Existing participant: ${info.name} (${info.identity})" }
                 }
@@ -139,6 +144,8 @@ actual class ConferenceLiveKitManager actual constructor() {
         _videoTracks.value = emptyList()
         _chatMessages.value = emptyList()
         _mediaState.value = LkMediaState()
+        raisedHands.clear()
+        localHandRaised = false
     }
 
     actual suspend fun setMicrophoneEnabled(enabled: Boolean) {
@@ -205,13 +212,59 @@ actual class ConferenceLiveKitManager actual constructor() {
     }
 
     actual suspend fun setScreenShareEnabled(enabled: Boolean) {
-        // Screen share requiere un PeerConnection separado o un segundo video track
-        // Por ahora, Desktop screen share es un TODO — la captura via DesktopCapturer
-        // requiere integración nativa que varía por plataforma (X11/Wayland/Win32)
-        _mediaState.value = _mediaState.value.copy(screenShareEnabled = enabled)
-        if (enabled) {
-            log.w(tag = TAG) { "Screen share Desktop: pendiente (requiere DesktopCapturer nativo)" }
+        val pub = publisherWebRtc
+        if (pub == null) {
+            log.w(tag = TAG) { "setScreenShareEnabled: publisher no inicializado" }
+            return
         }
+
+        if (enabled) {
+            val screenTrack = pub.getLocalScreenShareTrack() ?: pub.addLocalScreenShareTrack(selectedScreenShareSourceId)
+            if (screenTrack == null) {
+                log.w(tag = TAG) { "No se pudo activar screen share Desktop" }
+                _mediaState.value = _mediaState.value.copy(screenShareEnabled = false)
+                rebuildParticipantList()
+                return
+            }
+
+            val cid = "screen-${currentTimeMs()}"
+            signalingClient.sendAddTrack(
+                cid = cid,
+                name = "screen",
+                trackType = LiveKitTrackType.VIDEO.value,
+                source = LiveKitTrackSource.SCREEN_SHARE.value
+            )
+
+            val offer = pub.createOffer()
+            signalingClient.sendOffer(offer)
+
+            val handle = LkVideoTrackHandle(
+                participantIdentity = localIdentity,
+                trackSid = cid,
+                nativeTrack = screenTrack,
+                isScreenShare = true
+            )
+            _videoTracks.value = _videoTracks.value.filter {
+                !(it.participantIdentity == localIdentity && it.isScreenShare)
+            } + handle
+
+            log.d(tag = TAG) { "Screen share Desktop activado, offer renegociado" }
+        } else {
+            pub.removeLocalScreenShareTrack()
+            _videoTracks.value = _videoTracks.value.filter {
+                !(it.participantIdentity == localIdentity && it.isScreenShare)
+            }
+
+            try {
+                val offer = pub.createOffer()
+                signalingClient.sendOffer(offer)
+            } catch (e: Exception) {
+                log.w(tag = TAG) { "Error renegociando sin screen share: ${e.message}" }
+            }
+            log.d(tag = TAG) { "Screen share Desktop desactivado" }
+        }
+
+        _mediaState.value = _mediaState.value.copy(screenShareEnabled = enabled)
         rebuildParticipantList()
     }
 
@@ -219,6 +272,7 @@ actual class ConferenceLiveKitManager actual constructor() {
         val cameras = mutableListOf<LkDevice>()
         val microphones = mutableListOf<LkDevice>()
         val speakers = mutableListOf<LkDevice>()
+        val screenShareSources = mutableListOf<LkDevice>()
 
         // Obtener dispositivos de audio via WebRtcManager
         val webRtc = publisherWebRtc ?: DesktopWebRtcManager().also { it.initialize() }
@@ -250,13 +304,23 @@ actual class ConferenceLiveKitManager actual constructor() {
             cameras.add(LkDevice("none", "Sin cámara"))
         }
 
+        try {
+            webRtc.enumerateScreenShareSources().forEach { (id, name) ->
+                screenShareSources.add(LkDevice(id, name))
+            }
+        } catch (e: Exception) {
+            log.w(tag = TAG) { "Error enumerando pantallas: ${e.message}" }
+        }
+
         return LkDevices(
             cameras = cameras,
             microphones = microphones,
             speakers = speakers,
+            screenShareSources = screenShareSources,
             selectedCameraId = cameras.firstOrNull()?.id,
             selectedMicrophoneId = microphones.firstOrNull()?.id,
             selectedSpeakerId = speakers.firstOrNull()?.id,
+            selectedScreenShareSourceId = selectedScreenShareSourceId ?: screenShareSources.firstOrNull()?.id,
         )
     }
 
@@ -281,6 +345,32 @@ actual class ConferenceLiveKitManager actual constructor() {
 
     actual suspend fun selectSpeaker(deviceId: String) {
         subscriberWebRtc?.selectAudioOutputDeviceByName(deviceId)
+    }
+
+    actual suspend fun selectScreenShareSource(deviceId: String) {
+        selectedScreenShareSourceId = deviceId
+        if (_mediaState.value.screenShareEnabled) {
+            setScreenShareEnabled(false)
+            setScreenShareEnabled(true)
+        }
+    }
+
+    actual suspend fun setHandRaised(raised: Boolean) {
+        if (_connectionState.value != LkConnectionState.CONNECTED) return
+        val now = currentTimeMs()
+        localHandRaised = raised
+        if (raised) {
+            raisedHands[localIdentity] = now
+        } else {
+            raisedHands.remove(localIdentity)
+        }
+
+        val safeName = localName.replace("\"", "\\\"")
+        publishHandData(
+            """{"type":"${if (raised) "hand/raise" else "hand/lower"}","at":$now,"participantIdentity":"$localIdentity","author":"$safeName"}"""
+        )
+        rebuildParticipantList()
+        log.d(tag = TAG) { if (raised) "Mano levantada" else "Mano bajada" }
     }
 
     actual fun getVideoTrackHandle(participantIdentity: String): LkVideoTrackHandle? {
@@ -353,6 +443,7 @@ actual class ConferenceLiveKitManager actual constructor() {
                     if (info.state == 3) {
                         // DISCONNECTED — remover
                         remoteParticipants.remove(info.identity)
+                        raisedHands.remove(info.identity)
                         log.d(tag = TAG) { "Participant left: ${info.name} (${info.identity})" }
                     } else {
                         // JOINING/JOINED/ACTIVE — agregar/actualizar
@@ -362,6 +453,8 @@ actual class ConferenceLiveKitManager actual constructor() {
                             sid = info.sid,
                             isLocal = false,
                             isAudioEnabled = true, // asumimos activo hasta tener track info
+                            isHandRaised = raisedHands.containsKey(info.identity),
+                            handRaisedAt = raisedHands[info.identity],
                         )
                         log.d(tag = TAG) { "Participant updated: ${info.name} (${info.identity}, state=${info.state})" }
                     }
@@ -527,11 +620,20 @@ actual class ConferenceLiveKitManager actual constructor() {
                 isAudioEnabled = _mediaState.value.microphoneEnabled,
                 isVideoEnabled = _mediaState.value.cameraEnabled,
                 isScreenSharing = _mediaState.value.screenShareEnabled,
+                isHandRaised = localHandRaised,
+                handRaisedAt = raisedHands[localIdentity],
             )
         )
 
         // Participantes remotos
-        list.addAll(remoteParticipants.values)
+        list.addAll(
+            remoteParticipants.values.map { participant ->
+                participant.copy(
+                    isHandRaised = raisedHands.containsKey(participant.identity),
+                    handRaisedAt = raisedHands[participant.identity],
+                )
+            }
+        )
 
         _participants.value = list
     }
@@ -571,6 +673,12 @@ actual class ConferenceLiveKitManager actual constructor() {
 
             // LiveKit web client envia: {"author":"nombre", "message":"texto"}
             val jsonObj = jsonParser.parseToJsonElement(text).jsonObject
+            val type = jsonObj["type"]?.jsonPrimitive?.content
+            if (type == "hand/raise" || type == "hand/lower") {
+                handleHandDataMessage(jsonObj)
+                return
+            }
+
             val author = jsonObj["author"]?.jsonPrimitive?.content ?: "Unknown"
             val message = jsonObj["message"]?.jsonPrimitive?.content ?: text
 
@@ -598,6 +706,52 @@ actual class ConferenceLiveKitManager actual constructor() {
         }
     }
 
+    private fun publishHandData(payload: String) {
+        val bytes = payload.encodeToByteArray()
+        val sent = publisherWebRtc?.sendDataChannelMessage(bytes) ?: false
+        if (!sent) {
+            val fallbackSent = subscriberWebRtc?.sendDataChannelMessage(bytes) ?: false
+            if (!fallbackSent) {
+                log.w(tag = TAG) { "No hay data channel disponible para enviar estado de mano" }
+            }
+        }
+    }
+
+    private fun handleHandDataMessage(jsonObj: JsonObject) {
+        val type = jsonObj["type"]?.jsonPrimitive?.content ?: return
+        val at = jsonObj["at"]?.jsonPrimitive?.content?.toLongOrNull() ?: currentTimeMs()
+        val target = jsonObj["target"]?.jsonPrimitive?.content
+        val sender = jsonObj["participantIdentity"]?.jsonPrimitive?.content
+            ?: jsonObj["author"]?.jsonPrimitive?.content
+            ?: target
+            ?: return
+
+        when (type) {
+            "hand/raise" -> {
+                if (sender != localIdentity) {
+                    raisedHands[sender] = at
+                    remoteParticipants[sender]?.let { participant ->
+                        remoteParticipants[sender] = participant.copy(isHandRaised = true, handRaisedAt = at)
+                    }
+                }
+            }
+            "hand/lower" -> {
+                if (target == localIdentity) {
+                    localHandRaised = false
+                    raisedHands.remove(localIdentity)
+                } else {
+                    val identity = target ?: sender
+                    raisedHands.remove(identity)
+                    remoteParticipants[identity]?.let { participant ->
+                        remoteParticipants[identity] = participant.copy(isHandRaised = false, handRaisedAt = null)
+                    }
+                }
+            }
+        }
+
+        rebuildParticipantList()
+    }
+
     // ==================== CLEANUP ====================
 
     private fun cleanup() {
@@ -611,6 +765,9 @@ actual class ConferenceLiveKitManager actual constructor() {
         pendingOffers.clear()
         joinResponse = null
         remoteParticipants.clear()
+        raisedHands.clear()
+        localHandRaised = false
+        selectedScreenShareSourceId = null
     }
 
     private fun extractJsonField(json: String, field: String): String? {

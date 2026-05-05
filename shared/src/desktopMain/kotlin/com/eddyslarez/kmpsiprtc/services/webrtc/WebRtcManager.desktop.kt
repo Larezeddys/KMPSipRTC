@@ -16,6 +16,7 @@ import dev.onvoid.webrtc.media.audio.AudioLayer
 import dev.onvoid.webrtc.media.audio.AudioOptions
 import dev.onvoid.webrtc.media.video.VideoDevice
 import dev.onvoid.webrtc.media.video.VideoTrack
+import dev.onvoid.webrtc.media.video.desktop.ScreenCapturer
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -122,6 +123,39 @@ class DesktopWebRtcManager : WebRtcManager {
 
     fun getLocalVideoTrack(): VideoTrack? {
         return peerConnectionController.getLocalVideoTrack()
+    }
+
+    fun enumerateScreenShareSources(): List<Pair<String, String>> {
+        var capturer: ScreenCapturer? = null
+        return try {
+            capturer = ScreenCapturer()
+            capturer.getDesktopSources().mapIndexed { index, source ->
+                source.id.toString() to (source.title?.takeIf { it.isNotBlank() } ?: "Screen ${index + 1}")
+            }
+        } catch (e: Exception) {
+            log.w(TAG) { "Error enumerando pantallas: ${e.message}" }
+            emptyList()
+        } finally {
+            try {
+                capturer?.dispose()
+            } catch (_: Throwable) {}
+        }
+    }
+
+    fun addLocalScreenShareTrack(sourceId: String? = null): VideoTrack? {
+        ensureInitialized()
+        if (!peerConnectionController.hasPeerConnection()) {
+            peerConnectionController.createNewPeerConnection()
+        }
+        return peerConnectionController.addLocalScreenShareTrack(sourceId)
+    }
+
+    fun removeLocalScreenShareTrack() {
+        peerConnectionController.removeLocalScreenShareTrack()
+    }
+
+    fun getLocalScreenShareTrack(): VideoTrack? {
+        return peerConnectionController.getLocalScreenShareTrack()
     }
 
     fun setOnRemoteVideoTrack(listener: ((VideoTrack) -> Unit)?) {
