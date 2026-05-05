@@ -215,6 +215,8 @@ class CallManager(
 
                 audioManager.playOutgoingRingtone()
                 messageHandler.sendInvite(accountInfo, callData)
+                CallStateManager.outgoingCallProgress(callId, 100)
+                sipCoreManager.notifyCallStateChanged(CallState.OUTGOING_PROGRESS)
 
             } catch (e: Exception) {
                 log.e(tag = TAG) { "Error creating call: ${e.stackTraceToString()}" }
@@ -961,8 +963,6 @@ class CallManager(
 
         if (callData == null) {
             log.w(tag = TAG) { "WebRTC closed but no active call data found" }
-            CallStateManager.callEnded(generateId())
-            sipCoreManager.notifyCallStateChanged(CallState.ENDED)
             return
         }
 

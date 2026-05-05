@@ -441,7 +441,11 @@ class SharedWebSocketManager(
                     val account = sipCoreManager.activeAccounts[accountKey]
                     if (account != null && isConnected()) {
                         log.d(tag = TAG) { "Renewing registration for: $accountKey (re-REGISTER before expiry)" }
-                        val success = registerAccount(account, sipCoreManager.isAppInBackground)
+                        val success = registerAccount(
+                            account,
+                            sipCoreManager.isAppInBackground,
+                            skipUnregister = true
+                        )
                         if (success) {
                             log.d(tag = TAG) { "Renewal REGISTER sent for: $accountKey" }
                         } else {

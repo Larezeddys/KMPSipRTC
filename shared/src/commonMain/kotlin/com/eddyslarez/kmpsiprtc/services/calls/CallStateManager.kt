@@ -142,6 +142,8 @@ internal object CallStateManager {
             }
         }
 
+        val callData = if (callId.isNotEmpty()) MultiCallManager.getCall(callId) else null
+
         // Crear nueva información de estado
         val newStateInfo = CallStateInfo(
             state = newState,
@@ -151,7 +153,10 @@ internal object CallStateManager {
             sipCode = sipCode,
             sipReason = sipReason,
             callId = callId,
-            direction = direction
+            direction = direction,
+            remoteNumber = callData?.getRemoteParty()?.takeIf { it.isNotBlank() },
+            remoteDisplayName = callData?.remoteDisplayName?.takeIf { it.isNotBlank() },
+            localAccount = callData?.getLocalParty()?.takeIf { it.isNotBlank() }
         )
 
         // Actualizar estado actual
@@ -453,7 +458,8 @@ internal object CallStateManager {
             newState = CallState.OUTGOING_PROGRESS,
             callId = callId,
             sipCode = sipCode,
-            sipReason = "Session Progress"
+            sipReason = if (sipCode == 100) "Trying" else "Session Progress",
+            forceUpdate = sipCode == 100
         )
     }
 

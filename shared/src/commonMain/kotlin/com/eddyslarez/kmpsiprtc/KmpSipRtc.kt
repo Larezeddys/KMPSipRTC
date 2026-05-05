@@ -77,6 +77,8 @@ class KmpSipRtc private constructor() {
     // === GESTIÓN DE ESTADOS DE NOTIFICACIÓN ===
     private val lastNotifiedRegistrationStates = mutableMapOf<String, RegistrationState>()
     private val lastNotifiedCallState = mutableStateOf<CallStateInfo?>(null)
+    private val notifiedInitiatedCallIds = mutableSetOf<String>()
+    private val notifiedIncomingCallIds = mutableSetOf<String>()
     private var matrixManager: MatrixManager? = null
     private var unifiedCallRouter: UnifiedCallRouter? = null
     private var livekitCallManager: com.eddyslarez.kmpsiprtc.services.livekit.LiveKitCallManager? = null
@@ -620,9 +622,25 @@ class KmpSipRtc private constructor() {
                         when (stateInfo.state) {
                             CallState.CONNECTED -> notifyCallConnected(info)
                             CallState.OUTGOING_RINGING -> notifyCallRinging(info)
-                            CallState.OUTGOING_INIT -> notifyCallInitiated(info)
-                            CallState.INCOMING_RECEIVED -> handleIncomingCall()
+                            CallState.OUTGOING_INIT -> {
+                                if (notifiedInitiatedCallIds.add(stateInfo.callId)) {
+                                    notifyCallInitiated(info)
+                                } else {
+                                    log.d(tag = TAG) { "Skipping duplicate call initiated callback for ${stateInfo.callId}" }
+                                }
+                            }
+
+                            CallState.INCOMING_RECEIVED -> {
+                                if (notifiedIncomingCallIds.add(stateInfo.callId)) {
+                                    handleIncomingCall()
+                                } else {
+                                    log.d(tag = TAG) { "Skipping duplicate incoming callback for ${stateInfo.callId}" }
+                                }
+                            }
+
                             CallState.ENDED -> {
+                                notifiedInitiatedCallIds.remove(stateInfo.callId)
+                                notifiedIncomingCallIds.remove(stateInfo.callId)
                                 val reason = mapErrorReasonToCallEndReason(stateInfo.errorReason)
                                 notifyCallEnded(info, reason)
                                 // Limpiar flag de llamada push pendiente
@@ -646,6 +664,8 @@ class KmpSipRtc private constructor() {
                             CallState.PAUSED -> notifyCallHeld(info)
                             CallState.STREAMS_RUNNING -> notifyCallResumed(info)
                             CallState.ERROR -> {
+                                notifiedInitiatedCallIds.remove(stateInfo.callId)
+                                notifiedIncomingCallIds.remove(stateInfo.callId)
                                 val reason = mapErrorReasonToCallEndReason(stateInfo.errorReason)
                                 notifyCallEnded(info, reason)
                             }
@@ -2371,8 +2391,8 @@ class KmpSipRtc private constructor() {
         checkInitialized()
         val call = MultiCallManager.getCall(callId)
         if (call == null) {
-            log.w(tag = TAG) { "Call not found: $callId" }
-            throw IllegalArgumentException("Call not found: $callId")
+            log.w(tag = TAG) { "Ignoring decline for already finished or unknown call: $callId" }
+            return
         }
         log.d(tag = TAG) { "Declining call by ID: $callId" }
         sipCoreManager?.declineCall(callId)

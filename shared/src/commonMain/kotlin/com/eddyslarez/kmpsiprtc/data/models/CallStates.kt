@@ -58,7 +58,10 @@ data class CallStateInfo @OptIn(ExperimentalTime::class) constructor(
     val sipCode: Int? = null,
     val sipReason: String? = null,
     val callId: String = "",
-    val direction: CallDirections = CallDirections.OUTGOING
+    val direction: CallDirections = CallDirections.OUTGOING,
+    val remoteNumber: String? = null,
+    val remoteDisplayName: String? = null,
+    val localAccount: String? = null
 ) {
     fun isOutgoingCall(): Boolean = direction == CallDirections.OUTGOING
     fun isIncomingCall(): Boolean = direction == CallDirections.INCOMING
