@@ -21,8 +21,15 @@ Because this is a multi-module Gradle project and the library module is named `s
 
 ```kotlin
 dependencies {
-    implementation("com.github.larezeddys.KMPSipRTC:shared:1.0.0")
+    implementation("com.github.Larezeddys.KMPSipRTC:shared:1.0.0")
 }
+```
+
+JitPack also publishes platform-specific artifacts for this release:
+
+```kotlin
+implementation("com.github.Larezeddys.KMPSipRTC:shared-android:1.0.0")
+implementation("com.github.Larezeddys.KMPSipRTC:shared-desktop:1.0.0")
 ```
 
 If the GitHub repository name is different from `KMPSipRTC`, replace `KMPSipRTC` in the dependency coordinate with the exact repository name shown on GitHub.
