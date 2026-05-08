@@ -1989,37 +1989,7 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
         }
 
         log.d(tag = TAG) { "Switching account to push mode: $accountKey" }
-        updateRegistrationState(accountKey, RegistrationState.IN_PROGRESS)
-
-        try {
-//            // CRÍTICO: Asegurar conectividad WebSocket antes del cambio
-//            if (!ensureWebSocketConnectivity(accountInfo)) {
-//                log.e(tag = TAG) { "[ERROR] Cannot ensure WebSocket connectivity for push mode switch: $accountKey" }
-//                updateRegistrationState(accountKey, RegistrationState.FAILED)
-//                return
-//            }
-
-//            // Verificar una vez más que el WebSocket está saludable
-//            if (!accountInfo.isWebSocketHealthy()) {
-//                log.e(tag = TAG) { "[ERROR] WebSocket not healthy after connectivity check for push mode: $accountKey" }
-//                updateRegistrationState(accountKey, RegistrationState.FAILED)
-//                return
-//            }
-
-            // Cambiar a modo push
-            val pushUserAgent = "${userAgent()} Push"
-            accountInfo.userAgent.value = pushUserAgent
-            isAppInBackground = true
-
-            // Enviar registro en modo push
-            messageHandler.sendRegister(accountInfo, true)
-
-            log.d(tag = TAG) { "[OK] Account switched to push mode successfully: $accountKey" }
-
-        } catch (e: Exception) {
-            log.e(tag = TAG) { "[FATAL] Error switching to push mode for $accountKey: ${e.message}" }
-            updateRegistrationState(accountKey, RegistrationState.FAILED)
-        }
+        registerAccountForMode(accountInfo, isBackground = true, suppressTransientFailure = true)
     }
 
     /**
@@ -2038,34 +2008,58 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
         }
 
         log.d(tag = TAG) { "Switching account to foreground mode: $accountKey" }
-        updateRegistrationState(accountKey, RegistrationState.IN_PROGRESS)
+        registerAccountForMode(accountInfo, isBackground = false, suppressTransientFailure = true)
+    }
 
-        try {
-//            // CRÍTICO: Asegurar conectividad WebSocket antes del cambio
-//            if (!ensureWebSocketConnectivity(accountInfo)) {
-//                log.e(tag = TAG) { "[ERROR] Cannot ensure WebSocket connectivity for foreground mode switch: $accountKey" }
-//                updateRegistrationState(accountKey, RegistrationState.FAILED)
-//                return
-//            }
+    private suspend fun registerAccountForMode(
+        accountInfo: AccountInfo,
+        isBackground: Boolean,
+        suppressTransientFailure: Boolean
+    ): Boolean {
+        val accountKey = "${accountInfo.username}@${accountInfo.domain}"
+        val previousState = getRegistrationState(accountKey)
 
-//            // Verificar una vez más que el WebSocket está saludable
-//            if (!accountInfo.isWebSocketHealthy()) {
-//                log.e(tag = TAG) { "[ERROR] WebSocket not healthy after connectivity check for foreground mode: $accountKey" }
-//                updateRegistrationState(accountKey, RegistrationState.FAILED)
-//                return
-//            }
+        return try {
+            accountInfo.userAgent.value = if (isBackground) "${userAgent()} Push" else userAgent()
+            isAppInBackground = isBackground
+            updateRegistrationState(accountKey, RegistrationState.IN_PROGRESS)
 
-            // Cambiar a modo foreground
-            accountInfo.userAgent.value = userAgent()
-            isAppInBackground = false
+            val success = sharedWebSocketManager.registerAccount(
+                accountInfo,
+                isBackground,
+                skipUnregister = true
+            )
 
-            // Enviar registro en modo foreground
-            messageHandler.sendRegister(accountInfo, false)
-
-            log.d(tag = TAG) { "[OK] Account switched to foreground mode successfully: $accountKey" }
-
+            if (success) {
+                log.d(tag = TAG) {
+                    "[OK] Account registration refresh sent for $accountKey (${if (isBackground) "PUSH" else "FOREGROUND"})"
+                }
+                true
+            } else {
+                handleTransientRegistrationFailure(accountKey, previousState, suppressTransientFailure)
+                false
+            }
         } catch (e: Exception) {
-            log.e(tag = TAG) { "[FATAL] Error switching to foreground mode for $accountKey: ${e.message}" }
+            log.e(tag = TAG) { "[ERROR] Registration refresh failed for $accountKey: ${e.message}" }
+            handleTransientRegistrationFailure(accountKey, previousState, suppressTransientFailure)
+            false
+        }
+    }
+
+    private fun handleTransientRegistrationFailure(
+        accountKey: String,
+        previousState: RegistrationState,
+        suppressTransientFailure: Boolean
+    ) {
+        val socketHealthy = this::sharedWebSocketManager.isInitialized &&
+                sharedWebSocketManager.isWebSocketHealthy()
+
+        if (suppressTransientFailure && socketHealthy && previousState == RegistrationState.OK) {
+            log.w(tag = TAG) {
+                "Suppressing transient registration FAILED for $accountKey while WebSocket is healthy"
+            }
+            updateRegistrationState(accountKey, RegistrationState.OK)
+        } else {
             updateRegistrationState(accountKey, RegistrationState.FAILED)
         }
     }
@@ -2580,28 +2574,7 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
 
         log.d(tag = TAG) { "[SYNC] Registering account in PUSH mode: $accountKey" }
 
-        try {
-            // Configurar para modo push
-            accountInfo.userAgent.value = "${userAgent()} Push"
-            isAppInBackground = true
-
-            // Actualizar estado
-            updateRegistrationState(accountKey, RegistrationState.IN_PROGRESS)
-
-            // Enviar registro en modo push usando WebSocket compartido
-            val success = sharedWebSocketManager.registerAccount(accountInfo, true)
-
-            if (success) {
-                log.d(tag = TAG) { "[OK] Account registered in PUSH mode successfully: $accountKey" }
-            } else {
-                log.e(tag = TAG) { "[ERROR] Failed to register account in PUSH mode: $accountKey" }
-                updateRegistrationState(accountKey, RegistrationState.FAILED)
-            }
-
-        } catch (e: Exception) {
-            log.e(tag = TAG) { "[FATAL] Error registering account in PUSH mode: ${e.message}" }
-            updateRegistrationState(accountKey, RegistrationState.FAILED)
-        }
+        registerAccountForMode(accountInfo, isBackground = true, suppressTransientFailure = true)
     }
 
     /**
@@ -2616,28 +2589,7 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
 
         log.d(tag = TAG) { "[SYNC] Registering account in FOREGROUND mode: $accountKey" }
 
-        try {
-            // Configurar para modo foreground
-            accountInfo.userAgent.value = userAgent()
-            isAppInBackground = false
-
-            // Actualizar estado
-            updateRegistrationState(accountKey, RegistrationState.IN_PROGRESS)
-
-            // Enviar registro en modo foreground usando WebSocket compartido
-            val success = sharedWebSocketManager.registerAccount(accountInfo, false)
-
-            if (success) {
-                log.d(tag = TAG) { "[OK] Account registered in FOREGROUND mode successfully: $accountKey" }
-            } else {
-                log.e(tag = TAG) { "[ERROR] Failed to register account in FOREGROUND mode: $accountKey" }
-                updateRegistrationState(accountKey, RegistrationState.FAILED)
-            }
-
-        } catch (e: Exception) {
-            log.e(tag = TAG) { "[FATAL] Error registering account in FOREGROUND mode: ${e.message}" }
-            updateRegistrationState(accountKey, RegistrationState.FAILED)
-        }
+        registerAccountForMode(accountInfo, isBackground = false, suppressTransientFailure = true)
     }
 
     /**

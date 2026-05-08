@@ -781,10 +781,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 // LIMPIEZA ASÍNCRONA — solo disponer WebRTC si no quedan otras llamadas activas
                 scope.launch {
                     try {
-                        delay(200)
-
-                        // Limpiar MultiCallManager PRIMERO
-                        MultiCallManager.removeCall(callData.callId)
+                        delay(1200)
 
                         // Verificar si quedan llamadas activas antes de disponer WebRTC.
                         // En multi-línea NO se debe disponer WebRTC si otra llamada sigue activa.
@@ -879,9 +876,8 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 scope.launch {
                     try {
                         sipCoreManager.audioManager.stopAllRingtones()
-                        delay(200)
+                        delay(1200)
                         accountInfo.resetCallState()
-                        callData?.let { MultiCallManager.removeCall(it.callId) }
                         log.d(tag = TAG) { "[OK] CANCEL cleanup completed" }
                     } catch (e: Exception) {
                         log.e(tag = TAG) { "Error in CANCEL cleanup: ${e.message}" }

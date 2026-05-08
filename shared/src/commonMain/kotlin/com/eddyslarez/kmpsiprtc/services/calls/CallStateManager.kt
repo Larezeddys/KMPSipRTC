@@ -322,6 +322,12 @@ internal object CallStateManager {
 
     fun callEnded(callId: String, sipCode: Int? = null, sipReason: String? = null) {
         if (!isInitialized) return
+        if (isAlreadyTerminal(callId)) {
+            log.d(tag = "CallStateManager") {
+                "Ignoring duplicate ENDED for terminal call: $callId"
+            }
+            return
+        }
 
         updateCallState(
             newState = CallState.ENDED,
@@ -345,6 +351,12 @@ internal object CallStateManager {
         errorReason: CallErrorReason = CallErrorReason.UNKNOWN
     ) {
         if (!isInitialized) return
+        if (isAlreadyTerminal(callId)) {
+            log.d(tag = "CallStateManager") {
+                "Ignoring duplicate ERROR for terminal call: $callId"
+            }
+            return
+        }
 
         val mappedError = if (sipCode != null) {
             SipErrorMapper.mapSipCodeToErrorReason(sipCode)
@@ -366,6 +378,16 @@ internal object CallStateManager {
             kotlinx.coroutines.delay(2000)
             cleanupCall(callId)
         }
+    }
+
+    private fun isAlreadyTerminal(callId: String): Boolean {
+        if (callId.isEmpty()) return false
+
+        val perCallState = MultiCallManager.getCallState(callId)?.state
+        val globalState = _callStateFlow.value.takeIf { it.callId == callId }?.state
+        val state = perCallState ?: globalState
+
+        return state == CallState.ENDED || state == CallState.ERROR
     }
 
     /**

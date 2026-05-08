@@ -967,17 +967,24 @@ class CallManager(
         }
 
         val currentState = CallStateManager.getCurrentState()
+        val perCallState = MultiCallManager.getCallState(callData.callId)?.state
+            ?: currentState.state
         log.d(TAG) {
-            "Handling WebRTC closed for call: ${callData.callId}, state: ${currentState.state}"
+            "Handling WebRTC closed for call: ${callData.callId}, state: $perCallState"
+        }
+
+        if (perCallState == CallState.ENDED || perCallState == CallState.ERROR) {
+            log.w(TAG) { "WebRTC closed for already terminal call: ${callData.callId}" }
+            return
         }
 
         // Solo registrar si la llamada estuvo conectada
-        val wasConnected = currentState.state == CallState.CONNECTED ||
-                currentState.state == CallState.STREAMS_RUNNING ||
-                currentState.state == CallState.PAUSED
+        val wasConnected = perCallState == CallState.CONNECTED ||
+                perCallState == CallState.STREAMS_RUNNING ||
+                perCallState == CallState.PAUSED
 
         if (wasConnected) {
-            registerCallInHistory(callData, currentState.state)
+            registerCallInHistory(callData, perCallState)
             log.d(TAG) { "Registered connected call in history: ${callData.callId}" }
         } else {
             log.d(TAG) {

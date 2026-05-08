@@ -79,6 +79,7 @@ class KmpSipRtc private constructor() {
     private val lastNotifiedCallState = mutableStateOf<CallStateInfo?>(null)
     private val notifiedInitiatedCallIds = mutableSetOf<String>()
     private val notifiedIncomingCallIds = mutableSetOf<String>()
+    private val notifiedTerminalCallIds = mutableSetOf<String>()
     private var matrixManager: MatrixManager? = null
     private var unifiedCallRouter: UnifiedCallRouter? = null
     private var livekitCallManager: com.eddyslarez.kmpsiprtc.services.livekit.LiveKitCallManager? = null
@@ -559,8 +560,8 @@ class KmpSipRtc private constructor() {
             manager.setCallbacks(object : SipCallbacks {
                 override fun onCallTerminated() {
                     log.d(tag = TAG) { "Internal callback: onCallTerminated" }
-                    val callInfo = getCurrentCallInfo()
-                    notifyCallEnded(callInfo, CallEndReason.NORMAL_HANGUP)
+                    // The CallStateManager flow owns terminal call notifications.
+                    // Notifying here as well causes duplicate NORMAL_HANGUP callbacks.
                 }
 
                 override fun onAccountRegistrationStateChanged(
@@ -618,64 +619,113 @@ class KmpSipRtc private constructor() {
                     val callInfo = getCallInfoForState(stateInfo)
                     notifyCallStateChanged(stateInfo)
 
-                    callInfo?.let { info ->
-                        when (stateInfo.state) {
-                            CallState.CONNECTED -> notifyCallConnected(info)
-                            CallState.OUTGOING_RINGING -> notifyCallRinging(info)
-                            CallState.OUTGOING_INIT -> {
-                                if (notifiedInitiatedCallIds.add(stateInfo.callId)) {
-                                    notifyCallInitiated(info)
-                                } else {
-                                    log.d(tag = TAG) { "Skipping duplicate call initiated callback for ${stateInfo.callId}" }
-                                }
+                    when (stateInfo.state) {
+                        CallState.CONNECTED -> callInfo?.let { notifyCallConnected(it) }
+                        CallState.OUTGOING_RINGING -> callInfo?.let { notifyCallRinging(it) }
+                        CallState.OUTGOING_INIT -> {
+                            notifiedTerminalCallIds.remove(stateInfo.callId)
+                            if (callInfo != null && notifiedInitiatedCallIds.add(stateInfo.callId)) {
+                                notifyCallInitiated(callInfo)
+                            } else if (callInfo == null) {
+                                log.w(tag = TAG) { "Skipping call initiated callback without CallInfo for ${stateInfo.callId}" }
+                            } else {
+                                log.d(tag = TAG) { "Skipping duplicate call initiated callback for ${stateInfo.callId}" }
                             }
-
-                            CallState.INCOMING_RECEIVED -> {
-                                if (notifiedIncomingCallIds.add(stateInfo.callId)) {
-                                    handleIncomingCall()
-                                } else {
-                                    log.d(tag = TAG) { "Skipping duplicate incoming callback for ${stateInfo.callId}" }
-                                }
-                            }
-
-                            CallState.ENDED -> {
-                                notifiedInitiatedCallIds.remove(stateInfo.callId)
-                                notifiedIncomingCallIds.remove(stateInfo.callId)
-                                val reason = mapErrorReasonToCallEndReason(stateInfo.errorReason)
-                                notifyCallEnded(info, reason)
-                                // Limpiar flag de llamada push pendiente
-                                sipCoreManager?.isIncomingPushCallPending = false
-                                val isBackground = sipCoreManager?.isAppInBackground ?: true
-                                val accountKey = determineAccountKeyFromCallInfo(info)
-                                if (accountKey != null) {
-                                    log.d(tag = TAG) { "Notifying PushModeManager: call ended for $accountKey (isBackground=$isBackground)" }
-                                    pushModeManager?.onCallEndedForAccount(
-                                        accountKey,
-                                        setOf(accountKey),
-                                        isBackground
-                                    )
-                                } else {
-                                    val registeredAccounts =
-                                        sipCoreManager?.getAllRegisteredAccountKeys() ?: emptySet()
-                                    pushModeManager?.onCallEnded(registeredAccounts, isBackground)
-                                }
-                            }
-
-                            CallState.PAUSED -> notifyCallHeld(info)
-                            CallState.STREAMS_RUNNING -> notifyCallResumed(info)
-                            CallState.ERROR -> {
-                                notifiedInitiatedCallIds.remove(stateInfo.callId)
-                                notifiedIncomingCallIds.remove(stateInfo.callId)
-                                val reason = mapErrorReasonToCallEndReason(stateInfo.errorReason)
-                                notifyCallEnded(info, reason)
-                            }
-
-                            else -> {}
                         }
+
+                        CallState.INCOMING_RECEIVED -> {
+                            notifiedTerminalCallIds.remove(stateInfo.callId)
+                            if (notifiedIncomingCallIds.add(stateInfo.callId)) {
+                                handleIncomingCall(stateInfo)
+                            } else {
+                                log.d(tag = TAG) { "Skipping duplicate incoming callback for ${stateInfo.callId}" }
+                            }
+                        }
+
+                        CallState.ENDED -> handleTerminalCallState(stateInfo, callInfo, isError = false)
+                        CallState.ERROR -> handleTerminalCallState(stateInfo, callInfo, isError = true)
+                        CallState.PAUSED -> callInfo?.let { notifyCallHeld(it) }
+                        CallState.STREAMS_RUNNING -> callInfo?.let { notifyCallResumed(it) }
+                        else -> {}
                     }
                 }
             }
         }
+    }
+
+    private fun handleTerminalCallState(
+        stateInfo: CallStateInfo,
+        callInfo: CallInfo?,
+        isError: Boolean
+    ) {
+        if (stateInfo.callId.isNotEmpty() && !notifiedTerminalCallIds.add(stateInfo.callId)) {
+            log.d(tag = TAG) { "Skipping duplicate terminal callback for ${stateInfo.callId}" }
+            return
+        }
+
+        notifiedInitiatedCallIds.remove(stateInfo.callId)
+        notifiedIncomingCallIds.remove(stateInfo.callId)
+
+        val info = callInfo ?: createFallbackCallInfo(stateInfo)
+        val reason = when {
+            isError -> mapErrorReasonToCallEndReason(stateInfo.errorReason)
+            stateInfo.errorReason == CallErrorReason.NONE -> CallEndReason.NORMAL_HANGUP
+            else -> mapErrorReasonToCallEndReason(stateInfo.errorReason)
+        }
+
+        notifyCallEnded(info, reason)
+
+        sipCoreManager?.isIncomingPushCallPending = false
+        pushModeManager?.setCallActive(false)
+
+        val isBackground = sipCoreManager?.isAppInBackground ?: true
+        val accountKey = info?.let { determineAccountKeyFromCallInfo(it) }
+            ?: determineAccountKeyFromStateInfo(stateInfo)
+
+        if (accountKey != null) {
+            log.d(tag = TAG) { "Notifying PushModeManager: call ended for $accountKey (isBackground=$isBackground)" }
+            pushModeManager?.onCallEndedForAccount(
+                accountKey,
+                setOf(accountKey),
+                isBackground
+            )
+        } else {
+            val registeredAccounts = sipCoreManager?.getAllRegisteredAccountKeys() ?: emptySet()
+            pushModeManager?.onCallEnded(registeredAccounts, isBackground)
+        }
+    }
+
+    @OptIn(ExperimentalTime::class)
+    private fun createFallbackCallInfo(stateInfo: CallStateInfo): CallInfo? {
+        if (stateInfo.callId.isEmpty()) return null
+
+        val manager = sipCoreManager
+        return CallInfo(
+            callId = stateInfo.callId,
+            phoneNumber = stateInfo.remoteNumber.orEmpty(),
+            displayName = stateInfo.remoteDisplayName,
+            direction = if (stateInfo.direction == CallDirections.INCOMING) {
+                CallDirection.INCOMING
+            } else {
+                CallDirection.OUTGOING
+            },
+            startTime = stateInfo.timestamp,
+            duration = 0,
+            isOnHold = false,
+            isMuted = manager?.webRtcManager?.isMuted() ?: false,
+            localAccount = stateInfo.localAccount ?: manager?.currentAccountInfo?.username.orEmpty(),
+            codec = null,
+            state = stateInfo.state,
+            isCurrentCall = false
+        )
+    }
+
+    private fun determineAccountKeyFromStateInfo(stateInfo: CallStateInfo): String? {
+        val localAccount = stateInfo.localAccount?.takeIf { it.isNotBlank() } ?: return null
+        val registeredAccounts = sipCoreManager?.getAllRegisteredAccountKeys() ?: emptySet()
+
+        return registeredAccounts.find { it == localAccount || it.startsWith("$localAccount@") }
+            ?: localAccount.takeIf { it.contains("@") }
     }
 
 
@@ -685,23 +735,21 @@ class KmpSipRtc private constructor() {
     private fun determineAccountKeyFromCallInfo(callInfo: CallInfo): String? {
         val manager = sipCoreManager ?: return null
 
-        // Primero intentar obtener desde la cuenta actual
+        if (callInfo.localAccount.isNotEmpty()) {
+            val registeredAccounts = manager.getAllRegisteredAccountKeys()
+            val matchingAccount =
+                registeredAccounts.find { it == callInfo.localAccount || it.startsWith("${callInfo.localAccount}@") }
+            if (matchingAccount != null) {
+                log.d(tag = TAG) { "Determined account key from CallInfo localAccount: $matchingAccount" }
+                return matchingAccount
+            }
+        }
+
         val currentAccount = manager.currentAccountInfo
         if (currentAccount != null) {
             val accountKey = "${currentAccount.username}@${currentAccount.domain}"
             log.d(tag = TAG) { "Determined account key from current account: $accountKey" }
             return accountKey
-        }
-
-        // Si no hay cuenta actual, intentar determinar desde localAccount en CallInfo
-        if (callInfo.localAccount.isNotEmpty()) {
-            val registeredAccounts = manager.getAllRegisteredAccountKeys()
-            val matchingAccount =
-                registeredAccounts.find { it.startsWith("${callInfo.localAccount}@") }
-            if (matchingAccount != null) {
-                log.d(tag = TAG) { "Determined account key from CallInfo localAccount: $matchingAccount" }
-                return matchingAccount
-            }
         }
 
         log.w(tag = TAG) { "Could not determine specific account key for call ${callInfo.callId}" }
@@ -1047,13 +1095,14 @@ class KmpSipRtc private constructor() {
     /**
      * Maneja llamada entrante (SIP o Matrix)
      */
-    private fun handleIncomingCall() {
+    private fun handleIncomingCall(stateInfo: CallStateInfo? = null) {
 
         val manager = sipCoreManager ?: return
         val account = manager.currentAccountInfo
 
         // Buscar callData en AccountInfo o en MultiCallManager (para llamadas Matrix)
-        val callData = account?.currentCallData?.value
+        val callData = stateInfo?.callId?.takeIf { it.isNotEmpty() }?.let { MultiCallManager.getCall(it) }
+            ?: account?.currentCallData?.value
             ?: MultiCallManager.getAllCalls().firstOrNull { it.direction == CallDirections.INCOMING }
             ?: return
 
@@ -1660,8 +1709,18 @@ class KmpSipRtc private constructor() {
     }
 
     /**
-     * Establece el estado de mute de forma absoluta (no toggle). Idempotente:
-     * si el track ya estaba en ese estado, no hay efecto secundario.
+     * Establece el estado de mute de forma absoluta (no toggle).
+     *
+     * Va DIRECTO al track WebRTC (`webRtcManager.setMuted`) en vez de leer
+     * `isMuted()` y togglear: en Android `isMuted()` lee `AudioManager.isMicrophoneMute`,
+     * y Telecom ya puede haber escrito ese flag antes de invocarnos. Si confiáramos
+     * en él, nunca silenciaríamos el track cuando el cambio viene desde la UI nativa
+     * de Telecom.
+     *
+     * `peerConnectionController.setMuted(muted)` es idempotente a nivel de track:
+     * `localAudioTrack.setEnabled(!muted)` puesto al mismo valor no produce eventos.
+     * Y `audioController.setMicrophoneMute` respeta el flag `telecomManaged` (skip),
+     * así que no hay feedback loop con AudioManager.
      */
     fun setMute(muted: Boolean) {
         checkInitialized()
@@ -2416,8 +2475,8 @@ class KmpSipRtc private constructor() {
         checkInitialized()
         val call = MultiCallManager.getCall(callId)
         if (call == null) {
-            log.w(tag = TAG) { "Call not found: $callId" }
-            throw IllegalArgumentException("Call not found: $callId")
+            log.w(tag = TAG) { "Ignoring end for already finished or unknown call: $callId" }
+            return
         }
         log.d(tag = TAG) { "Ending call by ID: $callId" }
         sipCoreManager?.endCall(callId)
