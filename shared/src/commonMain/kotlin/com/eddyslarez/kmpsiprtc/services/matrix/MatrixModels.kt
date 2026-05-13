@@ -5,13 +5,19 @@ import kotlinx.coroutines.flow.StateFlow
 data class MatrixRoom(
     val id: String,
     val name: String,
+    /**
+     * URL HTTPS resuelta del avatar de la room (incluye `?access_token=`).
+     * null si el room no tiene avatar configurado. Se resuelve a partir del
+     * `avatar_url` en `mxc://...` del state event m.room.avatar (o, para DMs
+     * sin avatar de room, del avatar del hero).
+     */
     val avatarUrl: String?,
     val isDirect: Boolean,
     val isEncrypted: Boolean,
     val unreadCount: Int,
     val lastMessage: String? = null,
     val lastMessageTime: Long? = null,
-    val members: List<String> = emptyList()
+    val members: List<String> = emptyList(),
 )
 
 /**
@@ -65,7 +71,18 @@ data class MatrixMessage(
     val senderDisplayName: String?,
     val content: String,
     val timestamp: Long,
-    val type: MessageType
+    val type: MessageType,
+    /**
+     * URL HTTPS resuelta de la media (si es un mensaje IMAGE/VIDEO/AUDIO/FILE).
+     * Apunta al endpoint `/_matrix/media/v3/download/...` con el access token
+     * adjunto (`?access_token=...`). Para tipo TEXT siempre es null.
+     */
+    val mediaUrl: String? = null,
+    /**
+     * Nombre original del archivo (sólo para tipos no-TEXT). Útil para mostrar
+     * "📎 informe.pdf" o como caption de la imagen.
+     */
+    val fileName: String? = null,
 )
 
 enum class MessageType {

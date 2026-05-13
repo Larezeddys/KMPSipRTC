@@ -2805,9 +2805,11 @@ class KmpSipRtc private constructor() {
      * Reanuda el sync de Matrix. Llamar cuando la app vuelve a foreground.
      * Idempotente — Trixnity ignora startSync si ya está corriendo.
      */
-    fun resumeMatrixSync() {
+     fun resumeMatrixSync() {
         val matrix = matrixManager ?: return
-        matrix.resumeSync()
+        internalScope.launch {
+            matrix.resumeSync()
+        }
     }
 
     /**
@@ -2886,6 +2888,29 @@ class KmpSipRtc private constructor() {
 
         internalScope.launch {
             val result = matrix.sendTextMessage(roomId, message)
+            onComplete?.invoke(result)
+        }
+    }
+
+    /**
+     * Enviar archivo Matrix (imagen / vídeo / audio / archivo genérico).
+     * `mimeType` decide el `msgtype` enviado (`m.image`, `m.video`, `m.audio`, `m.file`).
+     * El callback recibe `Result.failure` si el upload o el envío del evento fallan.
+     */
+    fun sendMatrixFile(
+        roomId: String,
+        fileData: ByteArray,
+        mimeType: String,
+        fileName: String,
+        onComplete: ((Result<Unit>) -> Unit)? = null,
+    ) {
+        checkInitialized()
+        val matrix = matrixManager ?: run {
+            onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized")))
+            return
+        }
+        internalScope.launch {
+            val result = matrix.sendFile(roomId, fileData, mimeType, fileName)
             onComplete?.invoke(result)
         }
     }

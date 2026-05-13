@@ -253,7 +253,7 @@ class MatrixManager(
      * Reanuda el long-polling de sync. Llamar cuando la app vuelve a foreground.
      * Idempotente: si ya está corriendo Trixnity ignora la segunda llamada.
      */
-    fun resumeSync() {
+    suspend fun resumeSync() {
         val client = matrixClient ?: return
         try {
             log.d(TAG) { "Resuming Matrix sync (foreground)" }
@@ -361,6 +361,12 @@ class MatrixManager(
                                     autoJoinInvitedRoom(roomId.full)
                                 }
 
+                                // Si ya estamos joineados, cargar el timeline persistido del
+                                // store. Idempotente: solo carga la primera vez por sesión.
+                                if (it.membership == Membership.JOIN) {
+                                    loadHistoricalTimeline(roomId.full)
+                                }
+
                                 // Resolver nombre de sala correctamente.
                                 // Para DMs sin nombre explícito usamos heroes del room
                                 // (los otros miembros). Esto evita que la UI muestre
@@ -380,15 +386,21 @@ class MatrixManager(
                                 // Calcular ultimo mensaje y timestamp desde el cache de mensajes
                                 val roomMessages = _messages.value[roomId.full]
                                 val lastMsg = roomMessages?.lastOrNull()
+                                // Avatar mxc:// → URL HTTPS (con token si está disponible).
+                                // null si el room no tiene avatar — la UI muestra placeholder.
+                                val avatarHttp = it.avatarUrl
+                                    ?.takeIf { mxc -> mxc.startsWith("mxc://") }
+                                    ?.let { mxc -> resolveMxcToHttpUrl(mxc) }
+
                                 MatrixRoom(
                                     id = roomId.full,
                                     name = resolvedName,
-                                    avatarUrl = null,
+                                    avatarUrl = avatarHttp,
                                     isDirect = it.isDirect,
                                     isEncrypted = false,
                                     unreadCount = 0,
                                     lastMessage = lastMsg?.content,
-                                    lastMessageTime = lastMsg?.timestamp
+                                    lastMessageTime = lastMsg?.timestamp,
                                 )
                             }
                         }
@@ -443,26 +455,18 @@ class MatrixManager(
                                     handleCallCandidates(eventRoomId, senderId, content)
                                 }
                             }
-                            // Manejar mensajes de texto de OTROS usuarios
-                            // (los propios aparecen via actualización optimista en sendTextMessage)
+                            // Procesar mensajes de chat (texto + media). Antes se filtraba
+                            // por sender != yo, lo que perdía mensajes propios al re-loguear.
+                            // Ahora dedupe por event.id o por timestamp+sender+content si
+                            // todavía está el optimista local.
                             is RoomMessageEventContent -> {
-                                if (senderId != myUserId) {
-                                    val currentMessages = _messages.value[eventRoomId] ?: emptyList()
-                                    // Evitar duplicados comparando ID del evento
-                                    val alreadyExists = currentMessages.any { it.id == event.id.full }
-                                    if (!alreadyExists) {
-                                        val newMessage = MatrixMessage(
-                                            id = event.id.full,
-                                            roomId = eventRoomId,
-                                            senderId = senderId,
-                                            senderDisplayName = extractDisplayName(senderId),
-                                            content = content.body,
-                                            timestamp = event.originTimestamp,
-                                            type = MessageType.TEXT
-                                        )
-                                        _messages.value = _messages.value + (eventRoomId to (currentMessages + newMessage))
-                                    }
-                                }
+                                processRoomMessageContent(
+                                    roomId = eventRoomId,
+                                    eventId = event.id.full,
+                                    senderId = senderId,
+                                    timestamp = event.originTimestamp,
+                                    content = content,
+                                )
                             }
                             else -> { /* Ignorar otros tipos de eventos */ }
                         }
@@ -634,6 +638,211 @@ class MatrixManager(
      */
     private fun extractDisplayName(userId: String): String {
         return userId.substringAfter("@").substringBefore(":").takeIf { it.isNotBlank() } ?: userId
+    }
+
+    /**
+     * Branch por tipo concreto de RoomMessageEventContent. Los TextBased se
+     * tratan como TEXT; los FileBased (Image/Video/Audio/File) se procesan
+     * con su mxc URL resuelta a HTTPS para que la UI pueda mostrarla.
+     */
+    private fun processRoomMessageContent(
+        roomId: String,
+        eventId: String,
+        senderId: String,
+        timestamp: Long,
+        content: RoomMessageEventContent,
+    ) {
+        when (content) {
+            is RoomMessageEventContent.FileBased.Image ->
+                upsertMediaMessage(roomId, eventId, senderId, timestamp,
+                    type = MessageType.IMAGE, mxcUrl = content.url, fileName = content.body)
+            is RoomMessageEventContent.FileBased.Video ->
+                upsertMediaMessage(roomId, eventId, senderId, timestamp,
+                    type = MessageType.VIDEO, mxcUrl = content.url, fileName = content.body)
+            is RoomMessageEventContent.FileBased.Audio ->
+                upsertMediaMessage(roomId, eventId, senderId, timestamp,
+                    type = MessageType.AUDIO, mxcUrl = content.url, fileName = content.body)
+            is RoomMessageEventContent.FileBased.File ->
+                upsertMediaMessage(roomId, eventId, senderId, timestamp,
+                    type = MessageType.FILE, mxcUrl = content.url, fileName = content.body)
+            else -> {
+                // TextBased y cualquier otro tipo de body textual
+                upsertTextMessage(roomId, eventId, senderId, content.body, timestamp)
+            }
+        }
+    }
+
+    /**
+     * Inserta una media (imagen/vídeo/audio/archivo) en el cache con dedupe.
+     * Resuelve `mxc://server/id` a una URL HTTPS lista para Coil/AsyncImage.
+     */
+    private fun upsertMediaMessage(
+        roomId: String,
+        eventId: String,
+        senderId: String,
+        timestamp: Long,
+        type: MessageType,
+        mxcUrl: String?,
+        fileName: String,
+    ) {
+        val current = _messages.value[roomId] ?: emptyList()
+        if (current.any { it.id == eventId }) return
+
+        val httpUrl = mxcUrl?.let { resolveMxcToHttpUrl(it) }
+
+        val msg = MatrixMessage(
+            id = eventId,
+            roomId = roomId,
+            senderId = senderId,
+            senderDisplayName = extractDisplayName(senderId),
+            content = fileName,
+            timestamp = timestamp,
+            type = type,
+            mediaUrl = httpUrl,
+            fileName = fileName,
+        )
+
+        // Reemplazar optimista local (igual que upsertTextMessage)
+        val replaceIdx = current.indexOfFirst { existing ->
+            existing.id.startsWith("local_") &&
+                existing.senderId == senderId &&
+                existing.type == type &&
+                existing.fileName == fileName &&
+                kotlin.math.abs(existing.timestamp - timestamp) < 30_000L
+        }
+        val updated = if (replaceIdx >= 0) {
+            current.toMutableList().apply { set(replaceIdx, msg) }
+        } else {
+            (current + msg).sortedBy { it.timestamp }
+        }
+        _messages.value = _messages.value + (roomId to updated)
+    }
+
+    /**
+     * Convierte `mxc://server.com/mediaId` → URL HTTPS de descarga via el
+     * homeserver actual del cliente Matrix.
+     *
+     * Endpoint: `${baseUrl}/_matrix/media/v3/download/{server}/{mediaId}`.
+     * Adjuntamos `?access_token=…` para que los clientes puedan abrir la URL
+     * sin headers (Coil network-ktor incluirá cualquier query param tal cual).
+     *
+     * Devuelve null si la URI no es válida o no tenemos token de acceso.
+     */
+    private fun resolveMxcToHttpUrl(mxc: String): String? {
+        if (!mxc.startsWith("mxc://")) return null
+        val rest = mxc.removePrefix("mxc://")
+        val slash = rest.indexOf('/')
+        if (slash <= 0) return null
+        val serverName = rest.substring(0, slash)
+        val mediaId = rest.substring(slash + 1)
+        if (mediaId.isEmpty()) return null
+        val baseUrl = config.homeserverUrl.trimEnd('/')
+        val token = storedAccessToken
+        val tokenQuery = if (!token.isNullOrBlank()) "?access_token=$token" else ""
+        return "$baseUrl/_matrix/media/v3/download/$serverName/$mediaId$tokenQuery"
+    }
+
+    /**
+     * Inserta o actualiza un mensaje de texto en el cache `_messages` con
+     * deduplicación inteligente:
+     *
+     *   1. Si ya existe un mensaje con `event.id` igual → ignora (eco doble).
+     *   2. Si existe un mensaje optimista local (id="local_…") del MISMO sender
+     *      con el MISMO contenido y timestamp ±10 segundos → lo reemplaza por
+     *      el real (preservando posición + id de servidor para futuras dedupes).
+     *   3. Si no, lo añade respetando orden cronológico por timestamp.
+     */
+    private fun upsertTextMessage(
+        roomId: String,
+        eventId: String,
+        senderId: String,
+        body: String,
+        timestamp: Long,
+    ) {
+        val current = _messages.value[roomId] ?: emptyList()
+
+        // 1) Dedupe exacta por eventId
+        if (current.any { it.id == eventId }) return
+
+        val newMessage = MatrixMessage(
+            id = eventId,
+            roomId = roomId,
+            senderId = senderId,
+            senderDisplayName = extractDisplayName(senderId),
+            content = body,
+            timestamp = timestamp,
+            type = MessageType.TEXT,
+        )
+
+        // 2) Buscar optimista local del mismo sender+content+timestamp cercano
+        val replaceIdx = current.indexOfFirst { existing ->
+            existing.id.startsWith("local_") &&
+                existing.senderId == senderId &&
+                existing.content == body &&
+                kotlin.math.abs(existing.timestamp - timestamp) < 10_000L
+        }
+
+        val updated = if (replaceIdx >= 0) {
+            current.toMutableList().apply { set(replaceIdx, newMessage) }
+        } else {
+            // 3) Insertar manteniendo orden cronológico (mayor timestamp al final)
+            val combined = (current + newMessage).sortedBy { it.timestamp }
+            combined
+        }
+        _messages.value = _messages.value + (roomId to updated)
+    }
+
+    // Cache de rooms cuyo timeline histórico ya cargamos en esta sesión, para
+    // no relanzar la carga cada vez que el observer re-emite.
+    private val historicalLoaded = mutableSetOf<String>()
+
+    /**
+     * Carga los últimos N eventos persistidos del store de Trixnity para una
+     * room y los inyecta en `_messages` vía `upsertTextMessage`. Esto permite
+     * que al re-loguear o al entrar a una room por primera vez en la sesión
+     * el usuario vea sus propios mensajes anteriores y los recibidos antes
+     * de subscribirse al sync.
+     */
+    @OptIn(kotlin.time.ExperimentalTime::class)
+    private fun loadHistoricalTimeline(roomId: String, limit: Int = 50) {
+        if (!historicalLoaded.add(roomId)) return
+        val client = matrixClient ?: return
+        scope.launch {
+            try {
+                val rid = RoomId(roomId)
+                val last = client.room.getLastTimelineEvent(rid)
+                    .firstOrNull()
+                    ?.firstOrNull()
+                    ?: return@launch
+
+                val history = mutableListOf(last)
+                var current: net.folivo.trixnity.client.store.TimelineEvent? = last
+                while (history.size < limit) {
+                    val prevFlow = current?.let { client.room.getPreviousTimelineEvent(it) }
+                        ?: break
+                    val prev = prevFlow.firstOrNull() ?: break
+                    history.add(prev)
+                    current = prev
+                }
+                // Procesar del más antiguo al más reciente
+                history.reversed().forEach { tev ->
+                    val content = tev.content?.getOrNull() as? RoomMessageEventContent
+                        ?: return@forEach
+                    processRoomMessageContent(
+                        roomId = tev.event.roomId.full,
+                        eventId = tev.event.id.full,
+                        senderId = tev.event.sender.full,
+                        timestamp = tev.event.originTimestamp,
+                        content = content,
+                    )
+                }
+                log.d(TAG) { "Historical timeline loaded for $roomId: ${history.size} events" }
+            } catch (e: Exception) {
+                log.w(TAG) { "loadHistoricalTimeline($roomId) failed: ${e.message}" }
+                // Permitir reintentar más tarde
+                historicalLoaded.remove(roomId)
+            }
+        }
     }
 
     /**
@@ -1097,40 +1306,104 @@ class MatrixManager(
     }
 
     /**
-     * Subir archivo
+     * Sube un archivo binario y envía el `m.room.message` correspondiente para
+     * que el receptor lo vea. Antes esta función subía el archivo pero NO
+     * publicaba el evento, así que el upload era invisible para el otro lado.
+     *
+     * El msgtype se elige por el `mimeType`:
+     *   - image/* → `m.image`
+     *   - video/* → `m.video`
+     *   - audio/* → `m.audio`
+     *   - resto → `m.file`
+     *
+     * También inserta un mensaje optimista en el cache para feedback inmediato
+     * en la UI (con un placeholder textual descriptivo). Cuando llegue el eco
+     * del server vía sync, se deduplica por timestamp+sender.
      */
+    @OptIn(kotlin.time.ExperimentalTime::class)
     suspend fun sendFile(
         roomId: String,
         fileData: ByteArray,
         mimeType: String,
-        fileName: String
+        fileName: String,
     ): Result<Unit> {
         return try {
             val client = matrixClient ?: throw Exception("Not logged in")
+            val myUserId = client.userId.full
+            val now = kotlin.time.Clock.System.now().toEpochMilliseconds()
 
+            // Placeholder local mientras se sube y publica
+            val displayLabel = when {
+                mimeType.startsWith("image/") -> "🖼️ $fileName"
+                mimeType.startsWith("video/") -> "🎬 $fileName"
+                mimeType.startsWith("audio/") -> "🎵 $fileName"
+                else -> "📎 $fileName"
+            }
+            val tempId = "local_${now}"
+            val optimistic = MatrixMessage(
+                id = tempId,
+                roomId = roomId,
+                senderId = myUserId,
+                senderDisplayName = extractDisplayName(myUserId),
+                content = displayLabel,
+                timestamp = now,
+                type = when {
+                    mimeType.startsWith("image/") -> MessageType.IMAGE
+                    mimeType.startsWith("video/") -> MessageType.VIDEO
+                    mimeType.startsWith("audio/") -> MessageType.AUDIO
+                    else -> MessageType.FILE
+                },
+            )
+            val current = _messages.value[roomId] ?: emptyList()
+            _messages.value = _messages.value + (roomId to (current + optimistic))
+
+            // 1) Subir archivo
             val media = Media(
                 content = io.ktor.utils.io.ByteReadChannel(fileData),
                 contentLength = fileData.size.toLong(),
                 contentType = io.ktor.http.ContentType.parse(mimeType),
                 contentDisposition = io.ktor.http.ContentDisposition.Attachment.withParameter(
                     io.ktor.http.ContentDisposition.Parameters.FileName,
-                    fileName
+                    fileName,
+                ),
+            )
+            val uploadResult = client.api.media.upload(media = media).getOrElse { error ->
+                log.e(TAG) { "Upload failed: ${error.message}" }
+                return Result.failure(error)
+            }
+            val mxcUri = uploadResult.contentUri
+
+            // 2) Construir y publicar el evento m.room.message
+            val msgContent: RoomMessageEventContent = when {
+                mimeType.startsWith("image/") -> RoomMessageEventContent.FileBased.Image(
+                    body = fileName,
+                    url = mxcUri,
+                    info = null,
                 )
-            )
+                mimeType.startsWith("video/") -> RoomMessageEventContent.FileBased.Video(
+                    body = fileName,
+                    url = mxcUri,
+                    info = null,
+                )
+                mimeType.startsWith("audio/") -> RoomMessageEventContent.FileBased.Audio(
+                    body = fileName,
+                    url = mxcUri,
+                    info = null,
+                )
+                else -> RoomMessageEventContent.FileBased.File(
+                    body = fileName,
+                    url = mxcUri,
+                    info = null,
+                )
+            }
+            client.api.room.sendMessageEvent(
+                roomId = RoomId(roomId),
+                eventContent = msgContent,
+            ).getOrThrow()
 
-            val uploadResult = client.api.media.upload(
-                media = media
-            )
-
-            uploadResult.fold(
-                onSuccess = { Result.success(Unit) },
-                onFailure = { error ->
-                    log.e(TAG, { "Error uploading file: $error" })
-                    Result.failure(error)
-                }
-            )
+            Result.success(Unit)
         } catch (e: Exception) {
-            log.e(TAG, { "Error sending file: $e" })
+            log.e(TAG) { "Error sending file: ${e.message}" }
             Result.failure(e)
         }
     }
