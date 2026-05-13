@@ -233,6 +233,37 @@ class MatrixManager(
     }
 
     /**
+     * Pausa el long-polling de sync. Útil para llamar desde un lifecycle hook
+     * cuando la app pasa a background: ahorra batería + bandwidth y evita
+     * mantener conexiones abiertas innecesariamente.
+     *
+     * Idempotente: si no hay cliente o ya está pausado, no hace nada.
+     */
+    suspend fun pauseSync() {
+        val client = matrixClient ?: return
+        try {
+            log.d(TAG) { "Pausing Matrix sync (background)" }
+            client.stopSync()
+        } catch (e: Exception) {
+            log.w(TAG) { "pauseSync failed: ${e.message}" }
+        }
+    }
+
+    /**
+     * Reanuda el long-polling de sync. Llamar cuando la app vuelve a foreground.
+     * Idempotente: si ya está corriendo Trixnity ignora la segunda llamada.
+     */
+    fun resumeSync() {
+        val client = matrixClient ?: return
+        try {
+            log.d(TAG) { "Resuming Matrix sync (foreground)" }
+            client.startSync()
+        } catch (e: Exception) {
+            log.w(TAG) { "resumeSync failed: ${e.message}" }
+        }
+    }
+
+    /**
      * Logout
      */
     suspend fun logout() {

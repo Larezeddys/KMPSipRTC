@@ -1,10 +1,14 @@
 package com.eddyslarez.kmpsiprtc.services.matrix
 
+import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import com.eddyslarez.kmpsiprtc.platform.log
-import net.folivo.trixnity.client.store.repository.createInMemoryRepositoriesModule
 import net.folivo.trixnity.client.media.createInMemoryMediaStoreModule
+import net.folivo.trixnity.client.media.okio.createOkioMediaStoreModule
+import net.folivo.trixnity.client.store.repository.createInMemoryRepositoriesModule
+import net.folivo.trixnity.client.store.repository.room.createRoomRepositoriesModule
 import okio.FileSystem
 import okio.Path.Companion.toPath
+import okio.SYSTEM
 import org.koin.core.module.Module
 
 /**
@@ -13,22 +17,20 @@ import org.koin.core.module.Module
  * Estado actual de persistencia:
  *  - **Media cache (Okio)** → ACTIVADO si el basePath es válido. Las imágenes
  *    y archivos descargados se persisten en disco — sobreviven a un restart.
- *  - **Repositorios (Room/Realm)** → todavía en memoria. La sesión Matrix
- *    no persiste entre restarts de la app. Pendiente de configurar Room KMP
- *    de Trixnity correctamente (requiere setup específico de databaseFactory
- *    KMP que validamos en una siguiente iteración con build real).
+ *  - **Repositorios (Room KMP)** → ACTIVADO. La sesión Matrix sobrevive a
+ *    un restart de la app: `next_batch` del sync, account, rooms, eventos,
+ *    timeline, etc. quedan en `$basePath/trixnity.db`.
  *
- * Cuando se active Room repository:
- * ```
- * createRoomRepositoriesModule(databaseFactory = { Room.databaseBuilder(...) })
- * ```
- * El path de la DB sería `"$basePath/db/trixnity.db"`.
+ * Ambos módulos hacen fallback gracioso a in-memory si su inicialización
+ * falla (path inválido, permisos, mismatch de API), de forma que la app
+ * sigue siendo usable aunque la persistencia tenga algún problema.
  */
 object MatrixModuleFactory {
     private const val TAG = "MatrixModuleFactory"
 
     /**
      * Módulos in-memory (todo se pierde al cerrar la app).
+     * Útil para tests o cuando no se quiere ensuciar disco.
      */
     fun createInMemoryModules(): Pair<Module, Module> {
         log.d(TAG) { "Creating in-memory Matrix modules" }
@@ -39,21 +41,29 @@ object MatrixModuleFactory {
     }
 
     /**
-     * Módulos con media cache persistente. Repositorios siguen in-memory
-     * (ver doc de clase).
+     * Módulos persistentes (Room KMP para state + Okio para media).
      *
-     * Si la creación del media store Okio falla por cualquier motivo
-     * (path inválido, permisos, mismatch de API entre versiones de
-     * Trixnity), hace fallback a in-memory y loguea el error.
+     * Cada módulo tiene su propio try/catch con fallback a in-memory
+     * — si Room falla pero Okio anda, la media persiste igual; y viceversa.
      */
     fun createPersistentModules(basePath: String): Pair<Module, Module> {
         log.d(TAG) { "Creating persistent Matrix modules at: $basePath" }
-        val repositories = createInMemoryRepositoriesModule()
+
+        val repositories = try {
+            val builder = matrixRoomDatabaseBuilder(basePath)
+                .setDriver(BundledSQLiteDriver())
+            val mod = createRoomRepositoriesModule(databaseBuilder = builder)
+            log.d(TAG) { "Trixnity Room repositories enabled at: $basePath/trixnity.db" }
+            mod
+        } catch (t: Throwable) {
+            log.w(TAG) { "Room repositories init failed (${t.message}), falling back to in-memory" }
+            createInMemoryRepositoriesModule()
+        }
+
         val media = try {
             val mediaPath = "$basePath/media".toPath()
-            // Asegurar que el directorio existe
             FileSystem.SYSTEM.createDirectories(mediaPath)
-            val mod = net.folivo.trixnity.client.media.createOkioMediaStoreModule(
+            val mod = createOkioMediaStoreModule(
                 basePath = mediaPath,
                 fileSystem = FileSystem.SYSTEM,
             )
@@ -63,6 +73,7 @@ object MatrixModuleFactory {
             log.w(TAG) { "Okio media store init failed (${t.message}), falling back to in-memory" }
             createInMemoryMediaStoreModule()
         }
+
         return Pair(repositories, media)
     }
 }
