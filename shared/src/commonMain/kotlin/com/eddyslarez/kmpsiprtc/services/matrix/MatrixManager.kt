@@ -26,8 +26,6 @@ import io.ktor.http.Url
 import kotlinx.serialization.json.Json
 import net.folivo.trixnity.clientserverapi.model.authentication.IdentifierType
 import net.folivo.trixnity.clientserverapi.model.media.Media
-import net.folivo.trixnity.client.store.repository.createInMemoryRepositoriesModule
-import net.folivo.trixnity.client.media.createInMemoryMediaStoreModule
 import kotlin.time.Duration.Companion.seconds
 
 
@@ -109,8 +107,12 @@ class MatrixManager(
             _connectionState.value = MatrixConnectionState.Connecting
             log.d { "Estado de conexion: Connecting..." }
 
-            val reposModule = createInMemoryRepositoriesModule()
-            val mediaModule = createInMemoryMediaStoreModule()
+            // Usar persistencia para media (Okio) — los archivos descargados sobreviven al
+            // restart de la app. Repositorios (sync state, rooms, events) siguen in-memory
+            // hasta que se active Room KMP de Trixnity en una iteración posterior.
+            val (reposModule, mediaModule) = MatrixModuleFactory.createPersistentModules(
+                matrixStoragePath()
+            )
             log.d { "Modulos de repositorios y media store creados" }
 
             val baseUrlStr = homeserverOverride?.takeIf { it.isNotBlank() } ?: config.homeserverUrl
@@ -166,8 +168,9 @@ class MatrixManager(
             log.d { "Attempting login from store" }
 
             _connectionState.value = MatrixConnectionState.Connecting
-            val reposModule = createInMemoryRepositoriesModule()
-            val mediaModule = createInMemoryMediaStoreModule()
+            val (reposModule, mediaModule) = MatrixModuleFactory.createPersistentModules(
+                matrixStoragePath()
+            )
 
             // Intentar recuperar sesion desde el almacenamiento
             val clientResult = MatrixClient.fromStore(

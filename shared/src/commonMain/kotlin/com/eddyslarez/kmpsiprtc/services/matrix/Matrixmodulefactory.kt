@@ -3,20 +3,32 @@ package com.eddyslarez.kmpsiprtc.services.matrix
 import com.eddyslarez.kmpsiprtc.platform.log
 import net.folivo.trixnity.client.store.repository.createInMemoryRepositoriesModule
 import net.folivo.trixnity.client.media.createInMemoryMediaStoreModule
+import okio.FileSystem
+import okio.Path.Companion.toPath
 import org.koin.core.module.Module
 
 /**
- * Factory para crear los modulos requeridos por MatrixClient.
+ * Factory para crear los módulos requeridos por MatrixClient.
  *
- * Actualmente usa almacenamiento en memoria.
- * Para persistencia, reemplazar con createRealmRepositoriesModule / createOkioMediaStoreModule
- * cuando se configure correctamente la ruta de cada plataforma.
+ * Estado actual de persistencia:
+ *  - **Media cache (Okio)** → ACTIVADO si el basePath es válido. Las imágenes
+ *    y archivos descargados se persisten en disco — sobreviven a un restart.
+ *  - **Repositorios (Room/Realm)** → todavía en memoria. La sesión Matrix
+ *    no persiste entre restarts de la app. Pendiente de configurar Room KMP
+ *    de Trixnity correctamente (requiere setup específico de databaseFactory
+ *    KMP que validamos en una siguiente iteración con build real).
+ *
+ * Cuando se active Room repository:
+ * ```
+ * createRoomRepositoriesModule(databaseFactory = { Room.databaseBuilder(...) })
+ * ```
+ * El path de la DB sería `"$basePath/db/trixnity.db"`.
  */
 object MatrixModuleFactory {
     private const val TAG = "MatrixModuleFactory"
 
     /**
-     * Crea modulos con almacenamiento en memoria (sesion se pierde al reiniciar)
+     * Módulos in-memory (todo se pierde al cerrar la app).
      */
     fun createInMemoryModules(): Pair<Module, Module> {
         log.d(TAG) { "Creating in-memory Matrix modules" }
@@ -27,33 +39,30 @@ object MatrixModuleFactory {
     }
 
     /**
-     * Crea modulos con almacenamiento persistente.
-     * Requiere que se provea la ruta base por plataforma:
-     * - Android: context.filesDir.absolutePath
-     * - iOS: NSDocumentDirectory path
-     * - Desktop: System.getProperty("user.home") + "/.mcnsoftphone"
+     * Módulos con media cache persistente. Repositorios siguen in-memory
+     * (ver doc de clase).
      *
-     * NOTA: Por ahora delega a in-memory. Descomentar cuando las dependencias
-     * de Realm/Okio esten correctamente configuradas.
+     * Si la creación del media store Okio falla por cualquier motivo
+     * (path inválido, permisos, mismatch de API entre versiones de
+     * Trixnity), hace fallback a in-memory y loguea el error.
      */
     fun createPersistentModules(basePath: String): Pair<Module, Module> {
         log.d(TAG) { "Creating persistent Matrix modules at: $basePath" }
-
-        // TODO: Descomentar cuando Realm y Okio esten disponibles:
-        // val databasePath = "$basePath/matrix/db"
-        // val mediaPath = "$basePath/matrix/media"
-        // return Pair(
-        //     createRealmRepositoriesModule { directory = databasePath },
-        //     createOkioMediaStoreModule {
-        //         fileSystem = FileSystem.SYSTEM
-        //         cacheSize = 100 * 1024 * 1024
-        //         directory = mediaPath.toPath()
-        //     }
-        // )
-
-        // Fallback a in-memory hasta que Realm este configurado
-        log.w(TAG) { "Persistent storage not yet configured, using in-memory modules" }
-        return createInMemoryModules()
+        val repositories = createInMemoryRepositoriesModule()
+        val media = try {
+            val mediaPath = "$basePath/media".toPath()
+            // Asegurar que el directorio existe
+            FileSystem.SYSTEM.createDirectories(mediaPath)
+            val mod = net.folivo.trixnity.client.media.createOkioMediaStoreModule(
+                basePath = mediaPath,
+                fileSystem = FileSystem.SYSTEM,
+            )
+            log.d(TAG) { "Okio media store enabled at: $mediaPath" }
+            mod
+        } catch (t: Throwable) {
+            log.w(TAG) { "Okio media store init failed (${t.message}), falling back to in-memory" }
+            createInMemoryMediaStoreModule()
+        }
+        return Pair(repositories, media)
     }
-
 }
