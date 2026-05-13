@@ -18,6 +18,7 @@ import net.folivo.trixnity.client.store.roomId
 import net.folivo.trixnity.core.model.UserId
 import net.folivo.trixnity.core.model.RoomId
 import net.folivo.trixnity.core.model.events.m.room.RoomMessageEventContent
+import net.folivo.trixnity.core.model.events.m.room.Membership
 import net.folivo.trixnity.core.model.events.m.call.CallEventContent
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.utils.generateId
@@ -317,12 +318,30 @@ class MatrixManager(
                     val roomFlows: List<Flow<MatrixRoom?>> = roomsMap.entries.map { (roomId, roomFlow) ->
                         roomFlow.map { room ->
                             room?.let {
-                                // Resolver nombre de sala correctamente
+                                // Auto-join: si recibimos una invitación, aceptarla
+                                // automáticamente. Sin esto, sendTextMessage falla con
+                                // "missing permissions" porque el room está en estado
+                                // INVITED, no JOINED. Element acepta automáticamente
+                                // las invitaciones de DM; replicamos ese comportamiento.
+                                if (it.membership == Membership.INVITE) {
+                                    autoJoinInvitedRoom(roomId.full)
+                                }
+
+                                // Resolver nombre de sala correctamente.
+                                // Para DMs sin nombre explícito usamos heroes del room
+                                // (los otros miembros). Esto evita que la UI muestre
+                                // el room ID en bruto ("tuoDDUkoEHPEnDNtZj") y muestre
+                                // el display name del otro participante.
+                                val heroes: List<String> = try {
+                                    it.name?.heroes?.map { h -> h.full } ?: emptyList()
+                                } catch (_: Throwable) { emptyList() }
+
                                 val resolvedName = resolveRoomName(
                                     roomId = roomId.full,
                                     explicitName = it.name?.explicitName,
                                     isDirect = it.isDirect,
-                                    myUserId = myUserId
+                                    myUserId = myUserId,
+                                    heroes = heroes,
                                 )
                                 // Calcular ultimo mensaje y timestamp desde el cache de mensajes
                                 val roomMessages = _messages.value[roomId.full]
@@ -593,12 +612,28 @@ class MatrixManager(
         roomId: String,
         explicitName: String?,
         isDirect: Boolean,
-        myUserId: String
+        myUserId: String,
+        heroes: List<String> = emptyList(),
     ): String {
         // 1. Intentar nombre explícito (para salas con nombre configurado)
         if (!explicitName.isNullOrBlank()) return explicitName
 
-        // 2. Para salas DM: buscar el otro miembro en mensajes recientes
+        // 2. Heroes: en Matrix los "heroes" son los otros miembros del room que
+        // el server seleccionó para componer el display name. Esto cubre tanto
+        // DMs (un solo hero) como grupos pequeños sin nombre (varios heroes).
+        if (heroes.isNotEmpty()) {
+            val others = heroes.filter { it != myUserId }
+            if (others.isNotEmpty()) {
+                val names = others.map { extractDisplayName(it) }
+                return when {
+                    names.size == 1 -> names[0]
+                    names.size == 2 -> "${names[0]} & ${names[1]}"
+                    else -> "${names[0]}, ${names[1]} +${names.size - 2}"
+                }
+            }
+        }
+
+        // 3. Para salas DM: buscar el otro miembro en mensajes recientes
         if (isDirect) {
             val roomMessages = _messages.value[roomId]
             val otherSender = roomMessages
@@ -609,9 +644,37 @@ class MatrixManager(
             }
         }
 
-        // 3. Fallback: usar el localpart del room ID (!localpart:server)
+        // 4. Fallback: usar el localpart del room ID (!localpart:server)
         val localPart = roomId.substringAfter("!").substringBefore(":")
         return localPart.takeIf { it.isNotBlank() } ?: "Sala"
+    }
+
+    // Cache para evitar auto-join repetido del mismo room (la observación de
+    // rooms re-emite múltiples veces y no queremos lanzar joinRoom cada vez).
+    private val autoJoinAttempted = mutableSetOf<String>()
+
+    /**
+     * Auto-acepta una invitación a sala. Se llama desde el observer cuando
+     * detectamos un room con membership=INVITE. Es idempotente — si ya
+     * intentamos joinear esta sala antes en esta sesión, no se reintenta.
+     *
+     * Hace que el envío de mensajes funcione sin que el usuario tenga que
+     * aceptar manualmente la invitación (UX tipo Element para DMs).
+     */
+    private fun autoJoinInvitedRoom(roomId: String) {
+        if (!autoJoinAttempted.add(roomId)) return
+        val client = matrixClient ?: return
+        scope.launch {
+            try {
+                log.d(TAG) { "Auto-joining invited room: $roomId" }
+                client.api.room.joinRoom(RoomId(roomId)).getOrThrow()
+                log.d(TAG) { "Auto-join success: $roomId" }
+            } catch (e: Exception) {
+                log.w(TAG) { "Auto-join failed for $roomId: ${e.message}" }
+                // Permitir reintentar en una próxima emisión
+                autoJoinAttempted.remove(roomId)
+            }
+        }
     }
 
     /**
@@ -637,6 +700,22 @@ class MatrixManager(
             )
             val currentMessages = _messages.value[roomId] ?: emptyList()
             _messages.value = _messages.value + (roomId to (currentMessages + optimisticMessage))
+
+            // Defensa: si el room aún está en estado INVITE (auto-join no se ha
+            // completado, o falló), intentamos joinear de forma síncrona antes
+            // de enviar para evitar el error "missing permissions in this room".
+            try {
+                val roomFlow = client.room.getById(RoomId(roomId))
+                val currentRoom = roomFlow.firstOrNull()
+                if (currentRoom?.membership == Membership.INVITE) {
+                    log.d(TAG) { "Room still in INVITE state, joining before send: $roomId" }
+                    client.api.room.joinRoom(RoomId(roomId)).getOrThrow()
+                }
+            } catch (joinErr: Throwable) {
+                // Si el chequeo/join falla seguimos intentando enviar — el server
+                // dará error real y lo capturamos abajo.
+                log.w(TAG) { "Pre-send join check failed for $roomId: ${joinErr.message}" }
+            }
 
             client.room.sendMessage(RoomId(roomId)) {
                 text(message)
