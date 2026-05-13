@@ -683,9 +683,22 @@ class MatrixManager(
 
     /**
      * Iniciar llamada de voz - envia m.call.invite
+     *
+     * @deprecated Matrix calls están deshabilitadas. Las llamadas reales usan
+     * el módulo de conferencias / LiveKit. Esta función retorna early con
+     * Result.failure si `config.enableVoip = false` (que es el default).
      */
+    @Deprecated(
+        message = "Matrix calls deshabilitadas. Usa el módulo de conferencias/LiveKit.",
+        level = DeprecationLevel.WARNING
+    )
+    @Suppress("DEPRECATION")
     @OptIn(kotlin.time.ExperimentalTime::class)
     suspend fun startVoiceCall(roomId: String): Result<MatrixCall> {
+        if (!config.enableVoip) {
+            log.w(TAG) { "startVoiceCall: bloqueado, MatrixConfig.enableVoip=false (chat-only)" }
+            return Result.failure(IllegalStateException("Matrix VoIP disabled by config"))
+        }
         return try {
             log.d { "Starting Matrix voice call in room: $roomId" }
 
@@ -752,8 +765,19 @@ class MatrixManager(
 
     /**
      * Iniciar videollamada - envia m.call.invite con video
+     *
+     * @deprecated Matrix video calls están deshabilitadas. Usa conference/LiveKit.
      */
+    @Deprecated(
+        message = "Matrix video calls deshabilitadas. Usa el módulo de conferencias/LiveKit.",
+        level = DeprecationLevel.WARNING
+    )
+    @Suppress("DEPRECATION")
     suspend fun startVideoCall(roomId: String): Result<MatrixCall> {
+        if (!config.enableVideo) {
+            log.w(TAG) { "startVideoCall: bloqueado, MatrixConfig.enableVideo=false (chat-only)" }
+            return Result.failure(IllegalStateException("Matrix video disabled by config"))
+        }
         return try {
             log.d { "Starting Matrix video call in room: $roomId" }
 
@@ -800,8 +824,19 @@ class MatrixManager(
 
     /**
      * Responder llamada - envia m.call.answer
+     *
+     * @deprecated Matrix calls deshabilitadas. Usa conference/LiveKit.
      */
+    @Deprecated(
+        message = "Matrix calls deshabilitadas. Usa el módulo de conferencias/LiveKit.",
+        level = DeprecationLevel.WARNING
+    )
+    @Suppress("DEPRECATION")
     suspend fun answerCall(callId: String): Result<Unit> {
+        if (!config.enableVoip && !config.enableVideo) {
+            log.w(TAG) { "answerCall: bloqueado, Matrix VoIP/Video deshabilitados por config" }
+            return Result.failure(IllegalStateException("Matrix calls disabled by config"))
+        }
         return try {
             val call = _activeCall.value ?: throw Exception("No active call")
             val client = matrixClient ?: throw Exception("Not logged in")
@@ -846,8 +881,18 @@ class MatrixManager(
 
     /**
      * Colgar llamada - envia m.call.hangup
+     *
+     * @deprecated Matrix calls deshabilitadas. Conservada para cleanup defensivo
+     * por si alguna versión anterior dejó una llamada activa.
      */
+    @Deprecated(
+        message = "Matrix calls deshabilitadas. Usa el módulo de conferencias/LiveKit.",
+        level = DeprecationLevel.WARNING
+    )
+    @Suppress("DEPRECATION")
     suspend fun hangupCall(callId: String): Result<Unit> {
+        // Excepción al gate: hangupCall siempre se permite por cleanup defensivo —
+        // si la app encuentra una _activeCall heredada queremos poder terminarla.
         return try {
             val call = _activeCall.value ?: throw Exception("No active call")
             val client = matrixClient ?: throw Exception("Not logged in")
