@@ -1367,39 +1367,42 @@ class MatrixManager(
                     fileName,
                 ),
             )
-            val uploadResult = client.api.media.upload(media = media).getOrElse { error ->
-                log.e(TAG) { "Upload failed: ${error.message}" }
-                return Result.failure(error)
+            val uploadCall = client.api.media.upload(media = media)
+            if (uploadCall.isFailure) {
+                val err = uploadCall.exceptionOrNull() ?: Exception("Upload failed")
+                log.e(TAG) { "Upload failed: ${err.message}" }
+                return Result.failure(err)
             }
-            val mxcUri = uploadResult.contentUri
+            val mxcUri = uploadCall.getOrThrow().contentUri
 
             // 2) Construir y publicar el evento m.room.message
             val msgContent: RoomMessageEventContent = when {
                 mimeType.startsWith("image/") -> RoomMessageEventContent.FileBased.Image(
                     body = fileName,
                     url = mxcUri,
-                    info = null,
                 )
                 mimeType.startsWith("video/") -> RoomMessageEventContent.FileBased.Video(
                     body = fileName,
                     url = mxcUri,
-                    info = null,
                 )
                 mimeType.startsWith("audio/") -> RoomMessageEventContent.FileBased.Audio(
                     body = fileName,
                     url = mxcUri,
-                    info = null,
                 )
                 else -> RoomMessageEventContent.FileBased.File(
                     body = fileName,
                     url = mxcUri,
-                    info = null,
                 )
             }
-            client.api.room.sendMessageEvent(
+            val sendCall = client.api.room.sendMessageEvent(
                 roomId = RoomId(roomId),
                 eventContent = msgContent,
-            ).getOrThrow()
+            )
+            if (sendCall.isFailure) {
+                val err = sendCall.exceptionOrNull() ?: Exception("sendMessageEvent failed")
+                log.e(TAG) { "Send file event failed: ${err.message}" }
+                return Result.failure(err)
+            }
 
             Result.success(Unit)
         } catch (e: Exception) {
