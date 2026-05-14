@@ -1328,10 +1328,13 @@ class MatrixManager(
      * publicaba el evento, así que el upload era invisible para el otro lado.
      *
      * El msgtype se elige por el `mimeType`:
-     *   - image/* → `m.image`
-     *   - video/* → `m.video`
-     *   - audio/* → `m.audio`
-     *   - resto → `m.file`
+     *   - image/...  → `m.image`
+     *   - video/...  → `m.video`
+     *   - audio/...  → `m.audio`
+     *   - resto      → `m.file`
+     *
+     * (Nota: la barra-asterisco juntos abren un sub-comentario en Kotlin
+     * porque permite block-comments anidados; por eso usamos `/...`)
      *
      * También inserta un mensaje optimista en el cache para feedback inmediato
      * en la UI (con un placeholder textual descriptivo). Cuando llegue el eco
