@@ -13,8 +13,13 @@ import com.eddyslarez.kmpsiprtc.services.unified.CallType
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import net.folivo.trixnity.client.*
+import net.folivo.trixnity.client.room.message.audio
+import net.folivo.trixnity.client.room.message.file
+import net.folivo.trixnity.client.room.message.image
 import net.folivo.trixnity.client.room.message.text
+import net.folivo.trixnity.client.room.message.video
 import net.folivo.trixnity.client.store.roomId
+import net.folivo.trixnity.utils.toByteArrayFlow
 import net.folivo.trixnity.core.model.UserId
 import net.folivo.trixnity.core.model.RoomId
 import net.folivo.trixnity.core.model.events.m.room.RoomMessageEventContent
@@ -1340,6 +1345,12 @@ class MatrixManager(
                 else -> "📎 $fileName"
             }
             val tempId = "local_${now}"
+            val msgType = when {
+                mimeType.startsWith("image/") -> MessageType.IMAGE
+                mimeType.startsWith("video/") -> MessageType.VIDEO
+                mimeType.startsWith("audio/") -> MessageType.AUDIO
+                else -> MessageType.FILE
+            }
             val optimistic = MatrixMessage(
                 id = tempId,
                 roomId = roomId,
@@ -1347,61 +1358,52 @@ class MatrixManager(
                 senderDisplayName = extractDisplayName(myUserId),
                 content = displayLabel,
                 timestamp = now,
-                type = when {
-                    mimeType.startsWith("image/") -> MessageType.IMAGE
-                    mimeType.startsWith("video/") -> MessageType.VIDEO
-                    mimeType.startsWith("audio/") -> MessageType.AUDIO
-                    else -> MessageType.FILE
-                },
+                type = msgType,
+                fileName = fileName,
             )
             val current = _messages.value[roomId] ?: emptyList()
             _messages.value = _messages.value + (roomId to (current + optimistic))
 
-            // 1) Subir archivo
-            val media = Media(
-                content = io.ktor.utils.io.ByteReadChannel(fileData),
-                contentLength = fileData.size.toLong(),
-                contentType = io.ktor.http.ContentType.parse(mimeType),
-                contentDisposition = io.ktor.http.ContentDisposition.Attachment.withParameter(
-                    io.ktor.http.ContentDisposition.Parameters.FileName,
-                    fileName,
-                ),
-            )
-            val uploadCall = client.api.media.upload(media = media)
-            if (uploadCall.isFailure) {
-                val err = uploadCall.exceptionOrNull() ?: Exception("Upload failed")
-                log.e(TAG) { "Upload failed: ${err.message}" }
-                return Result.failure(err)
+            // Usar la DSL canónica de Trixnity: sendMessage + builder.
+            // Trixnity hace internamente el upload de media a `mxc://` + envío
+            // del evento m.room.message con msgtype correcto. Esto evita tocar
+            // RoomMessageEventContent.FileBased.* y media.upload a pelo (que
+            // tienen firmas frágiles entre versiones de la librería).
+            val bytesFlow = fileData.toByteArrayFlow()
+            val ktorType = try {
+                io.ktor.http.ContentType.parse(mimeType)
+            } catch (_: Throwable) {
+                io.ktor.http.ContentType.Application.OctetStream
             }
-            val mxcUri = uploadCall.getOrThrow().contentUri
+            val sizeLong = fileData.size.toLong()
 
-            // 2) Construir y publicar el evento m.room.message
-            val msgContent: RoomMessageEventContent = when {
-                mimeType.startsWith("image/") -> RoomMessageEventContent.FileBased.Image(
-                    body = fileName,
-                    url = mxcUri,
-                )
-                mimeType.startsWith("video/") -> RoomMessageEventContent.FileBased.Video(
-                    body = fileName,
-                    url = mxcUri,
-                )
-                mimeType.startsWith("audio/") -> RoomMessageEventContent.FileBased.Audio(
-                    body = fileName,
-                    url = mxcUri,
-                )
-                else -> RoomMessageEventContent.FileBased.File(
-                    body = fileName,
-                    url = mxcUri,
-                )
-            }
-            val sendCall = client.api.room.sendMessageEvent(
-                roomId = RoomId(roomId),
-                eventContent = msgContent,
-            )
-            if (sendCall.isFailure) {
-                val err = sendCall.exceptionOrNull() ?: Exception("sendMessageEvent failed")
-                log.e(TAG) { "Send file event failed: ${err.message}" }
-                return Result.failure(err)
+            client.room.sendMessage(roomId = RoomId(roomId)) {
+                when (msgType) {
+                    MessageType.IMAGE -> image(
+                        body = fileName,
+                        image = bytesFlow,
+                        type = ktorType,
+                        size = sizeLong,
+                    )
+                    MessageType.VIDEO -> video(
+                        body = fileName,
+                        video = bytesFlow,
+                        type = ktorType,
+                        size = sizeLong,
+                    )
+                    MessageType.AUDIO -> audio(
+                        body = fileName,
+                        audio = bytesFlow,
+                        type = ktorType,
+                        size = sizeLong,
+                    )
+                    else -> file(
+                        body = fileName,
+                        file = bytesFlow,
+                        type = ktorType,
+                        size = sizeLong,
+                    )
+                }
             }
 
             Result.success(Unit)
