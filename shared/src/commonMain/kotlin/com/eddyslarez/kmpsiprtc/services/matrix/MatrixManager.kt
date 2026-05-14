@@ -646,9 +646,15 @@ class MatrixManager(
     }
 
     /**
-     * Branch por tipo concreto de RoomMessageEventContent. Los TextBased se
-     * tratan como TEXT; los FileBased (Image/Video/Audio/File) se procesan
-     * con su mxc URL resuelta a HTTPS para que la UI pueda mostrarla.
+     * Procesa un mensaje (texto o media). Decide el tipo a partir del
+     * `msgtype` Matrix (`content.type` String estándar) en lugar de pattern
+     * matching sobre subtipos sealed — `content.type` es campo público de
+     * la interfaz `RoomMessageEventContent` y siempre compila.
+     *
+     * Por ahora la `mxcUrl` se deja en null para mensajes media. La UI
+     * los mostrará como texto con su nombre. Cuando se haga el wire-up de
+     * Coil/AsyncImage en las burbujas, se reactivará el extracción de
+     * url usando un cast seguro a RoomMessageEventContent.FileBased.
      */
     private fun processRoomMessageContent(
         roomId: String,
@@ -657,23 +663,29 @@ class MatrixManager(
         timestamp: Long,
         content: RoomMessageEventContent,
     ) {
-        when (content) {
-            is RoomMessageEventContent.FileBased.Image ->
-                upsertMediaMessage(roomId, eventId, senderId, timestamp,
-                    type = MessageType.IMAGE, mxcUrl = content.url, fileName = content.body)
-            is RoomMessageEventContent.FileBased.Video ->
-                upsertMediaMessage(roomId, eventId, senderId, timestamp,
-                    type = MessageType.VIDEO, mxcUrl = content.url, fileName = content.body)
-            is RoomMessageEventContent.FileBased.Audio ->
-                upsertMediaMessage(roomId, eventId, senderId, timestamp,
-                    type = MessageType.AUDIO, mxcUrl = content.url, fileName = content.body)
-            is RoomMessageEventContent.FileBased.File ->
-                upsertMediaMessage(roomId, eventId, senderId, timestamp,
-                    type = MessageType.FILE, mxcUrl = content.url, fileName = content.body)
-            else -> {
-                // TextBased y cualquier otro tipo de body textual
-                upsertTextMessage(roomId, eventId, senderId, content.body, timestamp)
-            }
+        val msgType = when (content.type) {
+            "m.image" -> MessageType.IMAGE
+            "m.video" -> MessageType.VIDEO
+            "m.audio" -> MessageType.AUDIO
+            "m.file" -> MessageType.FILE
+            else -> MessageType.TEXT // m.text, m.notice, m.emote, etc.
+        }
+
+        if (msgType == MessageType.TEXT) {
+            upsertTextMessage(roomId, eventId, senderId, content.body, timestamp)
+        } else {
+            // Para media usamos content.body (Matrix garantiza que sea el
+            // filename o un fallback textual). mxcUrl se deja null por ahora;
+            // las burbujas muestran "📎 nombre" sin preview.
+            upsertMediaMessage(
+                roomId = roomId,
+                eventId = eventId,
+                senderId = senderId,
+                timestamp = timestamp,
+                type = msgType,
+                mxcUrl = null,
+                fileName = content.body,
+            )
         }
     }
 
