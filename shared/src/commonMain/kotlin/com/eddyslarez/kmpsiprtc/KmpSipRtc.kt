@@ -3253,6 +3253,47 @@ class KmpSipRtc private constructor() {
     fun injectRemoteAudio(pcmData: ByteArray, sampleRate: Int, channels: Int = 1, bitsPerSample: Int = 16) {
         sipCoreManager?.injectRemoteAudio(pcmData, sampleRate, channels, bitsPerSample)
     }
+
+    // ==================== PERSISTENCIA DE LOGS A ARCHIVO ====================
+
+    /**
+     * Habilita o deshabilita la persistencia de logs internos (SIP/WebRTC) a archivo
+     * en disco con rotación automática (1 MB por archivo, máximo 3 rotados).
+     *
+     * Cuando está habilitada, todos los logs que pasen por el [com.eddyslarez.kmpsiprtc.platform.LibraryLogBridge]
+     * se escribirán al directorio `baseDir` en archivos `sip_log_current.txt` y
+     * `sip_log_<epochMs>.txt`.
+     *
+     * @param enabled true para activar la persistencia, false para desactivarla.
+     * @param baseDir Directorio donde escribir los logs. La app es responsable de
+     *                pasar una ruta escribible (filesDir/sip_logs en Android,
+     *                Documents/sip_logs en iOS, tmpDir/sip_logs en Desktop).
+     */
+    fun setLogFileEnabled(enabled: Boolean, baseDir: String) {
+        com.eddyslarez.kmpsiprtc.platform.LibraryLogBridge.persister = if (enabled) {
+            com.eddyslarez.kmpsiprtc.platform.LogFilePersister(baseDir)
+        } else {
+            null
+        }
+    }
+
+    /**
+     * Devuelve la lista de rutas absolutas de los archivos de log persistidos
+     * (current + rotados), ordenados de más antiguo a más reciente.
+     *
+     * @return lista de rutas; vacía si la persistencia no está activa.
+     */
+    fun getLogFiles(): List<String> {
+        return com.eddyslarez.kmpsiprtc.platform.LibraryLogBridge.persister?.getLogFiles() ?: emptyList()
+    }
+
+    /**
+     * Borra todos los archivos de log persistidos. La persistencia sigue activa
+     * (si lo estaba) y reabrirá un `sip_log_current.txt` nuevo al próximo log.
+     */
+    fun clearLogFiles() {
+        com.eddyslarez.kmpsiprtc.platform.LibraryLogBridge.persister?.clearLogs()
+    }
 }
 
 // === EXTENSIONES Y WRAPPERS ===
