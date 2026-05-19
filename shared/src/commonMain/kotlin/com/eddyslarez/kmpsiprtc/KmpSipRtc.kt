@@ -11,6 +11,7 @@ import com.eddyslarez.kmpsiprtc.repository.*
 import com.eddyslarez.kmpsiprtc.services.calls.*
 import com.eddyslarez.kmpsiprtc.services.pushMode.PushModeManager
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -72,7 +73,13 @@ class KmpSipRtc private constructor() {
     private var incomingCallListener: IncomingCallListener? = null
 
     // === UNIFIED EVENT FLOW (Phase 2 API) ===
-    private val _eventFlow = MutableSharedFlow<SipEvent>(extraBufferCapacity = 64)
+    // DROP_OLDEST garantiza que un consumidor lento nunca bloquee al thread SIP que emite.
+    // Buffer de 128 cubre ráfagas razonables (ringing + reINVITE + holds en una llamada).
+    private val _eventFlow = MutableSharedFlow<SipEvent>(
+        replay = 0,
+        extraBufferCapacity = 128,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
 
     // === GESTIÓN DE ESTADOS DE NOTIFICACIÓN ===
     private val lastNotifiedRegistrationStates = mutableMapOf<String, RegistrationState>()
@@ -122,6 +129,11 @@ class KmpSipRtc private constructor() {
     /**
      * Listener general para eventos SIP
      */
+    @Deprecated(
+        message = "Usar observeEvents() en su lugar — un único Flow<SipEvent> reemplaza este listener fragmentado. Será removido en 2.0.",
+        replaceWith = ReplaceWith("observeEvents()"),
+        level = DeprecationLevel.WARNING
+    )
     interface SipEventListener {
         fun onRegistrationStateChanged(
             state: RegistrationState,
@@ -153,6 +165,11 @@ class KmpSipRtc private constructor() {
     /**
      * Listener específico para eventos de llamada
      */
+    @Deprecated(
+        message = "Usar observeEvents() y filtrar por SipEvent.Call.* — el flow unificado evita combinar IncomingCallInfo + CallInfo manualmente para TelecomManager. Será removido en 2.0.",
+        replaceWith = ReplaceWith("observeEvents()"),
+        level = DeprecationLevel.WARNING
+    )
     interface CallListener {
         fun onCallInitiated(callInfo: CallInfo)
         fun onCallRinging(callInfo: CallInfo)
@@ -168,6 +185,11 @@ class KmpSipRtc private constructor() {
     /**
      * Listener específico para llamadas entrantes
      */
+    @Deprecated(
+        message = "Usar observeEvents() y filtrar por SipEvent.Call.Incoming/IncomingCancelled/IncomingTimeout. Será removido en 2.0.",
+        replaceWith = ReplaceWith("observeEvents()"),
+        level = DeprecationLevel.WARNING
+    )
     interface IncomingCallListener {
         fun onIncomingCall(callInfo: IncomingCallInfo)
         fun onIncomingCallCancelled(callInfo: IncomingCallInfo)
@@ -735,6 +757,11 @@ class KmpSipRtc private constructor() {
                         else -> {}
                     }
                 }
+
+                emitEvent(SipEvent.Registration.StateChanged(state = state, username = username, domain = domain))
+                if (state == RegistrationState.FAILED) {
+                    emitEvent(SipEvent.Registration.Failed(username = username, domain = domain, error = "Registration failed"))
+                }
             } catch (e: Exception) {
                 log.e(tag = TAG) { "Critical error in registration state notification: ${e.message}" }
             }
@@ -901,6 +928,8 @@ class KmpSipRtc private constructor() {
                 log.e(tag = TAG) { "Error in CallListener onCallStateChanged: ${e.message}" }
             }
         }
+
+        emitEvent(SipEvent.Call.StateChanged(callId = stateInfo.callId, stateInfo = stateInfo))
     }
 
     /**
@@ -913,6 +942,12 @@ class KmpSipRtc private constructor() {
         } catch (e: Exception) {
             log.e(tag = TAG) { "Error in CallListener onCallInitiated: ${e.message}" }
         }
+        emitEvent(SipEvent.Call.Initiated(
+            callId = callInfo.callId,
+            phoneNumber = callInfo.phoneNumber,
+            displayName = callInfo.displayName,
+            localAccount = callInfo.localAccount
+        ))
     }
 
     /**
@@ -932,6 +967,11 @@ class KmpSipRtc private constructor() {
         } catch (e: Exception) {
             log.e(tag = TAG) { "Error in CallListener onCallConnected: ${e.message}" }
         }
+        emitEvent(SipEvent.Call.Connected(
+            callId = callInfo.callId,
+            phoneNumber = callInfo.phoneNumber,
+            direction = if (callInfo.direction == CallDirection.INCOMING) CallDirections.INCOMING else CallDirections.OUTGOING
+        ))
     }
 
     /**
@@ -944,6 +984,7 @@ class KmpSipRtc private constructor() {
         } catch (e: Exception) {
             log.e(tag = TAG) { "Error in CallListener onCallRinging: ${e.message}" }
         }
+        emitEvent(SipEvent.Call.Ringing(callId = callInfo.callId, phoneNumber = callInfo.phoneNumber))
     }
 
     /**
@@ -956,6 +997,7 @@ class KmpSipRtc private constructor() {
         } catch (e: Exception) {
             log.e(tag = TAG) { "Error in CallListener onCallHeld: ${e.message}" }
         }
+        emitEvent(SipEvent.Call.HoldChanged(callId = callInfo.callId, isOnHold = true))
     }
 
     /**
@@ -968,6 +1010,9 @@ class KmpSipRtc private constructor() {
         } catch (e: Exception) {
             log.e(tag = TAG) { "Error in CallListener onCallResumed: ${e.message}" }
         }
+        emitEvent(SipEvent.Call.Resumed(callId = callInfo.callId))
+        // HoldChanged(false) también es útil para listeners que solo escuchan ese tipo
+        emitEvent(SipEvent.Call.HoldChanged(callId = callInfo.callId, isOnHold = false))
     }
 
     /**
@@ -988,6 +1033,15 @@ class KmpSipRtc private constructor() {
             } catch (e: Exception) {
                 log.e(tag = TAG) { "Error in CallListener onCallEnded: ${e.message}" }
             }
+            emitEvent(SipEvent.Call.Ended(
+                callId = info.callId,
+                phoneNumber = info.phoneNumber,
+                direction = if (info.direction == CallDirection.INCOMING) CallDirections.INCOMING else CallDirections.OUTGOING,
+                // KmpSipRtc.CallEndReason (nested) y data.models.CallEndReason (top-level) tienen los mismos valores.
+                // Convertimos por nombre. TODO 2.0: consolidar en un solo tipo.
+                reason = com.eddyslarez.kmpsiprtc.data.models.CallEndReason.valueOf(reason.name),
+                durationMs = info.duration
+            ))
         }
     }
 
@@ -1008,6 +1062,13 @@ class KmpSipRtc private constructor() {
         } catch (e: Exception) {
             log.e(tag = TAG) { "Error in IncomingCallListener: ${e.message}" }
         }
+        emitEvent(SipEvent.Call.Incoming(
+            callId = callInfo.callId,
+            callerNumber = callInfo.callerNumber,
+            callerName = callInfo.callerName,
+            targetAccount = callInfo.targetAccount,
+            headers = callInfo.headers
+        ))
     }
 
     /**
@@ -1022,6 +1083,7 @@ class KmpSipRtc private constructor() {
                 log.e(tag = TAG) { "Error in listener onCallFailed: ${e.message}" }
             }
         }
+        emitEvent(SipEvent.Call.Failed(callId = callInfo?.callId ?: "", error = error))
     }
 
     /**
@@ -1636,6 +1698,7 @@ class KmpSipRtc private constructor() {
             } catch (e: Exception) {
                 log.e(tag = TAG) { "Error in CallListener onMuteStateChanged: ${e.message}" }
             }
+            emitEvent(SipEvent.Call.MuteChanged(callId = callInfo.callId, isMuted = isMuted))
         }
     }
 
@@ -1665,6 +1728,7 @@ class KmpSipRtc private constructor() {
             } catch (e: Exception) {
                 log.e(tag = TAG) { "Error in CallListener onMuteStateChanged: ${e.message}" }
             }
+            emitEvent(SipEvent.Call.MuteChanged(callId = callInfo.callId, isMuted = muted))
         }
     }
 
@@ -1963,6 +2027,38 @@ class KmpSipRtc private constructor() {
         checkInitialized()
         log.w(tag = TAG) { "User requested call logs clearance" }
         sipCoreManager?.clearCallLogs()
+    }
+
+    /**
+     * Elimina UNA entrada del historial por su id (memoria + BD).
+     * No-op si el id no existe.
+     *
+     * @param callLogId id de la entrada (típicamente el callId del CallLog).
+     */
+    fun deleteCallLog(callLogId: String) {
+        checkInitialized()
+        log.d(tag = TAG) { "Deleting call log: $callLogId" }
+        sipCoreManager?.deleteCallLog(callLogId)
+    }
+
+    /**
+     * Elimina varias entradas del historial por sus ids en una sola operación.
+     * Útil para selección múltiple en UI. Ids inexistentes se ignoran silenciosamente.
+     */
+    fun deleteCallLogs(callLogIds: List<String>) {
+        checkInitialized()
+        log.d(tag = TAG) { "Deleting ${callLogIds.size} call logs" }
+        sipCoreManager?.deleteCallLogs(callLogIds)
+    }
+
+    /**
+     * Diagnóstico del subsistema de lifecycle (re-registros, debounce, push mode).
+     * Devuelve un snapshot textual con contadores y porcentaje de REGISTER ahorrados.
+     * Útil para paneles de debug y reportes de testeo.
+     */
+    fun getLifecycleDiagnostics(): String {
+        if (!isInitialized) return "SIP library not initialized"
+        return sipCoreManager?.getLifecycleDiagnostics() ?: "SIP core not available"
     }
 
     /**
@@ -3297,6 +3393,31 @@ class KmpSipRtc private constructor() {
 }
 
 // === EXTENSIONES Y WRAPPERS ===
+
+/**
+ * Convierte una IncomingCallInfo (limitada a datos del INVITE) en un CallInfo unificado.
+ * Útil cuando la app necesita un solo tipo Call para sistemas como Android TelecomManager
+ * o CXCallProvider en iOS, en vez de combinar manualmente IncomingCallInfo + CallInfo.
+ *
+ * @param localAccount Cuenta local que recibe la llamada (típicamente username@domain del SIP).
+ *                     Si se omite, se usa el targetAccount del IncomingCallInfo.
+ */
+fun KmpSipRtc.IncomingCallInfo.toCallInfo(localAccount: String = this.targetAccount): KmpSipRtc.CallInfo {
+    return KmpSipRtc.CallInfo(
+        callId = this.callId,
+        phoneNumber = this.callerNumber,
+        displayName = this.callerName,
+        direction = KmpSipRtc.CallDirection.INCOMING,
+        startTime = this.timestamp,
+        duration = 0,
+        isOnHold = false,
+        isMuted = false,
+        localAccount = localAccount,
+        codec = null,
+        state = null,
+        isCurrentCall = false
+    )
+}
 
 /**
  * Wrapper para MutableStateFlow (compatibilidad)

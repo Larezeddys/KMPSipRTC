@@ -288,6 +288,21 @@ class DatabaseManager private constructor() {
         repository.clearCallLogs()
     }
 
+    /**
+     * Borra una entrada del historial por su ID.
+     */
+    suspend fun deleteCallLogById(callLogId: String) {
+        repository.deleteCallLogById(callLogId)
+    }
+
+    /**
+     * Borra varias entradas del historial por sus IDs en una sola operación.
+     */
+    suspend fun deleteCallLogsByIds(callLogIds: List<String>) {
+        if (callLogIds.isEmpty()) return
+        repository.deleteCallLogsByIds(callLogIds)
+    }
+
     // === OPERACIONES DE DATOS DE LLAMADAS ACTIVAS ===
 
     /**

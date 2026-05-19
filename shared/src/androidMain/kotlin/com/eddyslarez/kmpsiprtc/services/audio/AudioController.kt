@@ -37,6 +37,11 @@ class AudioController(
     private var audioFocusRequest: AudioFocusRequest? = null
     private val androidAutoDetector = AndroidAutoDetector(context)
 
+    // Callback de hot-plug (API 23+). Se llama desde el AudioManager cuando se conecta o
+    // desconecta un dispositivo a nivel de sistema (BT, USB, headset). Permite mantener
+    // la lista sincronizada sin depender exclusivamente de BroadcastReceivers de SCO.
+    private var audioDeviceCallback: android.media.AudioDeviceCallback? = null
+
     private val audioDevices = CopyOnWriteArrayList<AudioDevice>()
     private var savedAudioMode = AudioManager.MODE_NORMAL
     private var savedIsSpeakerPhoneOn = false
@@ -235,6 +240,29 @@ class AudioController(
         } catch (e: Exception) {
             log.e(TAG) { "Error registering receivers: ${e.message}" }
         }
+
+        // Hot-plug listener: reflejar cambios reales del routing de audio (BT, USB, headset)
+        // sin esperar al BroadcastReceiver de SCO, que solo cubre Bluetooth.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            try {
+                val callback = object : android.media.AudioDeviceCallback() {
+                    override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
+                        log.d(TAG) { "AudioDeviceCallback: devices added (${addedDevices?.size ?: 0})" }
+                        scanDevices()
+                    }
+
+                    override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
+                        log.d(TAG) { "AudioDeviceCallback: devices removed (${removedDevices?.size ?: 0})" }
+                        scanDevices()
+                    }
+                }
+                audioManager?.registerAudioDeviceCallback(callback, mainHandler)
+                audioDeviceCallback = callback
+                log.d(TAG) { "✅ AudioDeviceCallback registered" }
+            } catch (e: Exception) {
+                log.e(TAG) { "Error registering AudioDeviceCallback: ${e.message}" }
+            }
+        }
     }
 
 
@@ -337,6 +365,16 @@ class AudioController(
             log.d(TAG) { "All receivers unregistered" }
         } catch (e: Exception) {
             log.w(TAG) { "Error unregistering receivers: ${e.message}" }
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            try {
+                audioDeviceCallback?.let { audioManager?.unregisterAudioDeviceCallback(it) }
+                audioDeviceCallback = null
+                log.d(TAG) { "AudioDeviceCallback unregistered" }
+            } catch (e: Exception) {
+                log.w(TAG) { "Error unregistering AudioDeviceCallback: ${e.message}" }
+            }
         }
 
         audioManager = null

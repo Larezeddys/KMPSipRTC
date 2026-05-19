@@ -110,6 +110,53 @@ sealed class SipEvent {
             val isMuted: Boolean,
             override val timestamp: Long = currentTimeMs()
         ) : Call()
+
+        data class Initiated(
+            override val callId: String,
+            val phoneNumber: String,
+            val displayName: String?,
+            val localAccount: String,
+            override val timestamp: Long = currentTimeMs()
+        ) : Call()
+
+        data class Ringing(
+            override val callId: String,
+            val phoneNumber: String,
+            override val timestamp: Long = currentTimeMs()
+        ) : Call()
+
+        data class IncomingTimeout(
+            override val callId: String,
+            val callerNumber: String,
+            override val timestamp: Long = currentTimeMs()
+        ) : Call()
+
+        data class Transferred(
+            override val callId: String,
+            val transferTo: String,
+            override val timestamp: Long = currentTimeMs()
+        ) : Call()
+
+        data class Resumed(
+            override val callId: String,
+            override val timestamp: Long = currentTimeMs()
+        ) : Call()
+    }
+
+    // ==================== LIFECYCLE ====================
+
+    sealed class Lifecycle : SipEvent() {
+        data class ModeRefreshed(
+            val isBackground: Boolean,
+            val accountCount: Int,
+            override val timestamp: Long = currentTimeMs()
+        ) : Lifecycle()
+
+        data class ModeSkipped(
+            val isBackground: Boolean,
+            val reason: String,
+            override val timestamp: Long = currentTimeMs()
+        ) : Lifecycle()
     }
 
     // ==================== NETWORK/AUDIO ====================

@@ -543,7 +543,9 @@ class CallHistoryManager(
     }
     fun clearCallLogs() {
         _callLogs.clear()
+        savedCallLogs.clear()
         isInitialLoadComplete = false
+        _callLogsFlow.value = emptyList()
 
         // Limpiar BD también
         scope.launch {
@@ -552,6 +554,47 @@ class CallHistoryManager(
                 log.d(tag = TAG) { "Call logs cleared from memory and database" }
             } catch (e: Exception) {
                 log.e(tag = TAG) { "Error clearing database: ${e.message}" }
+            }
+        }
+    }
+
+    /**
+     * Elimina UNA entrada del historial por su id (memoria + BD).
+     */
+    fun deleteCallLog(callLogId: String) {
+        val removed = _callLogs.removeAll { it.id == callLogId }
+        savedCallLogs.remove(callLogId)
+        if (removed) {
+            _callLogsFlow.value = _callLogs.toList()
+        }
+        scope.launch {
+            try {
+                databaseManager?.deleteCallLogById(callLogId)
+                log.d(tag = TAG) { "Call log deleted: $callLogId (memory=$removed, db=ok)" }
+            } catch (e: Exception) {
+                log.e(tag = TAG) { "Error deleting call log $callLogId from db: ${e.message}" }
+            }
+        }
+    }
+
+    /**
+     * Elimina varias entradas del historial por sus ids en una sola operación.
+     * Ignora ids inexistentes — la operación es idempotente.
+     */
+    fun deleteCallLogs(callLogIds: List<String>) {
+        if (callLogIds.isEmpty()) return
+        val idSet = callLogIds.toHashSet()
+        val removed = _callLogs.removeAll { it.id in idSet }
+        idSet.forEach { savedCallLogs.remove(it) }
+        if (removed) {
+            _callLogsFlow.value = _callLogs.toList()
+        }
+        scope.launch {
+            try {
+                databaseManager?.deleteCallLogsByIds(callLogIds)
+                log.d(tag = TAG) { "Call logs deleted (${callLogIds.size} ids, memory=$removed)" }
+            } catch (e: Exception) {
+                log.e(tag = TAG) { "Error deleting call logs from db: ${e.message}" }
             }
         }
     }

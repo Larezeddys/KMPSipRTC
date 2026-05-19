@@ -47,6 +47,9 @@ interface CallLogDao {
     @Query("DELETE FROM call_logs WHERE id = :callLogId")
     suspend fun deleteCallLogById(callLogId: String)
 
+    @Query("DELETE FROM call_logs WHERE id IN (:callLogIds)")
+    suspend fun deleteCallLogsByIds(callLogIds: List<String>)
+
     // === FILTROS POR TIPO ===
 
     @Query("SELECT * FROM call_logs WHERE callType = :callType ORDER BY startTime DESC")

@@ -270,6 +270,15 @@ class SipRepository(private val database: SipDatabase) {
         callLogDao.deleteAllCallLogs()
     }
 
+    suspend fun deleteCallLogById(callLogId: String) {
+        callLogDao.deleteCallLogById(callLogId)
+    }
+
+    suspend fun deleteCallLogsByIds(callLogIds: List<String>) {
+        if (callLogIds.isEmpty()) return
+        callLogDao.deleteCallLogsByIds(callLogIds)
+    }
+
     // === OPERACIONES DE DATOS DE LLAMADAS ===
 
     fun getActiveCalls(): Flow<List<CallDataEntity>> {

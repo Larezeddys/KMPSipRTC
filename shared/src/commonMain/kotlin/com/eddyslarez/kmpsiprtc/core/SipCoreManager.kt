@@ -102,6 +102,23 @@ class SipCoreManager private constructor(
     // Se limpia cuando termina la llamada.
     var isIncomingPushCallPending: Boolean = false
 
+    // === LIFECYCLE DEBOUNCE STATE ===
+    // Evita re-registros excesivos cuando el SO emite ráfagas de eventos
+    // (rotaciones en Android, alerts/Control Center/Face ID en iOS).
+    private var lastRegistrationModeRefresh: Long = 0L
+    private var lastEffectiveBackgroundMode: Boolean? = null
+    private var pendingLifecycleJob: Job? = null
+
+    // === LIFECYCLE TELEMETRY ===
+    private var lifecycleEventsReceivedBackground: Int = 0
+    private var lifecycleEventsReceivedForeground: Int = 0
+    private var lifecycleEventsDebounced: Int = 0
+    private var lifecycleEventsSkippedSameMode: Int = 0
+    private var lifecycleEventsSkippedRecentRefresh: Int = 0
+    private var lifecycleEventsSkippedActiveCall: Int = 0
+    private var lifecycleEventsTriggeredRegister: Int = 0
+    private var lifecycleLastRefreshTimestamp: Long = 0L
+
     // Sincronización de cuentas con BD
     private var accountSyncJob: Job? = null
     private val accountSyncMutex = Mutex()
@@ -111,6 +128,11 @@ class SipCoreManager private constructor(
         private const val WEBSOCKET_PROTOCOL = "sip"
         private const val REGISTRATION_CHECK_INTERVAL_MS = 30 * 1000L
         private const val ACCOUNT_SYNC_INTERVAL_MS = 60 * 1000L
+
+        // Debounce de transiciones de lifecycle. Colapsa ráfagas (rotaciones Android, alerts iOS).
+        const val LIFECYCLE_DEBOUNCE_MS = 1500L
+        // Si el modo no cambió y hace menos de este intervalo se refrescó, no spamear REGISTER.
+        const val MIN_REREGISTER_INTERVAL_MS = 30_000L
 
         fun createInstance(
             config: SipConfig
@@ -945,21 +967,14 @@ class SipCoreManager private constructor(
             override fun onEvent(event: AppLifecycleEvent) {
                 when (event) {
                     AppLifecycleEvent.EnterBackground -> {
-                        scope.launch {
-                            log.d(tag = TAG) { "App entering background" }
-                            isAppInBackground = true
-                            lifecycleCallback?.invoke("APP_BACKGROUNDED")
-                            onAppBackgrounded()
-                        }
+                        // NO mutar isAppInBackground ni invocar lifecycleCallback aquí: handleLifecycleTransition
+                        // lo hará SOLO si tras el debounce e idempotencia decide realmente refrescar.
+                        // Mutarlo aquí rompería el skip-if-same-mode.
+                        scope.launch { onAppBackgrounded() }
                     }
 
                     AppLifecycleEvent.EnterForeground -> {
-                        scope.launch {
-                            log.d(tag = TAG) { "App entering foreground" }
-                            isAppInBackground = false
-                            lifecycleCallback?.invoke("APP_FOREGROUNDED")
-                            onAppForegrounded()
-                        }
+                        scope.launch { onAppForegrounded() }
                     }
 
                     else -> {
@@ -1942,28 +1957,116 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
     // === MÉTODOS DE LIFECYCLE ===
 
     suspend fun onAppBackgrounded() {
-        log.d(tag = TAG) { "App backgrounded - updating registrations" }
-        isAppInBackground = true
-        refreshAllRegistrationsWithNewUserAgent()
+        log.d(tag = TAG) { "App backgrounded event received" }
+        lifecycleEventsReceivedBackground++
+        handleLifecycleTransition(isBackground = true)
     }
 
     suspend fun onAppForegrounded() {
-        log.d(tag = TAG) { "App foregrounded - updating registrations and checking connectivity" }
-        isAppInBackground = false
+        log.d(tag = TAG) { "App foregrounded event received" }
+        lifecycleEventsReceivedForeground++
 
-        // Verificar conectividad al regresar del background
+        // Verificar conectividad al regresar del background (siempre, sin debounce — barato y útil)
         verifyAndFixConnectivity()
 
-        // NO cambiar modo de registro si hay una llamada de push pendiente/activa.
-        // La race condition ocurre cuando el usuario acepta una CallKit call:
-        // UIApplicationDidBecomeActiveNotification dispara antes que el SIP INVITE llegue,
-        // por lo que CallStateManager puede estar en IDLE aunque la llamada este en progreso.
-        if (isIncomingPushCallPending || CallStateManager.getCurrentState().isActive()) {
-            log.d(tag = TAG) { "Push call pending/active - suppressing foreground mode switch (isIncomingPushCallPending=$isIncomingPushCallPending, callState=${CallStateManager.getCurrentState().state})" }
-            return
-        }
+        handleLifecycleTransition(isBackground = false)
+    }
 
-        refreshAllRegistrationsWithNewUserAgent()
+    /**
+     * Procesa una transición de lifecycle con tres capas defensivas:
+     *  1. **Debounce**: cancela jobs previos y espera LIFECYCLE_DEBOUNCE_MS para colapsar
+     *     ráfagas (iOS emite múltiples eventos al cerrar Control Center/Face ID).
+     *  2. **Skip por modo igual**: si el modo efectivo ya coincide, no hace nada.
+     *  3. **Skip por refresh reciente**: si se refrescó hace <MIN_REREGISTER_INTERVAL_MS y el
+     *     modo es el mismo, no hace nada.
+     *
+     * También preserva el skip por llamada activa o push pendiente (race condition con CallKit).
+     */
+    private fun handleLifecycleTransition(isBackground: Boolean) {
+        // Cancela cualquier job pendiente — esto colapsa eventos ráfaga.
+        pendingLifecycleJob?.cancel()
+        pendingLifecycleJob = scope.launch {
+            try {
+                delay(LIFECYCLE_DEBOUNCE_MS)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                lifecycleEventsDebounced++
+                throw e
+            }
+
+            // Si hay llamada activa o push pendiente, NO refrescar.
+            // La race condition de CallKit en iOS (línea ~1980 historial) sigue cubierta aquí.
+            if (isIncomingPushCallPending || CallStateManager.getCurrentState().isActive()) {
+                lifecycleEventsSkippedActiveCall++
+                log.d(tag = TAG) {
+                    "[LIFECYCLE] Skipped — active call or push pending " +
+                            "(isIncomingPushCallPending=$isIncomingPushCallPending, " +
+                            "callState=${CallStateManager.getCurrentState().state})"
+                }
+                return@launch
+            }
+
+            // Si el modo efectivo ya es el deseado, no hace falta REGISTER.
+            // Cubre tanto rebotes (toggle B→F→B en <segundos) como invocaciones manuales
+            // redundantes desde la app.
+            if (lastEffectiveBackgroundMode == isBackground) {
+                lifecycleEventsSkippedSameMode++
+                log.d(tag = TAG) { "[LIFECYCLE] Skipped — mode unchanged (isBackground=$isBackground)" }
+                return@launch
+            }
+
+            // Protección anti-spam adicional: incluso ante cambio de modo, si acabamos de
+            // refrescar hace muy poco (ej. la app oscila Push↔Foreground en <30s, lo que
+            // ya es síntoma de un bug en la app), no enviar otro REGISTER. El delta queda
+            // registrado en los contadores y se aplicará en el siguiente trigger válido.
+            val now = currentMs()
+            if (lastRegistrationModeRefresh > 0L &&
+                now - lastRegistrationModeRefresh < MIN_REREGISTER_INTERVAL_MS) {
+                lifecycleEventsSkippedRecentRefresh++
+                log.d(tag = TAG) {
+                    "[LIFECYCLE] Skipped — recent refresh ${now - lastRegistrationModeRefresh}ms ago " +
+                            "(min interval ${MIN_REREGISTER_INTERVAL_MS}ms)"
+                }
+                return@launch
+            }
+
+            isAppInBackground = isBackground
+            lifecycleCallback?.invoke(if (isBackground) "APP_BACKGROUNDED" else "APP_FOREGROUNDED")
+
+            log.d(tag = TAG) { "[LIFECYCLE] Triggering registration refresh (isBackground=$isBackground)" }
+            refreshAllRegistrationsWithNewUserAgent()
+
+            lastEffectiveBackgroundMode = isBackground
+            lastRegistrationModeRefresh = currentMs()
+            lifecycleEventsTriggeredRegister++
+            lifecycleLastRefreshTimestamp = lastRegistrationModeRefresh
+        }
+    }
+
+    @OptIn(ExperimentalTime::class)
+    private fun currentMs(): Long = kotlin.time.Clock.System.now().toEpochMilliseconds()
+
+    /**
+     * Diagnóstico del subsistema de lifecycle. Útil para que el tester valide que el debounce
+     * está realmente colapsando eventos. Devuelve un snapshot textual.
+     */
+    fun getLifecycleDiagnostics(): String = buildString {
+        appendLine("=== Lifecycle Diagnostics ===")
+        appendLine("Events received (background): $lifecycleEventsReceivedBackground")
+        appendLine("Events received (foreground): $lifecycleEventsReceivedForeground")
+        appendLine("Debounced (collapsed by ráfaga): $lifecycleEventsDebounced")
+        appendLine("Skipped — same mode: $lifecycleEventsSkippedSameMode")
+        appendLine("Skipped — recent refresh: $lifecycleEventsSkippedRecentRefresh")
+        appendLine("Skipped — active call/push: $lifecycleEventsSkippedActiveCall")
+        appendLine("Triggered REGISTER refresh: $lifecycleEventsTriggeredRegister")
+        appendLine("Last refresh timestamp: $lifecycleLastRefreshTimestamp")
+        appendLine("Current effective mode: ${if (lastEffectiveBackgroundMode == true) "BACKGROUND" else if (lastEffectiveBackgroundMode == false) "FOREGROUND" else "UNKNOWN"}")
+        val totalReceived = lifecycleEventsReceivedBackground + lifecycleEventsReceivedForeground
+        if (totalReceived > 0) {
+            val savedTenths = (1000L * (totalReceived - lifecycleEventsTriggeredRegister)) / totalReceived
+            val whole = savedTenths / 10
+            val tenth = savedTenths % 10
+            appendLine("REGISTER calls saved: $whole.${tenth}%")
+        }
     }
 
     fun enterPushMode(token: String? = null) {
@@ -2018,9 +2121,21 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
     ): Boolean {
         val accountKey = "${accountInfo.username}@${accountInfo.domain}"
         val previousState = getRegistrationState(accountKey)
+        val desiredUa = if (isBackground) "${userAgent()} Push" else userAgent()
+
+        // Idempotencia: si la cuenta ya tiene el UA esperado, está registrada, y el modo global
+        // ya coincide, NO enviar otro REGISTER — sería puro ruido para OpenSIPS.
+        if (accountInfo.userAgent.value == desiredUa &&
+            accountInfo.isRegistered.value &&
+            isAppInBackground == isBackground) {
+            log.d(tag = TAG) {
+                "[SKIP] Account $accountKey already in ${if (isBackground) "PUSH" else "FOREGROUND"} mode — no REGISTER needed"
+            }
+            return true
+        }
 
         return try {
-            accountInfo.userAgent.value = if (isBackground) "${userAgent()} Push" else userAgent()
+            accountInfo.userAgent.value = desiredUa
             isAppInBackground = isBackground
             updateRegistrationState(accountKey, RegistrationState.IN_PROGRESS)
 
@@ -2494,6 +2609,20 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
         // Limpiar en memoria también
         callHistoryManager.clearCallLogs()
         log.d(tag = TAG) { "Call logs cleared from memory" }
+    }
+
+    /**
+     * Elimina UNA entrada del historial por su id (memoria + BD).
+     */
+    fun deleteCallLog(callLogId: String) {
+        callHistoryManager.deleteCallLog(callLogId)
+    }
+
+    /**
+     * Elimina varias entradas del historial por sus ids en una sola operación.
+     */
+    fun deleteCallLogs(callLogIds: List<String>) {
+        callHistoryManager.deleteCallLogs(callLogIds)
     }
 
     /**

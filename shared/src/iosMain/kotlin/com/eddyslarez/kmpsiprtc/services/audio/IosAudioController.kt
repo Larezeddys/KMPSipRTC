@@ -406,25 +406,44 @@ class IosAudioController(
             newDevices.add(createEarpieceDevice(currentOutputPort))
             newDevices.add(createSpeakerDevice(currentOutputPort))
 
-            // Detectar dispositivos conectados
-            // Bluetooth
+            // Detectar Bluetooth REALMENTE conectados.
+            // Para outputs Bluetooth (A2DP/LE), la fuente autoritativa es currentRoute.outputs:
+            // un BT pareado pero no conectado NO aparece allí. Para HFP usamos availableInputs
+            // porque HFP es bidireccional y AVAudioSession lo expone como input enumerable
+            // cuando hay un dispositivo realmente conectado con ese perfil.
+            val seenDescriptors = mutableSetOf<String>()
+
             audioSession.availableInputs?.forEach { input ->
                 (input as? AVAudioSessionPortDescription)?.let { port ->
                     if (port.portType == AVAudioSessionPortBluetoothHFP) {
-                        newDevices.add(createBluetoothDevice(port, currentOutputPort))
+                        val desc = port.portType ?: "bluetooth_hfp"
+                        if (seenDescriptors.add(desc)) {
+                            newDevices.add(createBluetoothDevice(port, currentOutputPort))
+                        }
                     }
                 }
             }
 
-            // Headphones/Headset
+            // BT A2DP / BT LE / Headphones / Headset: enumerar SOLO outputs en uso.
             currentRoute.outputs.forEach { output ->
                 (output as? AVAudioSessionPortDescription)?.let { port ->
-                    when (port.portType) {
+                    val pt = port.portType ?: return@let
+                    when (pt) {
+                        AVAudioSessionPortBluetoothA2DP,
+                        AVAudioSessionPortBluetoothLE -> {
+                            if (seenDescriptors.add(pt)) {
+                                newDevices.add(createBluetoothDevice(port, currentOutputPort))
+                            }
+                        }
                         AVAudioSessionPortHeadphones -> {
-                            newDevices.add(createHeadphonesDevice(port, currentOutputPort))
+                            if (seenDescriptors.add(pt)) {
+                                newDevices.add(createHeadphonesDevice(port, currentOutputPort))
+                            }
                         }
                         AVAudioSessionPortHeadsetMic -> {
-                            newDevices.add(createHeadsetDevice(port, currentOutputPort))
+                            if (seenDescriptors.add(pt)) {
+                                newDevices.add(createHeadsetDevice(port, currentOutputPort))
+                            }
                         }
                     }
                 }
@@ -500,22 +519,26 @@ class IosAudioController(
     private fun createBluetoothDevice(
         port: AVAudioSessionPortDescription,
         currentPort: String?
-    ) = AudioDevice(
-        name = port.portName ?: "Bluetooth Device",
-        descriptor = port.portType ?: "bluetooth",
-        nativeDevice = port,
-        isOutput = true,
-        audioUnit = AudioUnit(
-            type = AudioUnitTypes.BLUETOOTH,
-            capability = AudioUnitCompatibilities.ALL,
-            isCurrent = currentPort == AVAudioSessionPortBluetoothHFP,
-            isDefault = false
-        ),
-        connectionState = DeviceConnectionState.CONNECTED,
-        isWireless = true,
-        supportsHDVoice = true,
-        latency = 50
-    )
+    ): AudioDevice {
+        val isA2dp = port.portType == AVAudioSessionPortBluetoothA2DP
+        return AudioDevice(
+            name = port.portName ?: "Bluetooth Device",
+            descriptor = port.portType ?: "bluetooth",
+            nativeDevice = port,
+            isOutput = true,
+            audioUnit = AudioUnit(
+                type = if (isA2dp) AudioUnitTypes.BLUETOOTHA2DP else AudioUnitTypes.BLUETOOTH,
+                capability = AudioUnitCompatibilities.ALL,
+                // isCurrent compara con el portType real, no asume HFP.
+                isCurrent = currentPort != null && currentPort == port.portType,
+                isDefault = false
+            ),
+            connectionState = DeviceConnectionState.CONNECTED,
+            isWireless = true,
+            supportsHDVoice = !isA2dp,
+            latency = if (isA2dp) 100 else 50
+        )
+    }
 
     private fun createHeadphonesDevice(
         port: AVAudioSessionPortDescription,
