@@ -1,0 +1,380 @@
+Compiled from "WebRtcAudioRecord.java"
+class org.webrtc.audio.WebRtcAudioRecord$AudioRecordThread extends java.lang.Thread {
+  private volatile boolean keepAlive;
+
+  final org.webrtc.audio.WebRtcAudioRecord this$0;
+
+  public org.webrtc.audio.WebRtcAudioRecord$AudioRecordThread(org.webrtc.audio.WebRtcAudioRecord, java.lang.String);
+    Code:
+         0: aload_0
+         1: aload_1
+         2: putfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+         5: aload_0
+         6: aload_2
+         7: invokespecial #9                  // Method java/lang/Thread."<init>":(Ljava/lang/String;)V
+        10: aload_0
+        11: iconst_1
+        12: putfield      #15                 // Field keepAlive:Z
+        15: return
+
+  public void run();
+    Code:
+         0: bipush        -19
+         2: invokestatic  #21                 // Method android/os/Process.setThreadPriority:(I)V
+         5: ldc           #25                 // String WebRtcAudioRecordExternal
+         7: invokestatic  #27                 // Method org/webrtc/audio/WebRtcAudioUtils.getThreadInfo:()Ljava/lang/String;
+        10: invokedynamic #33,  0             // InvokeDynamic #0:makeConcatWithConstants:(Ljava/lang/String;)Ljava/lang/String;
+        15: invokestatic  #37                 // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+        18: aload_0
+        19: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+        22: getfield      #43                 // Field org/webrtc/audio/WebRtcAudioRecord.audioRecord:Landroid/media/AudioRecord;
+        25: ifnull        50
+        28: aload_0
+        29: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+        32: getfield      #43                 // Field org/webrtc/audio/WebRtcAudioRecord.audioRecord:Landroid/media/AudioRecord;
+        35: invokevirtual #47                 // Method android/media/AudioRecord.getRecordingState:()I
+        38: iconst_3
+        39: if_icmpne     46
+        42: iconst_1
+        43: goto          47
+        46: iconst_0
+        47: invokestatic  #53                 // Method org/webrtc/audio/WebRtcAudioRecord.assertTrue:(Z)V
+        50: aload_0
+        51: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+        54: iconst_0
+        55: invokevirtual #57                 // Method org/webrtc/audio/WebRtcAudioRecord.doAudioRecordStateCallback:(I)V
+        58: invokestatic  #60                 // Method java/lang/System.nanoTime:()J
+        61: lstore_1
+        62: aconst_null
+        63: astore_3
+        64: getstatic     #66                 // Field android/os/Build$VERSION.SDK_INT:I
+        67: bipush        24
+        69: if_icmplt     80
+        72: new           #72                 // class android/media/AudioTimestamp
+        75: dup
+        76: invokespecial #74                 // Method android/media/AudioTimestamp."<init>":()V
+        79: astore_3
+        80: aload_0
+        81: getfield      #15                 // Field keepAlive:Z
+        84: ifeq          734
+        87: lconst_0
+        88: lstore        4
+        90: aload_0
+        91: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+        94: getfield      #77                 // Field org/webrtc/audio/WebRtcAudioRecord.audioRecordStateLock:Ljava/lang/Object;
+        97: dup
+        98: astore        8
+       100: monitorenter
+       101: aload_0
+       102: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       105: getfield      #43                 // Field org/webrtc/audio/WebRtcAudioRecord.audioRecord:Landroid/media/AudioRecord;
+       108: astore        6
+       110: aload_0
+       111: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       114: getfield      #81                 // Field org/webrtc/audio/WebRtcAudioRecord.nativeCalledInitRecording:Ljava/util/concurrent/atomic/AtomicBoolean;
+       117: invokevirtual #85                 // Method java/util/concurrent/atomic/AtomicBoolean.get:()Z
+       120: istore        7
+       122: aload         8
+       124: monitorexit
+       125: goto          136
+       128: astore        9
+       130: aload         8
+       132: monitorexit
+       133: aload         9
+       135: athrow
+       136: aload         6
+       138: ifnonnull     314
+       141: aload_0
+       142: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       145: getfield      #91                 // Field org/webrtc/audio/WebRtcAudioRecord.useAudioRecord:Z
+       148: ifeq          314
+       151: aload_0
+       152: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       155: invokevirtual #94                 // Method org/webrtc/audio/WebRtcAudioRecord.initAudioRecord:()Z
+       158: istore        8
+       160: iload         8
+       162: ifne          176
+       165: aload_0
+       166: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       169: iconst_0
+       170: putfield      #91                 // Field org/webrtc/audio/WebRtcAudioRecord.useAudioRecord:Z
+       173: goto          314
+       176: aload_0
+       177: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       180: getfield      #77                 // Field org/webrtc/audio/WebRtcAudioRecord.audioRecordStateLock:Ljava/lang/Object;
+       183: dup
+       184: astore        9
+       186: monitorenter
+       187: aload_0
+       188: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       191: getfield      #43                 // Field org/webrtc/audio/WebRtcAudioRecord.audioRecord:Landroid/media/AudioRecord;
+       194: astore        6
+       196: aload         9
+       198: monitorexit
+       199: goto          210
+       202: astore        10
+       204: aload         9
+       206: monitorexit
+       207: aload         10
+       209: athrow
+       210: aload         6
+       212: ifnull        219
+       215: iconst_1
+       216: goto          220
+       219: iconst_0
+       220: invokestatic  #53                 // Method org/webrtc/audio/WebRtcAudioRecord.assertTrue:(Z)V
+       223: aload         6
+       225: invokevirtual #97                 // Method android/media/AudioRecord.startRecording:()V
+       228: goto          264
+       231: astore        9
+       233: aload_0
+       234: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       237: getstatic     #102                // Field org/webrtc/audio/JavaAudioDeviceModule$AudioRecordStartErrorCode.AUDIO_RECORD_START_EXCEPTION:Lorg/webrtc/audio/JavaAudioDeviceModule$AudioRecordStartErrorCode;
+       240: aload         9
+       242: invokevirtual #108                // Method java/lang/IllegalStateException.getMessage:()Ljava/lang/String;
+       245: invokedynamic #111,  0            // InvokeDynamic #1:makeConcatWithConstants:(Ljava/lang/String;)Ljava/lang/String;
+       250: invokevirtual #112                // Method org/webrtc/audio/WebRtcAudioRecord.reportWebRtcAudioRecordStartError:(Lorg/webrtc/audio/JavaAudioDeviceModule$AudioRecordStartErrorCode;Ljava/lang/String;)V
+       253: aconst_null
+       254: astore        6
+       256: aload_0
+       257: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       260: iconst_0
+       261: putfield      #91                 // Field org/webrtc/audio/WebRtcAudioRecord.useAudioRecord:Z
+       264: aload_0
+       265: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       268: getfield      #91                 // Field org/webrtc/audio/WebRtcAudioRecord.useAudioRecord:Z
+       271: ifeq          314
+       274: aload         6
+       276: invokevirtual #47                 // Method android/media/AudioRecord.getRecordingState:()I
+       279: iconst_3
+       280: if_icmpeq     314
+       283: aload_0
+       284: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       287: getstatic     #116                // Field org/webrtc/audio/JavaAudioDeviceModule$AudioRecordStartErrorCode.AUDIO_RECORD_START_STATE_MISMATCH:Lorg/webrtc/audio/JavaAudioDeviceModule$AudioRecordStartErrorCode;
+       290: aload         6
+       292: invokevirtual #47                 // Method android/media/AudioRecord.getRecordingState:()I
+       295: invokedynamic #119,  0            // InvokeDynamic #2:makeConcatWithConstants:(I)Ljava/lang/String;
+       300: invokevirtual #112                // Method org/webrtc/audio/WebRtcAudioRecord.reportWebRtcAudioRecordStartError:(Lorg/webrtc/audio/JavaAudioDeviceModule$AudioRecordStartErrorCode;Ljava/lang/String;)V
+       303: aconst_null
+       304: astore        6
+       306: aload_0
+       307: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       310: iconst_0
+       311: putfield      #91                 // Field org/webrtc/audio/WebRtcAudioRecord.useAudioRecord:Z
+       314: aload         6
+       316: ifnull        339
+       319: aload_0
+       320: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       323: getfield      #91                 // Field org/webrtc/audio/WebRtcAudioRecord.useAudioRecord:Z
+       326: ifne          339
+       329: aconst_null
+       330: astore        6
+       332: aload_0
+       333: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       336: invokevirtual #122                // Method org/webrtc/audio/WebRtcAudioRecord.releaseAudioResources:()V
+       339: iconst_0
+       340: istore        8
+       342: aload         6
+       344: ifnull        499
+       347: aload         6
+       349: aload_0
+       350: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       353: getfield      #125                // Field org/webrtc/audio/WebRtcAudioRecord.byteBuffer:Ljava/nio/ByteBuffer;
+       356: aload_0
+       357: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       360: getfield      #125                // Field org/webrtc/audio/WebRtcAudioRecord.byteBuffer:Ljava/nio/ByteBuffer;
+       363: invokevirtual #129                // Method java/nio/ByteBuffer.capacity:()I
+       366: invokevirtual #134                // Method android/media/AudioRecord.read:(Ljava/nio/ByteBuffer;I)I
+       369: istore        8
+       371: iload         8
+       373: aload_0
+       374: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       377: getfield      #125                // Field org/webrtc/audio/WebRtcAudioRecord.byteBuffer:Ljava/nio/ByteBuffer;
+       380: invokevirtual #129                // Method java/nio/ByteBuffer.capacity:()I
+       383: if_icmpne     459
+       386: aload_0
+       387: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       390: getfield      #138                // Field org/webrtc/audio/WebRtcAudioRecord.microphoneMute:Z
+       393: ifeq          425
+       396: aload_0
+       397: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       400: getfield      #125                // Field org/webrtc/audio/WebRtcAudioRecord.byteBuffer:Ljava/nio/ByteBuffer;
+       403: invokevirtual #141                // Method java/nio/ByteBuffer.clear:()Ljava/nio/ByteBuffer;
+       406: pop
+       407: aload_0
+       408: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       411: getfield      #125                // Field org/webrtc/audio/WebRtcAudioRecord.byteBuffer:Ljava/nio/ByteBuffer;
+       414: aload_0
+       415: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       418: getfield      #145                // Field org/webrtc/audio/WebRtcAudioRecord.emptyBytes:[B
+       421: invokevirtual #149                // Method java/nio/ByteBuffer.put:([B)Ljava/nio/ByteBuffer;
+       424: pop
+       425: aload_0
+       426: getfield      #15                 // Field keepAlive:Z
+       429: ifeq          528
+       432: getstatic     #66                 // Field android/os/Build$VERSION.SDK_INT:I
+       435: bipush        24
+       437: if_icmplt     528
+       440: aload         6
+       442: aload_3
+       443: iconst_0
+       444: invokevirtual #153                // Method android/media/AudioRecord.getTimestamp:(Landroid/media/AudioTimestamp;I)I
+       447: ifne          528
+       450: aload_3
+       451: getfield      #157                // Field android/media/AudioTimestamp.nanoTime:J
+       454: lstore        4
+       456: goto          528
+       459: iload         8
+       461: invokedynamic #160,  0            // InvokeDynamic #3:makeConcatWithConstants:(I)Ljava/lang/String;
+       466: astore        9
+       468: ldc           #25                 // String WebRtcAudioRecordExternal
+       470: aload         9
+       472: invokestatic  #161                // Method org/webrtc/Logging.e:(Ljava/lang/String;Ljava/lang/String;)V
+       475: iload         8
+       477: bipush        -3
+       479: if_icmpne     80
+       482: aload_0
+       483: iconst_0
+       484: putfield      #15                 // Field keepAlive:Z
+       487: aload_0
+       488: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       491: aload         9
+       493: invokevirtual #164                // Method org/webrtc/audio/WebRtcAudioRecord.reportWebRtcAudioRecordError:(Ljava/lang/String;)V
+       496: goto          80
+       499: aload_0
+       500: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       503: getfield      #125                // Field org/webrtc/audio/WebRtcAudioRecord.byteBuffer:Ljava/nio/ByteBuffer;
+       506: invokevirtual #141                // Method java/nio/ByteBuffer.clear:()Ljava/nio/ByteBuffer;
+       509: pop
+       510: aload_0
+       511: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       514: getfield      #125                // Field org/webrtc/audio/WebRtcAudioRecord.byteBuffer:Ljava/nio/ByteBuffer;
+       517: aload_0
+       518: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       521: getfield      #145                // Field org/webrtc/audio/WebRtcAudioRecord.emptyBytes:[B
+       524: invokevirtual #149                // Method java/nio/ByteBuffer.put:([B)Ljava/nio/ByteBuffer;
+       527: pop
+       528: aload_0
+       529: getfield      #15                 // Field keepAlive:Z
+       532: ifeq          603
+       535: aload_0
+       536: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       539: getfield      #167                // Field org/webrtc/audio/WebRtcAudioRecord.audioBufferCallback:Lorg/webrtc/audio/JavaAudioDeviceModule$AudioBufferCallback;
+       542: ifnull        603
+       545: aload_0
+       546: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       549: getfield      #167                // Field org/webrtc/audio/WebRtcAudioRecord.audioBufferCallback:Lorg/webrtc/audio/JavaAudioDeviceModule$AudioBufferCallback;
+       552: aload_0
+       553: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       556: getfield      #125                // Field org/webrtc/audio/WebRtcAudioRecord.byteBuffer:Ljava/nio/ByteBuffer;
+       559: aload_0
+       560: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       563: getfield      #171                // Field org/webrtc/audio/WebRtcAudioRecord.audioFormat:I
+       566: aload_0
+       567: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       570: getfield      #174                // Field org/webrtc/audio/WebRtcAudioRecord.channelCount:I
+       573: aload_0
+       574: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       577: getfield      #177                // Field org/webrtc/audio/WebRtcAudioRecord.sampleRate:I
+       580: iload         8
+       582: lload         4
+       584: invokeinterface #180,  8          // InterfaceMethod org/webrtc/audio/JavaAudioDeviceModule$AudioBufferCallback.onBuffer:(Ljava/nio/ByteBuffer;IIIIJ)J
+       589: lstore        4
+       591: aload_0
+       592: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       595: getfield      #125                // Field org/webrtc/audio/WebRtcAudioRecord.byteBuffer:Ljava/nio/ByteBuffer;
+       598: invokevirtual #129                // Method java/nio/ByteBuffer.capacity:()I
+       601: istore        8
+       603: aload_0
+       604: getfield      #15                 // Field keepAlive:Z
+       607: ifeq          633
+       610: iload         7
+       612: ifeq          633
+       615: aload_0
+       616: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       619: aload_0
+       620: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       623: getfield      #186                // Field org/webrtc/audio/WebRtcAudioRecord.nativeAudioRecord:J
+       626: iload         8
+       628: lload         4
+       630: invokevirtual #189                // Method org/webrtc/audio/WebRtcAudioRecord.nativeDataIsRecorded:(JIJ)V
+       633: aload_0
+       634: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       637: getfield      #193                // Field org/webrtc/audio/WebRtcAudioRecord.audioSamplesReadyCallback:Lorg/webrtc/audio/JavaAudioDeviceModule$SamplesReadyCallback;
+       640: ifnull        731
+       643: aload_0
+       644: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       647: getfield      #125                // Field org/webrtc/audio/WebRtcAudioRecord.byteBuffer:Ljava/nio/ByteBuffer;
+       650: invokevirtual #197                // Method java/nio/ByteBuffer.array:()[B
+       653: aload_0
+       654: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       657: getfield      #125                // Field org/webrtc/audio/WebRtcAudioRecord.byteBuffer:Ljava/nio/ByteBuffer;
+       660: invokevirtual #201                // Method java/nio/ByteBuffer.arrayOffset:()I
+       663: aload_0
+       664: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       667: getfield      #125                // Field org/webrtc/audio/WebRtcAudioRecord.byteBuffer:Ljava/nio/ByteBuffer;
+       670: invokevirtual #129                // Method java/nio/ByteBuffer.capacity:()I
+       673: aload_0
+       674: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       677: getfield      #125                // Field org/webrtc/audio/WebRtcAudioRecord.byteBuffer:Ljava/nio/ByteBuffer;
+       680: invokevirtual #201                // Method java/nio/ByteBuffer.arrayOffset:()I
+       683: iadd
+       684: invokestatic  #204                // Method java/util/Arrays.copyOfRange:([BII)[B
+       687: astore        9
+       689: aload_0
+       690: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       693: getfield      #193                // Field org/webrtc/audio/WebRtcAudioRecord.audioSamplesReadyCallback:Lorg/webrtc/audio/JavaAudioDeviceModule$SamplesReadyCallback;
+       696: new           #210                // class org/webrtc/audio/JavaAudioDeviceModule$AudioSamples
+       699: dup
+       700: aload_0
+       701: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       704: getfield      #171                // Field org/webrtc/audio/WebRtcAudioRecord.audioFormat:I
+       707: aload_0
+       708: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       711: getfield      #174                // Field org/webrtc/audio/WebRtcAudioRecord.channelCount:I
+       714: aload_0
+       715: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       718: getfield      #177                // Field org/webrtc/audio/WebRtcAudioRecord.sampleRate:I
+       721: aload         9
+       723: invokespecial #212                // Method org/webrtc/audio/JavaAudioDeviceModule$AudioSamples."<init>":(III[B)V
+       726: invokeinterface #215,  2          // InterfaceMethod org/webrtc/audio/JavaAudioDeviceModule$SamplesReadyCallback.onWebRtcAudioRecordSamplesReady:(Lorg/webrtc/audio/JavaAudioDeviceModule$AudioSamples;)V
+       731: goto          80
+       734: aload_0
+       735: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       738: getfield      #43                 // Field org/webrtc/audio/WebRtcAudioRecord.audioRecord:Landroid/media/AudioRecord;
+       741: ifnull        754
+       744: aload_0
+       745: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       748: getfield      #43                 // Field org/webrtc/audio/WebRtcAudioRecord.audioRecord:Landroid/media/AudioRecord;
+       751: invokevirtual #221                // Method android/media/AudioRecord.stop:()V
+       754: goto          774
+       757: astore        4
+       759: ldc           #25                 // String WebRtcAudioRecordExternal
+       761: aload         4
+       763: invokevirtual #108                // Method java/lang/IllegalStateException.getMessage:()Ljava/lang/String;
+       766: invokedynamic #224,  0            // InvokeDynamic #4:makeConcatWithConstants:(Ljava/lang/String;)Ljava/lang/String;
+       771: invokestatic  #161                // Method org/webrtc/Logging.e:(Ljava/lang/String;Ljava/lang/String;)V
+       774: aload_0
+       775: getfield      #3                  // Field this$0:Lorg/webrtc/audio/WebRtcAudioRecord;
+       778: iconst_1
+       779: invokevirtual #57                 // Method org/webrtc/audio/WebRtcAudioRecord.doAudioRecordStateCallback:(I)V
+       782: return
+      Exception table:
+         from    to  target type
+           101   125   128   any
+           128   133   128   any
+           187   199   202   any
+           202   207   202   any
+           223   228   231   Class java/lang/IllegalStateException
+           734   754   757   Class java/lang/IllegalStateException
+
+  public void stopThread();
+    Code:
+         0: ldc           #25                 // String WebRtcAudioRecordExternal
+         2: ldc           #225                // String stopThread
+         4: invokestatic  #37                 // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+         7: aload_0
+         8: iconst_0
+         9: putfield      #15                 // Field keepAlive:Z
+        12: return
+}

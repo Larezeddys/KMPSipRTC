@@ -92,7 +92,27 @@ class DesktopWebRtcManager : WebRtcManager {
     // ==================== DATA CHANNEL (para conferencias) ====================
 
     fun createPublisherDataChannel(label: String = "_reliable") {
+        ensureInitialized()
+        // El data channel requiere PeerConnection viva. Si todavía no existe
+        // (porque aún no se llamó a createOffer/addLocalXxx), la creamos aquí
+        // para que el data channel quede incluido en el siguiente SDP.
+        if (!peerConnectionController.hasPeerConnection()) {
+            peerConnectionController.createNewPeerConnection()
+        }
         peerConnectionController.createPublisherDataChannel(label)
+    }
+
+    /**
+     * Aplica los ICE servers (STUN + TURN con credenciales) que vienen del
+     * JoinResponse de LiveKit. DEBE llamarse ANTES de createOffer/createAnswer
+     * para que el PeerConnection se cree con la configuración correcta.
+     *
+     * @param servers Lista de (urls, username, credential) — el cliente
+     *   extrae estos del LiveKitJoinResponse.iceServers.
+     */
+    fun setIceServers(servers: List<Triple<List<String>, String?, String?>>) {
+        ensureInitialized()
+        peerConnectionController.setIceServers(servers)
     }
 
     fun sendDataChannelMessage(data: ByteArray): Boolean {
@@ -194,7 +214,23 @@ class DesktopWebRtcManager : WebRtcManager {
     }
 
     override suspend fun addIceCandidate(candidate: String, sdpMid: String?, sdpMLineIndex: Int?) {
-        peerConnectionController.addIceCandidate(candidate, sdpMid, sdpMLineIndex)
+        // Race: el ICE del SFU puede llegar antes de que `initialize()` termine
+        // de poblar peerConnectionController (lateinit). Si todavía no está listo
+        // descartamos el candidato — webrtc-java lo recolecta de nuevo cuando el
+        // remote description se aplica.
+        if (!::peerConnectionController.isInitialized) {
+            log.w(TAG) { "addIceCandidate ignorado: peerConnectionController no inicializado todavía" }
+            return
+        }
+        if (!peerConnectionController.hasPeerConnection()) {
+            log.w(TAG) { "addIceCandidate ignorado: PeerConnection no creada" }
+            return
+        }
+        try {
+            peerConnectionController.addIceCandidate(candidate, sdpMid, sdpMLineIndex)
+        } catch (e: Exception) {
+            log.w(TAG) { "Error agregando ICE candidate: ${e.message}" }
+        }
     }
 
     override fun closePeerConnection() {

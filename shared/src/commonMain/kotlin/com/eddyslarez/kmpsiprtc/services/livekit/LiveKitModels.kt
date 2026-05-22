@@ -105,5 +105,6 @@ sealed class LiveKitSignalMessage {
     data class ParticipantUpdated(val update: LiveKitParticipantUpdate) : LiveKitSignalMessage()
     data class TrackPublished(val published: LiveKitTrackPublished) : LiveKitSignalMessage()
     data class Leave(val canReconnect: Boolean, val reason: Int) : LiveKitSignalMessage()
+    object Pong : LiveKitSignalMessage()
     data class Unknown(val fieldNumber: Int) : LiveKitSignalMessage()
 }

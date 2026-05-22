@@ -78,6 +78,45 @@ object LiveKitProto {
         return encodeSignalRequest(fieldNumber = 8, value = leave)
     }
 
+    /**
+     * Codifica SignalRequest con Ping (field 11, protocol < 8) — KEEPALIVE.
+     * LiveKit espera que el cliente envíe Ping cada ~10s. Sin esto el SFU
+     * cierra el WebSocket por inactividad tras ~30s.
+     *
+     * Estructura Ping:
+     *  - field 1: timestamp (int64, varint) — millis desde epoch del cliente
+     *  - field 2: rtt (int64, varint) — round-trip estimado (opcional, 0 al inicio)
+     */
+    fun encodePing(timestampMs: Long, rttMs: Long = 0L): ByteArray {
+        val ping = buildByteArray {
+            // field 1: timestamp (varint)
+            writeTag(1, 0)
+            writeVarint(timestampMs)
+            // field 2: rtt (varint), solo si > 0
+            if (rttMs > 0) {
+                writeTag(2, 0)
+                writeVarint(rttMs)
+            }
+        }
+        return encodeSignalRequest(fieldNumber = 11, value = ping)
+    }
+
+    /**
+     * Codifica SignalRequest con PingReq (field 13, protocol >= 8). Es la
+     * versión nueva del keepalive: el server responde con PongResp (field 21).
+     */
+    fun encodePingReq(timestampMs: Long, rttMs: Long = 0L): ByteArray {
+        val pingReq = buildByteArray {
+            writeTag(1, 0)
+            writeVarint(timestampMs)
+            if (rttMs > 0) {
+                writeTag(2, 0)
+                writeVarint(rttMs)
+            }
+        }
+        return encodeSignalRequest(fieldNumber = 13, value = pingReq)
+    }
+
     // ======================= DECODING =======================
 
     /**
@@ -85,6 +124,7 @@ object LiveKitProto {
      */
     fun decodeSignalResponse(bytes: ByteArray): LiveKitSignalMessage {
         val reader = ProtoReader(bytes)
+        var firstUnknownField = -1
 
         while (reader.hasMore()) {
             val tag = reader.readTag()
@@ -134,13 +174,30 @@ object LiveKitProto {
                     val data = reader.readBytes()
                     return decodeLeave(data)
                 }
+                // field 18: Pong (respuesta al Ping del cliente, protocol < 8)
+                18 -> {
+                    if (wireType != 2) { reader.skip(wireType); continue }
+                    reader.readBytes() // ignoramos el payload — solo importa que llegue
+                    return LiveKitSignalMessage.Pong
+                }
+                // field 21: PongResp (respuesta al PingReq del cliente, protocol >= 8)
+                21 -> {
+                    // PongResp es int32 — wireType 0 (varint)
+                    if (wireType == 0) {
+                        reader.readVarint() // descarta el valor
+                    } else {
+                        reader.skip(wireType)
+                    }
+                    return LiveKitSignalMessage.Pong
+                }
                 else -> {
+                    if (firstUnknownField == -1) firstUnknownField = fieldNumber
                     reader.skip(wireType)
                 }
             }
         }
 
-        return LiveKitSignalMessage.Unknown(-1)
+        return LiveKitSignalMessage.Unknown(firstUnknownField)
     }
 
     // ======================= INTERNAL ENCODING =======================

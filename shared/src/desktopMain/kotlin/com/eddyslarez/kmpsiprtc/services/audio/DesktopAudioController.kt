@@ -275,6 +275,20 @@ class DesktopAudioController(
     private fun scanDevices() {
         audioDevices.clear()
 
+        // Heurística de nombre para descartar clasificaciones incorrectas de JavaSound:
+        // en Windows muchos Mixer exponen tanto sourceLines como targetLines y se
+        // catalogan como ambos, lo que enruta playback a un micrófono o viceversa.
+        fun nameSuggestsMic(n: String): Boolean {
+            val lower = n.lowercase()
+            return listOf("micrófono", "microfono", "microphone", "captur",
+                "input", "mic ", "mic(").any { lower.contains(it) }
+        }
+        fun nameSuggestsSpeaker(n: String): Boolean {
+            val lower = n.lowercase()
+            return listOf("altavoc", "altavoz", "speaker", "headphone",
+                "audífon", "audifon", "output", "playback").any { lower.contains(it) }
+        }
+
         try {
             // Scan input devices
             val inputMixers = AudioSystem.getMixerInfo()
@@ -284,10 +298,15 @@ class DesktopAudioController(
                     val targetLineInfo = mixer.targetLineInfo
 
                     if (targetLineInfo.isNotEmpty()) {
-                        // This is an input device
-                        val device = createInputDevice(mixerInfo, mixer)
-                        audioDevices.add(device)
-                        log.d(TAG) { "Input device: ${device.name}" }
+                        val name = mixerInfo.name
+                        // No registrar como input si el nombre sugiere fuertemente que es altavoz.
+                        if (nameSuggestsSpeaker(name) && !nameSuggestsMic(name)) {
+                            log.d(TAG) { "Saltando input mal clasificado (es speaker): $name" }
+                        } else {
+                            val device = createInputDevice(mixerInfo, mixer)
+                            audioDevices.add(device)
+                            log.d(TAG) { "Input device: ${device.name}" }
+                        }
                     }
                 } catch (e: Exception) {
                     // Skip problematic devices
@@ -301,10 +320,15 @@ class DesktopAudioController(
                     val sourceLineInfo = mixer.sourceLineInfo
 
                     if (sourceLineInfo.isNotEmpty()) {
-                        // This is an output device
-                        val device = createOutputDevice(mixerInfo, mixer)
-                        audioDevices.add(device)
-                        log.d(TAG) { "Output device: ${device.name}" }
+                        val name = mixerInfo.name
+                        // No registrar como output si el nombre sugiere fuertemente que es mic.
+                        if (nameSuggestsMic(name) && !nameSuggestsSpeaker(name)) {
+                            log.d(TAG) { "Saltando output mal clasificado (es mic): $name" }
+                        } else {
+                            val device = createOutputDevice(mixerInfo, mixer)
+                            audioDevices.add(device)
+                            log.d(TAG) { "Output device: ${device.name}" }
+                        }
                     }
                 } catch (e: Exception) {
                     // Skip problematic devices

@@ -9,6 +9,8 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlin.time.Clock
+import kotlin.time.ExperimentalTime
 
 /**
  * Cliente WebSocket que habla el protocolo de signaling de LiveKit (protobuf binario).
@@ -27,7 +29,14 @@ class LiveKitSignalingClient {
     private var httpClient: HttpClient? = null
     private var wsSession: DefaultWebSocketSession? = null
     private var receiveJob: Job? = null
+    private var pingJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+
+    // Keepalive: el SFU de LiveKit cierra la WS si el cliente no envía Ping
+    // periódicamente. Mantenemos el último timestamp enviado para calcular RTT.
+    private var lastPingSentAtMs: Long = 0
+    private var lastRttMs: Long = 0
+    private val pingIntervalMs: Long = 10_000  // 10s — más conservador que el default LiveKit
 
     private val _connectionState = MutableStateFlow<LiveKitConnectionState>(LiveKitConnectionState.Disconnected)
     val connectionState: StateFlow<LiveKitConnectionState> = _connectionState.asStateFlow()
@@ -81,6 +90,10 @@ class LiveKitSignalingClient {
                 _connectionState.value = LiveKitConnectionState.Connected
                 log.d(tag = TAG) { "WebSocket conectado a LiveKit" }
 
+                // Arrancar keepalive: el SFU de LiveKit cierra el WS si no
+                // recibe Ping del cliente cada ~30s. Enviamos cada 10s.
+                startPingLoop()
+
                 // Loop de recepcion de mensajes
                 try {
                     for (frame in incoming) {
@@ -111,6 +124,10 @@ class LiveKitSignalingClient {
                     _connectionState.value = LiveKitConnectionState.Error(e.message ?: "Error desconocido")
                     listener?.onError(e)
                 } finally {
+                    // Si la WS se cae mientras estábamos conectados, detener el ping.
+                    pingJob?.cancel()
+                    pingJob = null
+                    wsSession = null
                     _connectionState.value = LiveKitConnectionState.Disconnected
                     listener?.onDisconnected()
                 }
@@ -208,6 +225,10 @@ class LiveKitSignalingClient {
      */
     suspend fun disconnect() {
         log.d(tag = TAG) { "Desconectando de LiveKit" }
+        pingJob?.cancel()
+        pingJob = null
+        lastPingSentAtMs = 0
+        lastRttMs = 0
         try {
             sendLeave()
         } catch (_: Exception) {}
@@ -233,6 +254,45 @@ class LiveKitSignalingClient {
             else -> 7880
         }
     }
+
+    /**
+     * Inicia el loop de keepalive — envía Ping cada 10s. Si el envío falla
+     * 3 veces consecutivas, asumimos WS muerta y cerramos para que el caller
+     * pueda reconectar.
+     */
+    private fun startPingLoop() {
+        pingJob?.cancel()
+        pingJob = scope.launch {
+            var failures = 0
+            while (isActive && wsSession != null) {
+                try {
+                    delay(pingIntervalMs)
+                    if (wsSession == null) break
+                    val ts = currentTimeMs()
+                    lastPingSentAtMs = ts
+                    // Enviamos ambos: Ping (field 11, protocol antiguo) y PingReq
+                    // (field 13, protocol >= 8). El SFU acepta lo que reconozca.
+                    sendBinary(LiveKitProto.encodePing(ts, lastRttMs))
+                    sendBinary(LiveKitProto.encodePingReq(ts, lastRttMs))
+                    log.d(tag = TAG) { "Ping enviado (lastRtt=${lastRttMs}ms)" }
+                    failures = 0
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    failures++
+                    log.w(tag = TAG) { "Ping falló ($failures/3): ${e.message}" }
+                    if (failures >= 3) {
+                        log.e(tag = TAG) { "Demasiados fallos de Ping — cerrando WS" }
+                        try { wsSession?.close() } catch (_: Exception) {}
+                        break
+                    }
+                }
+            }
+        }
+    }
+
+    @OptIn(ExperimentalTime::class)
+    private fun currentTimeMs(): Long = Clock.System.now().toEpochMilliseconds()
 
     private suspend fun sendBinary(data: ByteArray) {
         val session = wsSession
@@ -281,6 +341,14 @@ class LiveKitSignalingClient {
             is LiveKitSignalMessage.Leave -> {
                 log.d(tag = TAG) { "Leave recibido: canReconnect=${message.canReconnect}" }
                 listener?.onLeave(message.canReconnect, message.reason)
+            }
+            is LiveKitSignalMessage.Pong -> {
+                // Calculamos RTT para futuros pings — útil para QoS pero también
+                // confirma que el server respondió a nuestro keepalive.
+                if (lastPingSentAtMs > 0) {
+                    lastRttMs = currentTimeMs() - lastPingSentAtMs
+                    log.d(tag = TAG) { "Pong recibido (RTT=${lastRttMs}ms)" }
+                }
             }
             is LiveKitSignalMessage.Unknown -> {
                 log.d(tag = TAG) { "Mensaje desconocido: field=${message.fieldNumber}" }

@@ -1,0 +1,1886 @@
+Compiled from "WebRtcAudioRecord.java"
+class org.webrtc.audio.WebRtcAudioRecord {
+  private static final java.lang.String TAG;
+
+  private static final int CALLBACK_BUFFER_SIZE_MS;
+
+  private static final int BUFFERS_PER_SECOND;
+
+  private static final int BUFFER_SIZE_FACTOR;
+
+  private static final long AUDIO_RECORD_THREAD_JOIN_TIMEOUT_MS;
+
+  public static final int DEFAULT_AUDIO_SOURCE;
+
+  public static final int DEFAULT_AUDIO_FORMAT;
+
+  private static final int AUDIO_RECORD_START;
+
+  private static final int AUDIO_RECORD_STOP;
+
+  private static final int CHECK_REC_STATUS_DELAY_MS;
+
+  private final android.content.Context context;
+
+  private final android.media.AudioManager audioManager;
+
+  private final int audioSource;
+
+  private final int audioFormat;
+
+  private int channelCount;
+
+  private int sampleRate;
+
+  private int expectedChannelCount;
+
+  private int expectedSampleRate;
+
+  private long nativeAudioRecord;
+
+  private final org.webrtc.audio.WebRtcAudioEffects effects;
+
+  private java.nio.ByteBuffer byteBuffer;
+
+  private final java.lang.Object audioRecordStateLock;
+
+  private boolean useAudioRecord;
+
+  private volatile android.media.AudioRecord audioRecord;
+
+  private final java.lang.Object audioThreadStateLock;
+
+  private org.webrtc.audio.WebRtcAudioRecord$AudioRecordThread audioThread;
+
+  private android.media.AudioDeviceInfo preferredDevice;
+
+  private final java.util.concurrent.ScheduledExecutorService executor;
+
+  private java.util.concurrent.ScheduledFuture<java.lang.String> future;
+
+  private volatile boolean microphoneMute;
+
+  private final java.util.concurrent.atomic.AtomicReference<java.lang.Boolean> audioSourceMatchesRecordingSessionRef;
+
+  private byte[] emptyBytes;
+
+  private final org.webrtc.audio.JavaAudioDeviceModule$AudioRecordErrorCallback errorCallback;
+
+  private final org.webrtc.audio.JavaAudioDeviceModule$AudioRecordStateCallback stateCallback;
+
+  private final org.webrtc.audio.JavaAudioDeviceModule$SamplesReadyCallback audioSamplesReadyCallback;
+
+  private final org.webrtc.audio.JavaAudioDeviceModule$AudioBufferCallback audioBufferCallback;
+
+  private final boolean isAcousticEchoCancelerSupported;
+
+  private final boolean isNoiseSuppressorSupported;
+
+  private java.util.concurrent.atomic.AtomicBoolean clientCalledStartRecording;
+
+  private java.util.concurrent.atomic.AtomicBoolean nativeCalledInitRecording;
+
+  private java.util.concurrent.atomic.AtomicBoolean nativeCalledStartRecording;
+
+  private static final java.util.concurrent.atomic.AtomicInteger nextSchedulerId;
+
+  org.webrtc.audio.WebRtcAudioRecord(android.content.Context, android.media.AudioManager);
+    Code:
+         0: aload_0
+         1: aload_1
+         2: invokestatic  #7                  // Method newDefaultScheduler:()Ljava/util/concurrent/ScheduledExecutorService;
+         5: aload_2
+         6: bipush        7
+         8: iconst_2
+         9: aconst_null
+        10: aconst_null
+        11: aconst_null
+        12: aconst_null
+        13: invokestatic  #11                 // Method org/webrtc/audio/WebRtcAudioEffects.isAcousticEchoCancelerSupported:()Z
+        16: invokestatic  #17                 // Method org/webrtc/audio/WebRtcAudioEffects.isNoiseSuppressorSupported:()Z
+        19: aload_2
+        20: invokestatic  #20                 // Method org/webrtc/audio/WebRtcAudioManager.getSampleRate:(Landroid/media/AudioManager;)I
+        23: iconst_1
+        24: invokespecial #26                 // Method "<init>":(Landroid/content/Context;Ljava/util/concurrent/ScheduledExecutorService;Landroid/media/AudioManager;IILorg/webrtc/audio/JavaAudioDeviceModule$AudioRecordErrorCallback;Lorg/webrtc/audio/JavaAudioDeviceModule$AudioRecordStateCallback;Lorg/webrtc/audio/JavaAudioDeviceModule$SamplesReadyCallback;Lorg/webrtc/audio/JavaAudioDeviceModule$AudioBufferCallback;ZZII)V
+        27: return
+
+  public org.webrtc.audio.WebRtcAudioRecord(android.content.Context, java.util.concurrent.ScheduledExecutorService, android.media.AudioManager, int, int, org.webrtc.audio.JavaAudioDeviceModule$AudioRecordErrorCallback, org.webrtc.audio.JavaAudioDeviceModule$AudioRecordStateCallback, org.webrtc.audio.JavaAudioDeviceModule$SamplesReadyCallback, org.webrtc.audio.JavaAudioDeviceModule$AudioBufferCallback, boolean, boolean, int, int);
+    Code:
+         0: aload_0
+         1: invokespecial #30                 // Method java/lang/Object."<init>":()V
+         4: aload_0
+         5: new           #12                 // class org/webrtc/audio/WebRtcAudioEffects
+         8: dup
+         9: invokespecial #35                 // Method org/webrtc/audio/WebRtcAudioEffects."<init>":()V
+        12: putfield      #36                 // Field effects:Lorg/webrtc/audio/WebRtcAudioEffects;
+        15: aload_0
+        16: new           #31                 // class java/lang/Object
+        19: dup
+        20: invokespecial #30                 // Method java/lang/Object."<init>":()V
+        23: putfield      #40                 // Field audioRecordStateLock:Ljava/lang/Object;
+        26: aload_0
+        27: iconst_1
+        28: putfield      #44                 // Field useAudioRecord:Z
+        31: aload_0
+        32: new           #31                 // class java/lang/Object
+        35: dup
+        36: invokespecial #30                 // Method java/lang/Object."<init>":()V
+        39: putfield      #48                 // Field audioThreadStateLock:Ljava/lang/Object;
+        42: aload_0
+        43: new           #51                 // class java/util/concurrent/atomic/AtomicReference
+        46: dup
+        47: invokespecial #53                 // Method java/util/concurrent/atomic/AtomicReference."<init>":()V
+        50: putfield      #54                 // Field audioSourceMatchesRecordingSessionRef:Ljava/util/concurrent/atomic/AtomicReference;
+        53: aload_0
+        54: new           #58                 // class java/util/concurrent/atomic/AtomicBoolean
+        57: dup
+        58: iconst_0
+        59: invokespecial #60                 // Method java/util/concurrent/atomic/AtomicBoolean."<init>":(Z)V
+        62: putfield      #63                 // Field clientCalledStartRecording:Ljava/util/concurrent/atomic/AtomicBoolean;
+        65: aload_0
+        66: new           #58                 // class java/util/concurrent/atomic/AtomicBoolean
+        69: dup
+        70: iconst_0
+        71: invokespecial #60                 // Method java/util/concurrent/atomic/AtomicBoolean."<init>":(Z)V
+        74: putfield      #67                 // Field nativeCalledInitRecording:Ljava/util/concurrent/atomic/AtomicBoolean;
+        77: aload_0
+        78: new           #58                 // class java/util/concurrent/atomic/AtomicBoolean
+        81: dup
+        82: iconst_0
+        83: invokespecial #60                 // Method java/util/concurrent/atomic/AtomicBoolean."<init>":(Z)V
+        86: putfield      #70                 // Field nativeCalledStartRecording:Ljava/util/concurrent/atomic/AtomicBoolean;
+        89: iload         10
+        91: ifeq          110
+        94: invokestatic  #11                 // Method org/webrtc/audio/WebRtcAudioEffects.isAcousticEchoCancelerSupported:()Z
+        97: ifne          110
+       100: new           #73                 // class java/lang/IllegalArgumentException
+       103: dup
+       104: ldc           #75                 // String HW AEC not supported
+       106: invokespecial #77                 // Method java/lang/IllegalArgumentException."<init>":(Ljava/lang/String;)V
+       109: athrow
+       110: iload         11
+       112: ifeq          131
+       115: invokestatic  #17                 // Method org/webrtc/audio/WebRtcAudioEffects.isNoiseSuppressorSupported:()Z
+       118: ifne          131
+       121: new           #73                 // class java/lang/IllegalArgumentException
+       124: dup
+       125: ldc           #80                 // String HW NS not supported
+       127: invokespecial #77                 // Method java/lang/IllegalArgumentException."<init>":(Ljava/lang/String;)V
+       130: athrow
+       131: aload_0
+       132: aload_1
+       133: putfield      #82                 // Field context:Landroid/content/Context;
+       136: aload_0
+       137: aload_2
+       138: putfield      #86                 // Field executor:Ljava/util/concurrent/ScheduledExecutorService;
+       141: aload_0
+       142: aload_3
+       143: putfield      #90                 // Field audioManager:Landroid/media/AudioManager;
+       146: aload_0
+       147: iload         4
+       149: putfield      #94                 // Field audioSource:I
+       152: aload_0
+       153: iload         5
+       155: putfield      #98                 // Field audioFormat:I
+       158: aload_0
+       159: aload         6
+       161: putfield      #101                // Field errorCallback:Lorg/webrtc/audio/JavaAudioDeviceModule$AudioRecordErrorCallback;
+       164: aload_0
+       165: aload         7
+       167: putfield      #105                // Field stateCallback:Lorg/webrtc/audio/JavaAudioDeviceModule$AudioRecordStateCallback;
+       170: aload_0
+       171: aload         8
+       173: putfield      #109                // Field audioSamplesReadyCallback:Lorg/webrtc/audio/JavaAudioDeviceModule$SamplesReadyCallback;
+       176: aload_0
+       177: aload         9
+       179: putfield      #113                // Field audioBufferCallback:Lorg/webrtc/audio/JavaAudioDeviceModule$AudioBufferCallback;
+       182: aload_0
+       183: iload         10
+       185: putfield      #117                // Field isAcousticEchoCancelerSupported:Z
+       188: aload_0
+       189: iload         11
+       191: putfield      #119                // Field isNoiseSuppressorSupported:Z
+       194: aload_0
+       195: iload         12
+       197: putfield      #121                // Field expectedSampleRate:I
+       200: aload_0
+       201: iload         13
+       203: putfield      #124                // Field expectedChannelCount:I
+       206: ldc           #127                // String WebRtcAudioRecordExternal
+       208: invokestatic  #129                // Method org/webrtc/audio/WebRtcAudioUtils.getThreadInfo:()Ljava/lang/String;
+       211: invokedynamic #135,  0            // InvokeDynamic #0:makeConcatWithConstants:(Ljava/lang/String;)Ljava/lang/String;
+       216: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+       219: return
+
+  public void setNativeAudioRecord(long);
+    Code:
+         0: aload_0
+         1: lload_1
+         2: putfield      #145                // Field nativeAudioRecord:J
+         5: return
+
+  boolean isAcousticEchoCancelerSupported();
+    Code:
+         0: aload_0
+         1: getfield      #117                // Field isAcousticEchoCancelerSupported:Z
+         4: ireturn
+
+  boolean isNoiseSuppressorSupported();
+    Code:
+         0: aload_0
+         1: getfield      #119                // Field isNoiseSuppressorSupported:Z
+         4: ireturn
+
+  boolean isAudioConfigVerified();
+    Code:
+         0: aload_0
+         1: getfield      #54                 // Field audioSourceMatchesRecordingSessionRef:Ljava/util/concurrent/atomic/AtomicReference;
+         4: invokevirtual #149                // Method java/util/concurrent/atomic/AtomicReference.get:()Ljava/lang/Object;
+         7: ifnull        14
+        10: iconst_1
+        11: goto          15
+        14: iconst_0
+        15: ireturn
+
+  boolean isAudioSourceMatchingRecordingSession();
+    Code:
+         0: aload_0
+         1: getfield      #54                 // Field audioSourceMatchesRecordingSessionRef:Ljava/util/concurrent/atomic/AtomicReference;
+         4: invokevirtual #149                // Method java/util/concurrent/atomic/AtomicReference.get:()Ljava/lang/Object;
+         7: checkcast     #153                // class java/lang/Boolean
+        10: astore_1
+        11: aload_1
+        12: ifnonnull     24
+        15: ldc           #127                // String WebRtcAudioRecordExternal
+        17: ldc           #155                // String Audio configuration has not yet been verified
+        19: invokestatic  #157                // Method org/webrtc/Logging.w:(Ljava/lang/String;Ljava/lang/String;)V
+        22: iconst_0
+        23: ireturn
+        24: aload_1
+        25: invokevirtual #160                // Method java/lang/Boolean.booleanValue:()Z
+        28: ireturn
+
+  private boolean enableBuiltInAEC(boolean);
+    Code:
+         0: ldc           #127                // String WebRtcAudioRecordExternal
+         2: iload_1
+         3: invokedynamic #163,  0            // InvokeDynamic #1:makeConcatWithConstants:(Z)Ljava/lang/String;
+         8: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+        11: aload_0
+        12: getfield      #36                 // Field effects:Lorg/webrtc/audio/WebRtcAudioEffects;
+        15: iload_1
+        16: invokevirtual #166                // Method org/webrtc/audio/WebRtcAudioEffects.setAEC:(Z)Z
+        19: ireturn
+
+  private boolean enableBuiltInNS(boolean);
+    Code:
+         0: ldc           #127                // String WebRtcAudioRecordExternal
+         2: iload_1
+         3: invokedynamic #170,  0            // InvokeDynamic #2:makeConcatWithConstants:(Z)Ljava/lang/String;
+         8: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+        11: aload_0
+        12: getfield      #36                 // Field effects:Lorg/webrtc/audio/WebRtcAudioEffects;
+        15: iload_1
+        16: invokevirtual #171                // Method org/webrtc/audio/WebRtcAudioEffects.setNS:(Z)Z
+        19: ireturn
+
+  public void setUseAudioRecord(boolean);
+    Code:
+         0: ldc           #127                // String WebRtcAudioRecordExternal
+         2: iload_1
+         3: invokedynamic #174,  0            // InvokeDynamic #3:makeConcatWithConstants:(Z)Ljava/lang/String;
+         8: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+        11: aload_0
+        12: iload_1
+        13: putfield      #44                 // Field useAudioRecord:Z
+        16: return
+
+  public boolean initRecordingIfNeeded();
+    Code:
+         0: aload_0
+         1: getfield      #40                 // Field audioRecordStateLock:Ljava/lang/Object;
+         4: dup
+         5: astore_1
+         6: monitorenter
+         7: aload_0
+         8: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+        11: ifnonnull     38
+        14: aload_0
+        15: aload_0
+        16: getfield      #121                // Field expectedSampleRate:I
+        19: aload_0
+        20: getfield      #124                // Field expectedChannelCount:I
+        23: iconst_0
+        24: invokevirtual #179                // Method initRecordingImpl:(IIZ)I
+        27: iflt          34
+        30: iconst_1
+        31: goto          35
+        34: iconst_0
+        35: aload_1
+        36: monitorexit
+        37: ireturn
+        38: aload_1
+        39: monitorexit
+        40: goto          48
+        43: astore_2
+        44: aload_1
+        45: monitorexit
+        46: aload_2
+        47: athrow
+        48: iconst_1
+        49: ireturn
+      Exception table:
+         from    to  target type
+             7    37    43   any
+            38    40    43   any
+            43    46    43   any
+
+  private int initRecording(int, int);
+    Code:
+         0: ldc           #127                // String WebRtcAudioRecordExternal
+         2: iload_1
+         3: iload_2
+         4: invokedynamic #183,  0            // InvokeDynamic #4:makeConcatWithConstants:(II)Ljava/lang/String;
+         9: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+        12: aload_0
+        13: getfield      #40                 // Field audioRecordStateLock:Ljava/lang/Object;
+        16: dup
+        17: astore_3
+        18: monitorenter
+        19: aload_0
+        20: getfield      #67                 // Field nativeCalledInitRecording:Ljava/util/concurrent/atomic/AtomicBoolean;
+        23: iconst_0
+        24: iconst_1
+        25: invokevirtual #186                // Method java/util/concurrent/atomic/AtomicBoolean.compareAndSet:(ZZ)Z
+        28: ifne          41
+        31: aload_0
+        32: ldc           #190                // String InitRecording called twice without StopRecording.
+        34: invokevirtual #192                // Method reportWebRtcAudioRecordInitError:(Ljava/lang/String;)V
+        37: iconst_m1
+        38: aload_3
+        39: monitorexit
+        40: ireturn
+        41: aload_0
+        42: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+        45: ifnonnull     58
+        48: aload_0
+        49: iload_1
+        50: iload_2
+        51: iconst_1
+        52: invokevirtual #179                // Method initRecordingImpl:(IIZ)I
+        55: aload_3
+        56: monitorexit
+        57: ireturn
+        58: iload_1
+        59: invokestatic  #195                // Method getFramesPerBuffer:(I)I
+        62: istore        4
+        64: aload_0
+        65: getfield      #199                // Field byteBuffer:Ljava/nio/ByteBuffer;
+        68: ifnonnull     81
+        71: new           #203                // class java/lang/IllegalStateException
+        74: dup
+        75: ldc           #205                // String initRecording: byteBuffer is null!
+        77: invokespecial #207                // Method java/lang/IllegalStateException."<init>":(Ljava/lang/String;)V
+        80: athrow
+        81: aload_0
+        82: aload_0
+        83: getfield      #145                // Field nativeAudioRecord:J
+        86: aload_0
+        87: getfield      #199                // Field byteBuffer:Ljava/nio/ByteBuffer;
+        90: invokevirtual #208                // Method nativeCacheDirectBufferAddress:(JLjava/nio/ByteBuffer;)V
+        93: iload         4
+        95: aload_3
+        96: monitorexit
+        97: ireturn
+        98: astore        5
+       100: aload_3
+       101: monitorexit
+       102: aload         5
+       104: athrow
+      Exception table:
+         from    to  target type
+            19    40    98   any
+            41    57    98   any
+            58    97    98   any
+            98   102    98   any
+
+  private int initRecordingImpl(int, int, boolean);
+    Code:
+         0: ldc           #127                // String WebRtcAudioRecordExternal
+         2: iload_1
+         3: iload_2
+         4: invokedynamic #212,  0            // InvokeDynamic #5:makeConcatWithConstants:(II)Ljava/lang/String;
+         9: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+        12: aload_0
+        13: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+        16: ifnull        27
+        19: aload_0
+        20: ldc           #190                // String InitRecording called twice without StopRecording.
+        22: invokevirtual #192                // Method reportWebRtcAudioRecordInitError:(Ljava/lang/String;)V
+        25: iconst_m1
+        26: ireturn
+        27: aload_0
+        28: iload_1
+        29: putfield      #213                // Field sampleRate:I
+        32: aload_0
+        33: iload_2
+        34: putfield      #216                // Field channelCount:I
+        37: iload_2
+        38: aload_0
+        39: getfield      #98                 // Field audioFormat:I
+        42: invokestatic  #219                // Method getBytesPerFrame:(II)I
+        45: istore        4
+        47: iload_1
+        48: invokestatic  #195                // Method getFramesPerBuffer:(I)I
+        51: istore        5
+        53: aload_0
+        54: iload         4
+        56: iload         5
+        58: imul
+        59: invokestatic  #223                // Method java/nio/ByteBuffer.allocateDirect:(I)Ljava/nio/ByteBuffer;
+        62: putfield      #199                // Field byteBuffer:Ljava/nio/ByteBuffer;
+        65: aload_0
+        66: getfield      #199                // Field byteBuffer:Ljava/nio/ByteBuffer;
+        69: invokevirtual #229                // Method java/nio/ByteBuffer.hasArray:()Z
+        72: ifne          83
+        75: aload_0
+        76: ldc           #232                // String ByteBuffer does not have backing array.
+        78: invokevirtual #192                // Method reportWebRtcAudioRecordInitError:(Ljava/lang/String;)V
+        81: iconst_m1
+        82: ireturn
+        83: ldc           #127                // String WebRtcAudioRecordExternal
+        85: aload_0
+        86: getfield      #199                // Field byteBuffer:Ljava/nio/ByteBuffer;
+        89: invokevirtual #234                // Method java/nio/ByteBuffer.capacity:()I
+        92: invokedynamic #238,  0            // InvokeDynamic #6:makeConcatWithConstants:(I)Ljava/lang/String;
+        97: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+       100: aload_0
+       101: aload_0
+       102: getfield      #199                // Field byteBuffer:Ljava/nio/ByteBuffer;
+       105: invokevirtual #234                // Method java/nio/ByteBuffer.capacity:()I
+       108: newarray       byte
+       110: putfield      #241                // Field emptyBytes:[B
+       113: iload_3
+       114: ifeq          129
+       117: aload_0
+       118: aload_0
+       119: getfield      #145                // Field nativeAudioRecord:J
+       122: aload_0
+       123: getfield      #199                // Field byteBuffer:Ljava/nio/ByteBuffer;
+       126: invokevirtual #208                // Method nativeCacheDirectBufferAddress:(JLjava/nio/ByteBuffer;)V
+       129: aload_0
+       130: getfield      #44                 // Field useAudioRecord:Z
+       133: ifeq          149
+       136: aload_0
+       137: invokevirtual #245                // Method initAudioRecord:()Z
+       140: istore        6
+       142: iload         6
+       144: ifne          149
+       147: iconst_m1
+       148: ireturn
+       149: aload_0
+       150: aload_0
+       151: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+       154: iconst_0
+       155: invokevirtual #248                // Method logRecordingConfigurations:(Landroid/media/AudioRecord;Z)I
+       158: istore        6
+       160: iload         6
+       162: ifeq          177
+       165: ldc           #127                // String WebRtcAudioRecordExternal
+       167: iload         6
+       169: invokedynamic #252,  0            // InvokeDynamic #7:makeConcatWithConstants:(I)Ljava/lang/String;
+       174: invokestatic  #157                // Method org/webrtc/Logging.w:(Ljava/lang/String;Ljava/lang/String;)V
+       177: iload         5
+       179: ireturn
+
+  private boolean initAudioRecord();
+    Code:
+         0: aload_0
+         1: getfield      #213                // Field sampleRate:I
+         4: ifeq          14
+         7: aload_0
+         8: getfield      #216                // Field channelCount:I
+        11: ifne          23
+        14: ldc           #127                // String WebRtcAudioRecordExternal
+        16: ldc           #253                // String initAudioRecord called before initRecord!
+        18: invokestatic  #157                // Method org/webrtc/Logging.w:(Ljava/lang/String;Ljava/lang/String;)V
+        21: iconst_0
+        22: ireturn
+        23: aload_0
+        24: getfield      #40                 // Field audioRecordStateLock:Ljava/lang/Object;
+        27: dup
+        28: astore_1
+        29: monitorenter
+        30: aload_0
+        31: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+        34: ifnull        47
+        37: aload_0
+        38: ldc           #255                // String InitAudioRecord called twice without StopRecording.
+        40: invokevirtual #192                // Method reportWebRtcAudioRecordInitError:(Ljava/lang/String;)V
+        43: iconst_0
+        44: aload_1
+        45: monitorexit
+        46: ireturn
+        47: aload_0
+        48: aload_0
+        49: getfield      #216                // Field channelCount:I
+        52: invokevirtual #257                // Method channelCountToConfiguration:(I)I
+        55: istore_2
+        56: aload_0
+        57: getfield      #213                // Field sampleRate:I
+        60: iload_2
+        61: aload_0
+        62: getfield      #98                 // Field audioFormat:I
+        65: invokestatic  #260                // Method android/media/AudioRecord.getMinBufferSize:(III)I
+        68: istore_3
+        69: iload_3
+        70: iconst_m1
+        71: if_icmpeq     80
+        74: iload_3
+        75: bipush        -2
+        77: if_icmpne     94
+        80: aload_0
+        81: iload_3
+        82: invokedynamic #266,  0            // InvokeDynamic #8:makeConcatWithConstants:(I)Ljava/lang/String;
+        87: invokevirtual #192                // Method reportWebRtcAudioRecordInitError:(Ljava/lang/String;)V
+        90: iconst_0
+        91: aload_1
+        92: monitorexit
+        93: ireturn
+        94: ldc           #127                // String WebRtcAudioRecordExternal
+        96: iload_3
+        97: invokedynamic #267,  0            // InvokeDynamic #9:makeConcatWithConstants:(I)Ljava/lang/String;
+       102: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+       105: iconst_2
+       106: iload_3
+       107: imul
+       108: aload_0
+       109: getfield      #199                // Field byteBuffer:Ljava/nio/ByteBuffer;
+       112: invokevirtual #234                // Method java/nio/ByteBuffer.capacity:()I
+       115: invokestatic  #268                // Method java/lang/Math.max:(II)I
+       118: istore        4
+       120: ldc           #127                // String WebRtcAudioRecordExternal
+       122: iload         4
+       124: invokedynamic #273,  0            // InvokeDynamic #10:makeConcatWithConstants:(I)Ljava/lang/String;
+       129: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+       132: getstatic     #274                // Field android/os/Build$VERSION.SDK_INT:I
+       135: bipush        23
+       137: if_icmplt     188
+       140: aload_0
+       141: aload_0
+       142: getfield      #94                 // Field audioSource:I
+       145: aload_0
+       146: getfield      #213                // Field sampleRate:I
+       149: iload_2
+       150: aload_0
+       151: getfield      #98                 // Field audioFormat:I
+       154: iload         4
+       156: invokestatic  #281                // Method createAudioRecordOnMOrHigher:(IIIII)Landroid/media/AudioRecord;
+       159: putfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+       162: aload_0
+       163: getfield      #54                 // Field audioSourceMatchesRecordingSessionRef:Ljava/util/concurrent/atomic/AtomicReference;
+       166: aconst_null
+       167: invokevirtual #285                // Method java/util/concurrent/atomic/AtomicReference.set:(Ljava/lang/Object;)V
+       170: aload_0
+       171: getfield      #289                // Field preferredDevice:Landroid/media/AudioDeviceInfo;
+       174: ifnull        218
+       177: aload_0
+       178: aload_0
+       179: getfield      #289                // Field preferredDevice:Landroid/media/AudioDeviceInfo;
+       182: invokevirtual #293                // Method setPreferredDevice:(Landroid/media/AudioDeviceInfo;)V
+       185: goto          218
+       188: aload_0
+       189: aload_0
+       190: getfield      #94                 // Field audioSource:I
+       193: aload_0
+       194: getfield      #213                // Field sampleRate:I
+       197: iload_2
+       198: aload_0
+       199: getfield      #98                 // Field audioFormat:I
+       202: iload         4
+       204: invokestatic  #297                // Method createAudioRecordOnLowerThanM:(IIIII)Landroid/media/AudioRecord;
+       207: putfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+       210: aload_0
+       211: getfield      #54                 // Field audioSourceMatchesRecordingSessionRef:Ljava/util/concurrent/atomic/AtomicReference;
+       214: aconst_null
+       215: invokevirtual #285                // Method java/util/concurrent/atomic/AtomicReference.set:(Ljava/lang/Object;)V
+       218: goto          240
+       221: astore        5
+       223: aload_0
+       224: aload         5
+       226: invokevirtual #302                // Method java/lang/RuntimeException.getMessage:()Ljava/lang/String;
+       229: invokevirtual #192                // Method reportWebRtcAudioRecordInitError:(Ljava/lang/String;)V
+       232: aload_0
+       233: invokevirtual #307                // Method releaseAudioResources:()V
+       236: iconst_0
+       237: aload_1
+       238: monitorexit
+       239: ireturn
+       240: aload_0
+       241: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+       244: ifnull        258
+       247: aload_0
+       248: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+       251: invokevirtual #310                // Method android/media/AudioRecord.getState:()I
+       254: iconst_1
+       255: if_icmpeq     273
+       258: aload_0
+       259: ldc_w         #313                // String Creation or initialization of audio recorder failed.
+       262: invokevirtual #192                // Method reportWebRtcAudioRecordInitError:(Ljava/lang/String;)V
+       265: aload_0
+       266: invokevirtual #307                // Method releaseAudioResources:()V
+       269: iconst_0
+       270: aload_1
+       271: monitorexit
+       272: ireturn
+       273: aload_0
+       274: getfield      #36                 // Field effects:Lorg/webrtc/audio/WebRtcAudioEffects;
+       277: aload_0
+       278: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+       281: invokevirtual #315                // Method android/media/AudioRecord.getAudioSessionId:()I
+       284: invokevirtual #318                // Method org/webrtc/audio/WebRtcAudioEffects.enable:(I)V
+       287: aload_0
+       288: invokevirtual #322                // Method logMainParameters:()V
+       291: aload_0
+       292: invokevirtual #325                // Method logMainParametersExtended:()V
+       295: aload_1
+       296: monitorexit
+       297: goto          307
+       300: astore        6
+       302: aload_1
+       303: monitorexit
+       304: aload         6
+       306: athrow
+       307: iconst_1
+       308: ireturn
+      Exception table:
+         from    to  target type
+           132   218   221   Class java/lang/IllegalArgumentException
+           132   218   221   Class java/lang/UnsupportedOperationException
+            30    46   300   any
+            47    93   300   any
+            94   239   300   any
+           240   272   300   any
+           273   297   300   any
+           300   304   300   any
+
+  void setPreferredDevice(android.media.AudioDeviceInfo);
+    Code:
+         0: ldc           #127                // String WebRtcAudioRecordExternal
+         2: aload_1
+         3: ifnull        16
+         6: aload_1
+         7: invokevirtual #328                // Method android/media/AudioDeviceInfo.getId:()I
+        10: invokestatic  #333                // Method java/lang/Integer.valueOf:(I)Ljava/lang/Integer;
+        13: goto          17
+        16: aconst_null
+        17: invokedynamic #339,  0            // InvokeDynamic #11:makeConcatWithConstants:(Ljava/lang/Integer;)Ljava/lang/String;
+        22: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+        25: aload_0
+        26: aload_1
+        27: putfield      #289                // Field preferredDevice:Landroid/media/AudioDeviceInfo;
+        30: aload_0
+        31: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+        34: ifnull        56
+        37: aload_0
+        38: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+        41: aload_1
+        42: invokevirtual #342                // Method android/media/AudioRecord.setPreferredDevice:(Landroid/media/AudioDeviceInfo;)Z
+        45: ifne          56
+        48: ldc           #127                // String WebRtcAudioRecordExternal
+        50: ldc_w         #345                // String setPreferredDevice failed
+        53: invokestatic  #347                // Method org/webrtc/Logging.e:(Ljava/lang/String;Ljava/lang/String;)V
+        56: return
+
+  public boolean prewarmRecordingIfNeeded();
+    Code:
+         0: aload_0
+         1: getfield      #350                // Field audioThread:Lorg/webrtc/audio/WebRtcAudioRecord$AudioRecordThread;
+         4: ifnonnull     59
+         7: aload_0
+         8: getfield      #40                 // Field audioRecordStateLock:Ljava/lang/Object;
+        11: dup
+        12: astore_1
+        13: monitorenter
+        14: aload_0
+        15: getfield      #48                 // Field audioThreadStateLock:Ljava/lang/Object;
+        18: dup
+        19: astore_2
+        20: monitorenter
+        21: aload_0
+        22: getfield      #350                // Field audioThread:Lorg/webrtc/audio/WebRtcAudioRecord$AudioRecordThread;
+        25: ifnonnull     37
+        28: aload_0
+        29: invokevirtual #354                // Method startRecordingImpl:()Z
+        32: aload_2
+        33: monitorexit
+        34: aload_1
+        35: monitorexit
+        36: ireturn
+        37: aload_2
+        38: monitorexit
+        39: goto          47
+        42: astore_3
+        43: aload_2
+        44: monitorexit
+        45: aload_3
+        46: athrow
+        47: aload_1
+        48: monitorexit
+        49: goto          59
+        52: astore        4
+        54: aload_1
+        55: monitorexit
+        56: aload         4
+        58: athrow
+        59: iconst_1
+        60: ireturn
+      Exception table:
+         from    to  target type
+            21    34    42   any
+            37    39    42   any
+            42    45    42   any
+            14    36    52   any
+            37    49    52   any
+            52    56    52   any
+
+  public boolean startRecordingIfNeeded();
+    Code:
+         0: aload_0
+         1: getfield      #63                 // Field clientCalledStartRecording:Ljava/util/concurrent/atomic/AtomicBoolean;
+         4: iconst_1
+         5: invokevirtual #357                // Method java/util/concurrent/atomic/AtomicBoolean.set:(Z)V
+         8: aload_0
+         9: getfield      #350                // Field audioThread:Lorg/webrtc/audio/WebRtcAudioRecord$AudioRecordThread;
+        12: ifnonnull     67
+        15: aload_0
+        16: getfield      #40                 // Field audioRecordStateLock:Ljava/lang/Object;
+        19: dup
+        20: astore_1
+        21: monitorenter
+        22: aload_0
+        23: getfield      #48                 // Field audioThreadStateLock:Ljava/lang/Object;
+        26: dup
+        27: astore_2
+        28: monitorenter
+        29: aload_0
+        30: getfield      #350                // Field audioThread:Lorg/webrtc/audio/WebRtcAudioRecord$AudioRecordThread;
+        33: ifnonnull     45
+        36: aload_0
+        37: invokevirtual #354                // Method startRecordingImpl:()Z
+        40: aload_2
+        41: monitorexit
+        42: aload_1
+        43: monitorexit
+        44: ireturn
+        45: aload_2
+        46: monitorexit
+        47: goto          55
+        50: astore_3
+        51: aload_2
+        52: monitorexit
+        53: aload_3
+        54: athrow
+        55: aload_1
+        56: monitorexit
+        57: goto          67
+        60: astore        4
+        62: aload_1
+        63: monitorexit
+        64: aload         4
+        66: athrow
+        67: iconst_1
+        68: ireturn
+      Exception table:
+         from    to  target type
+            29    42    50   any
+            45    47    50   any
+            50    53    50   any
+            22    44    60   any
+            45    57    60   any
+            60    64    60   any
+
+  private boolean startRecording();
+    Code:
+         0: aload_0
+         1: getfield      #70                 // Field nativeCalledStartRecording:Ljava/util/concurrent/atomic/AtomicBoolean;
+         4: iconst_0
+         5: iconst_1
+         6: invokevirtual #186                // Method java/util/concurrent/atomic/AtomicBoolean.compareAndSet:(ZZ)Z
+         9: ifne          23
+        12: new           #203                // class java/lang/IllegalStateException
+        15: dup
+        16: ldc_w         #359                // String startRecording called twice without stopRecording
+        19: invokespecial #207                // Method java/lang/IllegalStateException."<init>":(Ljava/lang/String;)V
+        22: athrow
+        23: aload_0
+        24: getfield      #350                // Field audioThread:Lorg/webrtc/audio/WebRtcAudioRecord$AudioRecordThread;
+        27: ifnonnull     82
+        30: aload_0
+        31: getfield      #40                 // Field audioRecordStateLock:Ljava/lang/Object;
+        34: dup
+        35: astore_1
+        36: monitorenter
+        37: aload_0
+        38: getfield      #48                 // Field audioThreadStateLock:Ljava/lang/Object;
+        41: dup
+        42: astore_2
+        43: monitorenter
+        44: aload_0
+        45: getfield      #350                // Field audioThread:Lorg/webrtc/audio/WebRtcAudioRecord$AudioRecordThread;
+        48: ifnonnull     60
+        51: aload_0
+        52: invokevirtual #354                // Method startRecordingImpl:()Z
+        55: aload_2
+        56: monitorexit
+        57: aload_1
+        58: monitorexit
+        59: ireturn
+        60: aload_2
+        61: monitorexit
+        62: goto          70
+        65: astore_3
+        66: aload_2
+        67: monitorexit
+        68: aload_3
+        69: athrow
+        70: aload_1
+        71: monitorexit
+        72: goto          82
+        75: astore        4
+        77: aload_1
+        78: monitorexit
+        79: aload         4
+        81: athrow
+        82: iconst_1
+        83: ireturn
+      Exception table:
+         from    to  target type
+            44    57    65   any
+            60    62    65   any
+            65    68    65   any
+            37    59    75   any
+            60    72    75   any
+            75    79    75   any
+
+  private boolean startRecordingImpl();
+    Code:
+         0: ldc           #127                // String WebRtcAudioRecordExternal
+         2: ldc_w         #361                // String startRecording
+         5: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+         8: aload_0
+         9: getfield      #40                 // Field audioRecordStateLock:Ljava/lang/Object;
+        12: dup
+        13: astore_1
+        14: monitorenter
+        15: aload_0
+        16: getfield      #48                 // Field audioThreadStateLock:Ljava/lang/Object;
+        19: dup
+        20: astore_2
+        21: monitorenter
+        22: aload_0
+        23: getfield      #350                // Field audioThread:Lorg/webrtc/audio/WebRtcAudioRecord$AudioRecordThread;
+        26: ifnonnull     33
+        29: iconst_1
+        30: goto          34
+        33: iconst_0
+        34: invokestatic  #363                // Method assertTrue:(Z)V
+        37: aload_0
+        38: getfield      #44                 // Field useAudioRecord:Z
+        41: ifeq          128
+        44: aload_0
+        45: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+        48: ifnull        55
+        51: iconst_1
+        52: goto          56
+        55: iconst_0
+        56: invokestatic  #363                // Method assertTrue:(Z)V
+        59: aload_0
+        60: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+        63: invokevirtual #366                // Method android/media/AudioRecord.startRecording:()V
+        66: goto          92
+        69: astore_3
+        70: aload_0
+        71: getstatic     #368                // Field org/webrtc/audio/JavaAudioDeviceModule$AudioRecordStartErrorCode.AUDIO_RECORD_START_EXCEPTION:Lorg/webrtc/audio/JavaAudioDeviceModule$AudioRecordStartErrorCode;
+        74: aload_3
+        75: invokevirtual #374                // Method java/lang/IllegalStateException.getMessage:()Ljava/lang/String;
+        78: invokedynamic #375,  0            // InvokeDynamic #12:makeConcatWithConstants:(Ljava/lang/String;)Ljava/lang/String;
+        83: invokevirtual #376                // Method reportWebRtcAudioRecordStartError:(Lorg/webrtc/audio/JavaAudioDeviceModule$AudioRecordStartErrorCode;Ljava/lang/String;)V
+        86: iconst_0
+        87: aload_2
+        88: monitorexit
+        89: aload_1
+        90: monitorexit
+        91: ireturn
+        92: aload_0
+        93: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+        96: invokevirtual #380                // Method android/media/AudioRecord.getRecordingState:()I
+        99: iconst_3
+       100: if_icmpeq     128
+       103: aload_0
+       104: getstatic     #383                // Field org/webrtc/audio/JavaAudioDeviceModule$AudioRecordStartErrorCode.AUDIO_RECORD_START_STATE_MISMATCH:Lorg/webrtc/audio/JavaAudioDeviceModule$AudioRecordStartErrorCode;
+       107: aload_0
+       108: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+       111: invokevirtual #380                // Method android/media/AudioRecord.getRecordingState:()I
+       114: invokedynamic #386,  0            // InvokeDynamic #13:makeConcatWithConstants:(I)Ljava/lang/String;
+       119: invokevirtual #376                // Method reportWebRtcAudioRecordStartError:(Lorg/webrtc/audio/JavaAudioDeviceModule$AudioRecordStartErrorCode;Ljava/lang/String;)V
+       122: iconst_0
+       123: aload_2
+       124: monitorexit
+       125: aload_1
+       126: monitorexit
+       127: ireturn
+       128: aload_0
+       129: new           #387                // class org/webrtc/audio/WebRtcAudioRecord$AudioRecordThread
+       132: dup
+       133: aload_0
+       134: ldc_w         #389                // String AudioRecordJavaThread
+       137: invokespecial #391                // Method org/webrtc/audio/WebRtcAudioRecord$AudioRecordThread."<init>":(Lorg/webrtc/audio/WebRtcAudioRecord;Ljava/lang/String;)V
+       140: putfield      #350                // Field audioThread:Lorg/webrtc/audio/WebRtcAudioRecord$AudioRecordThread;
+       143: aload_0
+       144: getfield      #350                // Field audioThread:Lorg/webrtc/audio/WebRtcAudioRecord$AudioRecordThread;
+       147: invokevirtual #394                // Method org/webrtc/audio/WebRtcAudioRecord$AudioRecordThread.start:()V
+       150: aload_0
+       151: aload_0
+       152: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+       155: invokevirtual #397                // Method scheduleLogRecordingConfigurationsTask:(Landroid/media/AudioRecord;)V
+       158: iconst_1
+       159: aload_2
+       160: monitorexit
+       161: aload_1
+       162: monitorexit
+       163: ireturn
+       164: astore        4
+       166: aload_2
+       167: monitorexit
+       168: aload         4
+       170: athrow
+       171: astore        5
+       173: aload_1
+       174: monitorexit
+       175: aload         5
+       177: athrow
+      Exception table:
+         from    to  target type
+            59    66    69   Class java/lang/IllegalStateException
+            22    89   164   any
+            92   125   164   any
+           128   161   164   any
+           164   168   164   any
+            15    91   171   any
+            92   127   171   any
+           128   163   171   any
+           164   175   171   any
+
+  public boolean stopRecordingIfNeeded();
+    Code:
+         0: ldc           #127                // String WebRtcAudioRecordExternal
+         2: ldc_w         #401                // String stopRecordingIfNeeded
+         5: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+         8: aload_0
+         9: getfield      #40                 // Field audioRecordStateLock:Ljava/lang/Object;
+        12: dup
+        13: astore_1
+        14: monitorenter
+        15: aload_0
+        16: getfield      #63                 // Field clientCalledStartRecording:Ljava/util/concurrent/atomic/AtomicBoolean;
+        19: iconst_0
+        20: invokevirtual #357                // Method java/util/concurrent/atomic/AtomicBoolean.set:(Z)V
+        23: aload_0
+        24: getfield      #350                // Field audioThread:Lorg/webrtc/audio/WebRtcAudioRecord$AudioRecordThread;
+        27: ifnull        37
+        30: aload_0
+        31: invokevirtual #403                // Method stopRecordingIfNeededImpl:()Z
+        34: aload_1
+        35: monitorexit
+        36: ireturn
+        37: aload_1
+        38: monitorexit
+        39: goto          47
+        42: astore_2
+        43: aload_1
+        44: monitorexit
+        45: aload_2
+        46: athrow
+        47: iconst_1
+        48: ireturn
+      Exception table:
+         from    to  target type
+            15    36    42   any
+            37    39    42   any
+            42    45    42   any
+
+  private boolean stopRecording();
+    Code:
+         0: ldc           #127                // String WebRtcAudioRecordExternal
+         2: ldc_w         #406                // String stopRecording
+         5: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+         8: aload_0
+         9: getfield      #40                 // Field audioRecordStateLock:Ljava/lang/Object;
+        12: dup
+        13: astore_1
+        14: monitorenter
+        15: aload_0
+        16: getfield      #70                 // Field nativeCalledStartRecording:Ljava/util/concurrent/atomic/AtomicBoolean;
+        19: iconst_0
+        20: invokevirtual #357                // Method java/util/concurrent/atomic/AtomicBoolean.set:(Z)V
+        23: aload_0
+        24: getfield      #67                 // Field nativeCalledInitRecording:Ljava/util/concurrent/atomic/AtomicBoolean;
+        27: iconst_0
+        28: invokevirtual #357                // Method java/util/concurrent/atomic/AtomicBoolean.set:(Z)V
+        31: aload_0
+        32: invokevirtual #403                // Method stopRecordingIfNeededImpl:()Z
+        35: aload_1
+        36: monitorexit
+        37: ireturn
+        38: astore_2
+        39: aload_1
+        40: monitorexit
+        41: aload_2
+        42: athrow
+      Exception table:
+         from    to  target type
+            15    37    38   any
+            38    41    38   any
+
+  private boolean stopRecordingIfNeededImpl();
+    Code:
+         0: aload_0
+         1: getfield      #40                 // Field audioRecordStateLock:Ljava/lang/Object;
+         4: dup
+         5: astore_1
+         6: monitorenter
+         7: aload_0
+         8: getfield      #63                 // Field clientCalledStartRecording:Ljava/util/concurrent/atomic/AtomicBoolean;
+        11: invokevirtual #408                // Method java/util/concurrent/atomic/AtomicBoolean.get:()Z
+        14: ifne          27
+        17: aload_0
+        18: getfield      #70                 // Field nativeCalledStartRecording:Ljava/util/concurrent/atomic/AtomicBoolean;
+        21: invokevirtual #408                // Method java/util/concurrent/atomic/AtomicBoolean.get:()Z
+        24: ifeq          31
+        27: iconst_1
+        28: aload_1
+        29: monitorexit
+        30: ireturn
+        31: ldc           #127                // String WebRtcAudioRecordExternal
+        33: ldc_w         #410                // String stopping recording
+        36: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+        39: aload_0
+        40: getfield      #350                // Field audioThread:Lorg/webrtc/audio/WebRtcAudioRecord$AudioRecordThread;
+        43: ifnull        50
+        46: iconst_1
+        47: goto          51
+        50: iconst_0
+        51: invokestatic  #363                // Method assertTrue:(Z)V
+        54: aload_0
+        55: getfield      #412                // Field future:Ljava/util/concurrent/ScheduledFuture;
+        58: ifnull        89
+        61: aload_0
+        62: getfield      #412                // Field future:Ljava/util/concurrent/ScheduledFuture;
+        65: invokeinterface #416,  1          // InterfaceMethod java/util/concurrent/ScheduledFuture.isDone:()Z
+        70: ifne          84
+        73: aload_0
+        74: getfield      #412                // Field future:Ljava/util/concurrent/ScheduledFuture;
+        77: iconst_1
+        78: invokeinterface #421,  2          // InterfaceMethod java/util/concurrent/ScheduledFuture.cancel:(Z)Z
+        83: pop
+        84: aload_0
+        85: aconst_null
+        86: putfield      #412                // Field future:Ljava/util/concurrent/ScheduledFuture;
+        89: aload_0
+        90: getfield      #350                // Field audioThread:Lorg/webrtc/audio/WebRtcAudioRecord$AudioRecordThread;
+        93: invokevirtual #424                // Method org/webrtc/audio/WebRtcAudioRecord$AudioRecordThread.stopThread:()V
+        96: aload_0
+        97: getfield      #350                // Field audioThread:Lorg/webrtc/audio/WebRtcAudioRecord$AudioRecordThread;
+       100: ldc2_w        #427                // long 2000l
+       103: invokestatic  #429                // Method org/webrtc/ThreadUtils.joinUninterruptibly:(Ljava/lang/Thread;J)Z
+       106: ifne          130
+       109: ldc           #127                // String WebRtcAudioRecordExternal
+       111: ldc_w         #435                // String Join of AudioRecordJavaThread timed out
+       114: invokestatic  #347                // Method org/webrtc/Logging.e:(Ljava/lang/String;Ljava/lang/String;)V
+       117: ldc           #127                // String WebRtcAudioRecordExternal
+       119: aload_0
+       120: getfield      #82                 // Field context:Landroid/content/Context;
+       123: aload_0
+       124: getfield      #90                 // Field audioManager:Landroid/media/AudioManager;
+       127: invokestatic  #437                // Method org/webrtc/audio/WebRtcAudioUtils.logAudioState:(Ljava/lang/String;Landroid/content/Context;Landroid/media/AudioManager;)V
+       130: aload_0
+       131: aconst_null
+       132: putfield      #350                // Field audioThread:Lorg/webrtc/audio/WebRtcAudioRecord$AudioRecordThread;
+       135: aload_0
+       136: invokevirtual #307                // Method releaseAudioResources:()V
+       139: iconst_1
+       140: aload_1
+       141: monitorexit
+       142: ireturn
+       143: astore_2
+       144: aload_1
+       145: monitorexit
+       146: aload_2
+       147: athrow
+      Exception table:
+         from    to  target type
+             7    30   143   any
+            31   142   143   any
+           143   146   143   any
+
+  private static android.media.AudioRecord createAudioRecordOnMOrHigher(int, int, int, int, int);
+    Code:
+         0: ldc           #127                // String WebRtcAudioRecordExternal
+         2: ldc_w         #441                // String createAudioRecordOnMOrHigher
+         5: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+         8: new           #442                // class android/media/AudioRecord$Builder
+        11: dup
+        12: invokespecial #444                // Method android/media/AudioRecord$Builder."<init>":()V
+        15: iload_0
+        16: invokevirtual #445                // Method android/media/AudioRecord$Builder.setAudioSource:(I)Landroid/media/AudioRecord$Builder;
+        19: new           #449                // class android/media/AudioFormat$Builder
+        22: dup
+        23: invokespecial #451                // Method android/media/AudioFormat$Builder."<init>":()V
+        26: iload_3
+        27: invokevirtual #452                // Method android/media/AudioFormat$Builder.setEncoding:(I)Landroid/media/AudioFormat$Builder;
+        30: iload_1
+        31: invokevirtual #456                // Method android/media/AudioFormat$Builder.setSampleRate:(I)Landroid/media/AudioFormat$Builder;
+        34: iload_2
+        35: invokevirtual #459                // Method android/media/AudioFormat$Builder.setChannelMask:(I)Landroid/media/AudioFormat$Builder;
+        38: invokevirtual #462                // Method android/media/AudioFormat$Builder.build:()Landroid/media/AudioFormat;
+        41: invokevirtual #466                // Method android/media/AudioRecord$Builder.setAudioFormat:(Landroid/media/AudioFormat;)Landroid/media/AudioRecord$Builder;
+        44: iload         4
+        46: invokevirtual #470                // Method android/media/AudioRecord$Builder.setBufferSizeInBytes:(I)Landroid/media/AudioRecord$Builder;
+        49: invokevirtual #473                // Method android/media/AudioRecord$Builder.build:()Landroid/media/AudioRecord;
+        52: areturn
+
+  private static android.media.AudioRecord createAudioRecordOnLowerThanM(int, int, int, int, int);
+    Code:
+         0: ldc           #127                // String WebRtcAudioRecordExternal
+         2: ldc_w         #476                // String createAudioRecordOnLowerThanM
+         5: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+         8: new           #261                // class android/media/AudioRecord
+        11: dup
+        12: iload_0
+        13: iload_1
+        14: iload_2
+        15: iload_3
+        16: iload         4
+        18: invokespecial #477                // Method android/media/AudioRecord."<init>":(IIIII)V
+        21: areturn
+
+  private void logMainParameters();
+    Code:
+         0: aload_0
+         1: getfield      #40                 // Field audioRecordStateLock:Ljava/lang/Object;
+         4: dup
+         5: astore_1
+         6: monitorenter
+         7: aload_0
+         8: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+        11: ifnull        45
+        14: ldc           #127                // String WebRtcAudioRecordExternal
+        16: aload_0
+        17: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+        20: invokevirtual #315                // Method android/media/AudioRecord.getAudioSessionId:()I
+        23: aload_0
+        24: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+        27: invokevirtual #480                // Method android/media/AudioRecord.getChannelCount:()I
+        30: aload_0
+        31: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+        34: invokevirtual #483                // Method android/media/AudioRecord.getSampleRate:()I
+        37: invokedynamic #485,  0            // InvokeDynamic #14:makeConcatWithConstants:(III)Ljava/lang/String;
+        42: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+        45: aload_1
+        46: monitorexit
+        47: goto          55
+        50: astore_2
+        51: aload_1
+        52: monitorexit
+        53: aload_2
+        54: athrow
+        55: return
+      Exception table:
+         from    to  target type
+             7    47    50   any
+            50    53    50   any
+
+  private void logMainParametersExtended();
+    Code:
+         0: getstatic     #274                // Field android/os/Build$VERSION.SDK_INT:I
+         3: bipush        23
+         5: if_icmplt     49
+         8: aload_0
+         9: getfield      #40                 // Field audioRecordStateLock:Ljava/lang/Object;
+        12: dup
+        13: astore_1
+        14: monitorenter
+        15: aload_0
+        16: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+        19: ifnull        39
+        22: ldc           #127                // String WebRtcAudioRecordExternal
+        24: aload_0
+        25: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+        28: invokevirtual #488                // Method android/media/AudioRecord.getBufferSizeInFrames:()I
+        31: invokedynamic #491,  0            // InvokeDynamic #15:makeConcatWithConstants:(I)Ljava/lang/String;
+        36: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+        39: aload_1
+        40: monitorexit
+        41: goto          49
+        44: astore_2
+        45: aload_1
+        46: monitorexit
+        47: aload_2
+        48: athrow
+        49: return
+      Exception table:
+         from    to  target type
+            15    41    44   any
+            44    47    44   any
+
+  private int logRecordingConfigurations(android.media.AudioRecord, boolean);
+    Code:
+         0: getstatic     #274                // Field android/os/Build$VERSION.SDK_INT:I
+         3: bipush        24
+         5: if_icmpge     18
+         8: ldc           #127                // String WebRtcAudioRecordExternal
+        10: ldc_w         #492                // String AudioManager#getActiveRecordingConfigurations() requires N or higher
+        13: invokestatic  #157                // Method org/webrtc/Logging.w:(Ljava/lang/String;Ljava/lang/String;)V
+        16: iconst_0
+        17: ireturn
+        18: aload_1
+        19: ifnonnull     24
+        22: iconst_0
+        23: ireturn
+        24: aload_0
+        25: getfield      #90                 // Field audioManager:Landroid/media/AudioManager;
+        28: invokevirtual #494                // Method android/media/AudioManager.getActiveRecordingConfigurations:()Ljava/util/List;
+        31: astore_3
+        32: aload_3
+        33: invokeinterface #500,  1          // InterfaceMethod java/util/List.size:()I
+        38: istore        4
+        40: ldc           #127                // String WebRtcAudioRecordExternal
+        42: iload         4
+        44: invokedynamic #505,  0            // InvokeDynamic #16:makeConcatWithConstants:(I)Ljava/lang/String;
+        49: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+        52: iload         4
+        54: ifle          100
+        57: aload_1
+        58: invokevirtual #315                // Method android/media/AudioRecord.getAudioSessionId:()I
+        61: aload_3
+        62: invokestatic  #506                // Method logActiveRecordingConfigs:(ILjava/util/List;)Z
+        65: pop
+        66: iload_2
+        67: ifeq          100
+        70: aload_0
+        71: getfield      #54                 // Field audioSourceMatchesRecordingSessionRef:Ljava/util/concurrent/atomic/AtomicReference;
+        74: aload_1
+        75: invokevirtual #510                // Method android/media/AudioRecord.getAudioSource:()I
+        78: aload_1
+        79: invokevirtual #315                // Method android/media/AudioRecord.getAudioSessionId:()I
+        82: aload_1
+        83: invokevirtual #513                // Method android/media/AudioRecord.getFormat:()Landroid/media/AudioFormat;
+        86: aload_1
+        87: invokevirtual #516                // Method android/media/AudioRecord.getRoutedDevice:()Landroid/media/AudioDeviceInfo;
+        90: aload_3
+        91: invokestatic  #520                // Method verifyAudioConfig:(IILandroid/media/AudioFormat;Landroid/media/AudioDeviceInfo;Ljava/util/List;)Z
+        94: invokestatic  #524                // Method java/lang/Boolean.valueOf:(Z)Ljava/lang/Boolean;
+        97: invokevirtual #285                // Method java/util/concurrent/atomic/AtomicReference.set:(Ljava/lang/Object;)V
+       100: iload         4
+       102: ireturn
+
+  private static void assertTrue(boolean);
+    Code:
+         0: iload_0
+         1: ifne          15
+         4: new           #527                // class java/lang/AssertionError
+         7: dup
+         8: ldc_w         #529                // String Expected condition to be true
+        11: invokespecial #531                // Method java/lang/AssertionError."<init>":(Ljava/lang/Object;)V
+        14: athrow
+        15: return
+
+  private int channelCountToConfiguration(int);
+    Code:
+         0: iload_1
+         1: iconst_1
+         2: if_icmpne     10
+         5: bipush        16
+         7: goto          12
+        10: bipush        12
+        12: ireturn
+
+  private native void nativeCacheDirectBufferAddress(long, java.nio.ByteBuffer);
+
+  private native void nativeDataIsRecorded(long, int, long);
+
+  public void setMicrophoneMute(boolean);
+    Code:
+         0: ldc           #127                // String WebRtcAudioRecordExternal
+         2: iload_1
+         3: invokedynamic #533,  0            // InvokeDynamic #17:makeConcatWithConstants:(Z)Ljava/lang/String;
+         8: invokestatic  #157                // Method org/webrtc/Logging.w:(Ljava/lang/String;Ljava/lang/String;)V
+        11: aload_0
+        12: iload_1
+        13: putfield      #534                // Field microphoneMute:Z
+        16: return
+
+  public boolean setNoiseSuppressorEnabled(boolean);
+    Code:
+         0: invokestatic  #17                 // Method org/webrtc/audio/WebRtcAudioEffects.isNoiseSuppressorSupported:()Z
+         3: ifne          16
+         6: ldc           #127                // String WebRtcAudioRecordExternal
+         8: ldc_w         #537                // String Noise suppressor is not supported.
+        11: invokestatic  #347                // Method org/webrtc/Logging.e:(Ljava/lang/String;Ljava/lang/String;)V
+        14: iconst_0
+        15: ireturn
+        16: ldc           #127                // String WebRtcAudioRecordExternal
+        18: iload_1
+        19: invokedynamic #539,  0            // InvokeDynamic #18:makeConcatWithConstants:(Z)Ljava/lang/String;
+        24: invokestatic  #157                // Method org/webrtc/Logging.w:(Ljava/lang/String;Ljava/lang/String;)V
+        27: aload_0
+        28: getfield      #36                 // Field effects:Lorg/webrtc/audio/WebRtcAudioEffects;
+        31: iload_1
+        32: invokevirtual #540                // Method org/webrtc/audio/WebRtcAudioEffects.toggleNS:(Z)Z
+        35: ireturn
+
+  private void releaseAudioResources();
+    Code:
+         0: ldc           #127                // String WebRtcAudioRecordExternal
+         2: ldc_w         #543                // String releaseAudioResources
+         5: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+         8: aload_0
+         9: getfield      #40                 // Field audioRecordStateLock:Ljava/lang/Object;
+        12: dup
+        13: astore_1
+        14: monitorenter
+        15: aload_0
+        16: getfield      #36                 // Field effects:Lorg/webrtc/audio/WebRtcAudioEffects;
+        19: invokevirtual #544                // Method org/webrtc/audio/WebRtcAudioEffects.release:()V
+        22: aload_0
+        23: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+        26: ifnull        41
+        29: aload_0
+        30: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+        33: invokevirtual #547                // Method android/media/AudioRecord.release:()V
+        36: aload_0
+        37: aconst_null
+        38: putfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+        41: aload_1
+        42: monitorexit
+        43: goto          51
+        46: astore_2
+        47: aload_1
+        48: monitorexit
+        49: aload_2
+        50: athrow
+        51: aload_0
+        52: getfield      #54                 // Field audioSourceMatchesRecordingSessionRef:Ljava/util/concurrent/atomic/AtomicReference;
+        55: aconst_null
+        56: invokevirtual #285                // Method java/util/concurrent/atomic/AtomicReference.set:(Ljava/lang/Object;)V
+        59: return
+      Exception table:
+         from    to  target type
+            15    43    46   any
+            46    49    46   any
+
+  private void reportWebRtcAudioRecordInitError(java.lang.String);
+    Code:
+         0: ldc           #127                // String WebRtcAudioRecordExternal
+         2: aload_1
+         3: invokedynamic #548,  0            // InvokeDynamic #19:makeConcatWithConstants:(Ljava/lang/String;)Ljava/lang/String;
+         8: invokestatic  #347                // Method org/webrtc/Logging.e:(Ljava/lang/String;Ljava/lang/String;)V
+        11: ldc           #127                // String WebRtcAudioRecordExternal
+        13: aload_0
+        14: getfield      #82                 // Field context:Landroid/content/Context;
+        17: aload_0
+        18: getfield      #90                 // Field audioManager:Landroid/media/AudioManager;
+        21: invokestatic  #437                // Method org/webrtc/audio/WebRtcAudioUtils.logAudioState:(Ljava/lang/String;Landroid/content/Context;Landroid/media/AudioManager;)V
+        24: aload_0
+        25: aload_0
+        26: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+        29: iconst_0
+        30: invokevirtual #248                // Method logRecordingConfigurations:(Landroid/media/AudioRecord;Z)I
+        33: pop
+        34: aload_0
+        35: getfield      #101                // Field errorCallback:Lorg/webrtc/audio/JavaAudioDeviceModule$AudioRecordErrorCallback;
+        38: ifnull        51
+        41: aload_0
+        42: getfield      #101                // Field errorCallback:Lorg/webrtc/audio/JavaAudioDeviceModule$AudioRecordErrorCallback;
+        45: aload_1
+        46: invokeinterface #549,  2          // InterfaceMethod org/webrtc/audio/JavaAudioDeviceModule$AudioRecordErrorCallback.onWebRtcAudioRecordInitError:(Ljava/lang/String;)V
+        51: return
+
+  private void reportWebRtcAudioRecordStartError(org.webrtc.audio.JavaAudioDeviceModule$AudioRecordStartErrorCode, java.lang.String);
+    Code:
+         0: ldc           #127                // String WebRtcAudioRecordExternal
+         2: aload_1
+         3: invokestatic  #554                // Method java/lang/String.valueOf:(Ljava/lang/Object;)Ljava/lang/String;
+         6: aload_2
+         7: invokedynamic #559,  0            // InvokeDynamic #20:makeConcatWithConstants:(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
+        12: invokestatic  #347                // Method org/webrtc/Logging.e:(Ljava/lang/String;Ljava/lang/String;)V
+        15: ldc           #127                // String WebRtcAudioRecordExternal
+        17: aload_0
+        18: getfield      #82                 // Field context:Landroid/content/Context;
+        21: aload_0
+        22: getfield      #90                 // Field audioManager:Landroid/media/AudioManager;
+        25: invokestatic  #437                // Method org/webrtc/audio/WebRtcAudioUtils.logAudioState:(Ljava/lang/String;Landroid/content/Context;Landroid/media/AudioManager;)V
+        28: aload_0
+        29: aload_0
+        30: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+        33: iconst_0
+        34: invokevirtual #248                // Method logRecordingConfigurations:(Landroid/media/AudioRecord;Z)I
+        37: pop
+        38: aload_0
+        39: getfield      #101                // Field errorCallback:Lorg/webrtc/audio/JavaAudioDeviceModule$AudioRecordErrorCallback;
+        42: ifnull        56
+        45: aload_0
+        46: getfield      #101                // Field errorCallback:Lorg/webrtc/audio/JavaAudioDeviceModule$AudioRecordErrorCallback;
+        49: aload_1
+        50: aload_2
+        51: invokeinterface #562,  3          // InterfaceMethod org/webrtc/audio/JavaAudioDeviceModule$AudioRecordErrorCallback.onWebRtcAudioRecordStartError:(Lorg/webrtc/audio/JavaAudioDeviceModule$AudioRecordStartErrorCode;Ljava/lang/String;)V
+        56: return
+
+  private void reportWebRtcAudioRecordError(java.lang.String);
+    Code:
+         0: ldc           #127                // String WebRtcAudioRecordExternal
+         2: aload_1
+         3: invokedynamic #565,  0            // InvokeDynamic #21:makeConcatWithConstants:(Ljava/lang/String;)Ljava/lang/String;
+         8: invokestatic  #347                // Method org/webrtc/Logging.e:(Ljava/lang/String;Ljava/lang/String;)V
+        11: ldc           #127                // String WebRtcAudioRecordExternal
+        13: aload_0
+        14: getfield      #82                 // Field context:Landroid/content/Context;
+        17: aload_0
+        18: getfield      #90                 // Field audioManager:Landroid/media/AudioManager;
+        21: invokestatic  #437                // Method org/webrtc/audio/WebRtcAudioUtils.logAudioState:(Ljava/lang/String;Landroid/content/Context;Landroid/media/AudioManager;)V
+        24: aload_0
+        25: getfield      #101                // Field errorCallback:Lorg/webrtc/audio/JavaAudioDeviceModule$AudioRecordErrorCallback;
+        28: ifnull        41
+        31: aload_0
+        32: getfield      #101                // Field errorCallback:Lorg/webrtc/audio/JavaAudioDeviceModule$AudioRecordErrorCallback;
+        35: aload_1
+        36: invokeinterface #566,  2          // InterfaceMethod org/webrtc/audio/JavaAudioDeviceModule$AudioRecordErrorCallback.onWebRtcAudioRecordError:(Ljava/lang/String;)V
+        41: return
+
+  private void doAudioRecordStateCallback(int);
+    Code:
+         0: ldc           #127                // String WebRtcAudioRecordExternal
+         2: iload_1
+         3: invokestatic  #569                // Method audioStateToString:(I)Ljava/lang/String;
+         6: invokedynamic #572,  0            // InvokeDynamic #22:makeConcatWithConstants:(Ljava/lang/String;)Ljava/lang/String;
+        11: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+        14: aload_0
+        15: getfield      #105                // Field stateCallback:Lorg/webrtc/audio/JavaAudioDeviceModule$AudioRecordStateCallback;
+        18: ifnull        62
+        21: iload_1
+        22: ifne          37
+        25: aload_0
+        26: getfield      #105                // Field stateCallback:Lorg/webrtc/audio/JavaAudioDeviceModule$AudioRecordStateCallback;
+        29: invokeinterface #573,  1          // InterfaceMethod org/webrtc/audio/JavaAudioDeviceModule$AudioRecordStateCallback.onWebRtcAudioRecordStart:()V
+        34: goto          62
+        37: iload_1
+        38: iconst_1
+        39: if_icmpne     54
+        42: aload_0
+        43: getfield      #105                // Field stateCallback:Lorg/webrtc/audio/JavaAudioDeviceModule$AudioRecordStateCallback;
+        46: invokeinterface #578,  1          // InterfaceMethod org/webrtc/audio/JavaAudioDeviceModule$AudioRecordStateCallback.onWebRtcAudioRecordStop:()V
+        51: goto          62
+        54: ldc           #127                // String WebRtcAudioRecordExternal
+        56: ldc_w         #581                // String Invalid audio state
+        59: invokestatic  #347                // Method org/webrtc/Logging.e:(Ljava/lang/String;Ljava/lang/String;)V
+        62: return
+
+  private static int getBytesPerSample(int);
+    Code:
+         0: iload_0
+         1: tableswitch   { // 0 to 13
+                       0: 78
+                       1: 74
+                       2: 74
+                       3: 72
+                       4: 76
+                       5: 78
+                       6: 78
+                       7: 78
+                       8: 78
+                       9: 78
+                      10: 78
+                      11: 78
+                      12: 78
+                      13: 74
+                 default: 78
+            }
+        72: iconst_1
+        73: ireturn
+        74: iconst_2
+        75: ireturn
+        76: iconst_4
+        77: ireturn
+        78: new           #73                 // class java/lang/IllegalArgumentException
+        81: dup
+        82: iload_0
+        83: invokedynamic #583,  0            // InvokeDynamic #23:makeConcatWithConstants:(I)Ljava/lang/String;
+        88: invokespecial #77                 // Method java/lang/IllegalArgumentException."<init>":(Ljava/lang/String;)V
+        91: athrow
+
+  private static int getBytesPerFrame(int, int);
+    Code:
+         0: iload_0
+         1: iload_1
+         2: invokestatic  #584                // Method getBytesPerSample:(I)I
+         5: imul
+         6: ireturn
+
+  private static int getFramesPerBuffer(int);
+    Code:
+         0: iload_0
+         1: bipush        100
+         3: idiv
+         4: ireturn
+
+  private void scheduleLogRecordingConfigurationsTask(android.media.AudioRecord);
+    Code:
+         0: ldc           #127                // String WebRtcAudioRecordExternal
+         2: ldc_w         #587                // String scheduleLogRecordingConfigurationsTask
+         5: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+         8: getstatic     #274                // Field android/os/Build$VERSION.SDK_INT:I
+        11: bipush        24
+        13: if_icmpge     17
+        16: return
+        17: aload_0
+        18: aload_1
+        19: invokedynamic #588,  0            // InvokeDynamic #24:call:(Lorg/webrtc/audio/WebRtcAudioRecord;Landroid/media/AudioRecord;)Ljava/util/concurrent/Callable;
+        24: astore_2
+        25: aload_0
+        26: getfield      #412                // Field future:Ljava/util/concurrent/ScheduledFuture;
+        29: ifnull        55
+        32: aload_0
+        33: getfield      #412                // Field future:Ljava/util/concurrent/ScheduledFuture;
+        36: invokeinterface #416,  1          // InterfaceMethod java/util/concurrent/ScheduledFuture.isDone:()Z
+        41: ifne          55
+        44: aload_0
+        45: getfield      #412                // Field future:Ljava/util/concurrent/ScheduledFuture;
+        48: iconst_1
+        49: invokeinterface #421,  2          // InterfaceMethod java/util/concurrent/ScheduledFuture.cancel:(Z)Z
+        54: pop
+        55: aload_0
+        56: aload_0
+        57: getfield      #86                 // Field executor:Ljava/util/concurrent/ScheduledExecutorService;
+        60: aload_2
+        61: ldc2_w        #592                // long 100l
+        64: getstatic     #594                // Field java/util/concurrent/TimeUnit.MILLISECONDS:Ljava/util/concurrent/TimeUnit;
+        67: invokeinterface #600,  5          // InterfaceMethod java/util/concurrent/ScheduledExecutorService.schedule:(Ljava/util/concurrent/Callable;JLjava/util/concurrent/TimeUnit;)Ljava/util/concurrent/ScheduledFuture;
+        72: putfield      #412                // Field future:Ljava/util/concurrent/ScheduledFuture;
+        75: return
+
+  private static boolean logActiveRecordingConfigs(int, java.util.List<android.media.AudioRecordingConfiguration>);
+    Code:
+         0: aload_1
+         1: invokeinterface #606,  1          // InterfaceMethod java/util/List.isEmpty:()Z
+         6: ifne          13
+         9: iconst_1
+        10: goto          14
+        13: iconst_0
+        14: invokestatic  #363                // Method assertTrue:(Z)V
+        17: aload_1
+        18: invokeinterface #609,  1          // InterfaceMethod java/util/List.iterator:()Ljava/util/Iterator;
+        23: astore_2
+        24: ldc           #127                // String WebRtcAudioRecordExternal
+        26: ldc_w         #613                // String AudioRecordingConfigurations:
+        29: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+        32: aload_2
+        33: invokeinterface #615,  1          // InterfaceMethod java/util/Iterator.hasNext:()Z
+        38: ifeq          384
+        41: aload_2
+        42: invokeinterface #620,  1          // InterfaceMethod java/util/Iterator.next:()Ljava/lang/Object;
+        47: checkcast     #623                // class android/media/AudioRecordingConfiguration
+        50: astore_3
+        51: new           #625                // class java/lang/StringBuilder
+        54: dup
+        55: invokespecial #627                // Method java/lang/StringBuilder."<init>":()V
+        58: astore        4
+        60: aload_3
+        61: invokevirtual #628                // Method android/media/AudioRecordingConfiguration.getClientAudioSource:()I
+        64: istore        5
+        66: aload         4
+        68: ldc_w         #631                // String   client audio source=
+        71: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+        74: iload         5
+        76: invokestatic  #637                // Method org/webrtc/audio/WebRtcAudioUtils.audioSourceToString:(I)Ljava/lang/String;
+        79: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+        82: ldc_w         #640                // String , client session id=
+        85: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+        88: aload_3
+        89: invokevirtual #642                // Method android/media/AudioRecordingConfiguration.getClientAudioSessionId:()I
+        92: invokevirtual #645                // Method java/lang/StringBuilder.append:(I)Ljava/lang/StringBuilder;
+        95: ldc_w         #648                // String  (
+        98: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       101: iload_0
+       102: invokevirtual #645                // Method java/lang/StringBuilder.append:(I)Ljava/lang/StringBuilder;
+       105: ldc_w         #650                // String )
+       108: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       111: ldc_w         #652                // String \n
+       114: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       117: pop
+       118: aload_3
+       119: invokevirtual #654                // Method android/media/AudioRecordingConfiguration.getFormat:()Landroid/media/AudioFormat;
+       122: astore        6
+       124: aload         4
+       126: ldc_w         #655                // String   Device AudioFormat:
+       129: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       132: ldc_w         #657                // String channel count=
+       135: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       138: aload         6
+       140: invokevirtual #659                // Method android/media/AudioFormat.getChannelCount:()I
+       143: invokevirtual #645                // Method java/lang/StringBuilder.append:(I)Ljava/lang/StringBuilder;
+       146: ldc_w         #660                // String , channel index mask=
+       149: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       152: aload         6
+       154: invokevirtual #662                // Method android/media/AudioFormat.getChannelIndexMask:()I
+       157: invokevirtual #645                // Method java/lang/StringBuilder.append:(I)Ljava/lang/StringBuilder;
+       160: ldc_w         #665                // String , channel mask=
+       163: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       166: aload         6
+       168: invokevirtual #667                // Method android/media/AudioFormat.getChannelMask:()I
+       171: invokestatic  #670                // Method org/webrtc/audio/WebRtcAudioUtils.channelMaskToString:(I)Ljava/lang/String;
+       174: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       177: ldc_w         #673                // String , encoding=
+       180: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       183: aload         6
+       185: invokevirtual #675                // Method android/media/AudioFormat.getEncoding:()I
+       188: invokestatic  #678                // Method org/webrtc/audio/WebRtcAudioUtils.audioEncodingToString:(I)Ljava/lang/String;
+       191: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       194: ldc_w         #681                // String , sample rate=
+       197: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       200: aload         6
+       202: invokevirtual #683                // Method android/media/AudioFormat.getSampleRate:()I
+       205: invokevirtual #645                // Method java/lang/StringBuilder.append:(I)Ljava/lang/StringBuilder;
+       208: ldc_w         #652                // String \n
+       211: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       214: pop
+       215: aload_3
+       216: invokevirtual #684                // Method android/media/AudioRecordingConfiguration.getClientFormat:()Landroid/media/AudioFormat;
+       219: astore        6
+       221: aload         4
+       223: ldc_w         #687                // String   Client AudioFormat:
+       226: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       229: ldc_w         #657                // String channel count=
+       232: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       235: aload         6
+       237: invokevirtual #659                // Method android/media/AudioFormat.getChannelCount:()I
+       240: invokevirtual #645                // Method java/lang/StringBuilder.append:(I)Ljava/lang/StringBuilder;
+       243: ldc_w         #660                // String , channel index mask=
+       246: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       249: aload         6
+       251: invokevirtual #662                // Method android/media/AudioFormat.getChannelIndexMask:()I
+       254: invokevirtual #645                // Method java/lang/StringBuilder.append:(I)Ljava/lang/StringBuilder;
+       257: ldc_w         #665                // String , channel mask=
+       260: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       263: aload         6
+       265: invokevirtual #667                // Method android/media/AudioFormat.getChannelMask:()I
+       268: invokestatic  #670                // Method org/webrtc/audio/WebRtcAudioUtils.channelMaskToString:(I)Ljava/lang/String;
+       271: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       274: ldc_w         #673                // String , encoding=
+       277: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       280: aload         6
+       282: invokevirtual #675                // Method android/media/AudioFormat.getEncoding:()I
+       285: invokestatic  #678                // Method org/webrtc/audio/WebRtcAudioUtils.audioEncodingToString:(I)Ljava/lang/String;
+       288: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       291: ldc_w         #681                // String , sample rate=
+       294: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       297: aload         6
+       299: invokevirtual #683                // Method android/media/AudioFormat.getSampleRate:()I
+       302: invokevirtual #645                // Method java/lang/StringBuilder.append:(I)Ljava/lang/StringBuilder;
+       305: ldc_w         #652                // String \n
+       308: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       311: pop
+       312: aload_3
+       313: invokevirtual #689                // Method android/media/AudioRecordingConfiguration.getAudioDevice:()Landroid/media/AudioDeviceInfo;
+       316: astore        7
+       318: aload         7
+       320: ifnull        371
+       323: aload         7
+       325: invokevirtual #692                // Method android/media/AudioDeviceInfo.isSource:()Z
+       328: invokestatic  #363                // Method assertTrue:(Z)V
+       331: aload         4
+       333: ldc_w         #695                // String   AudioDevice:
+       336: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       339: ldc_w         #697                // String type=
+       342: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       345: aload         7
+       347: invokevirtual #699                // Method android/media/AudioDeviceInfo.getType:()I
+       350: invokestatic  #702                // Method org/webrtc/audio/WebRtcAudioUtils.deviceTypeToString:(I)Ljava/lang/String;
+       353: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       356: ldc_w         #705                // String , id=
+       359: invokevirtual #633                // Method java/lang/StringBuilder.append:(Ljava/lang/String;)Ljava/lang/StringBuilder;
+       362: aload         7
+       364: invokevirtual #328                // Method android/media/AudioDeviceInfo.getId:()I
+       367: invokevirtual #645                // Method java/lang/StringBuilder.append:(I)Ljava/lang/StringBuilder;
+       370: pop
+       371: ldc           #127                // String WebRtcAudioRecordExternal
+       373: aload         4
+       375: invokevirtual #707                // Method java/lang/StringBuilder.toString:()Ljava/lang/String;
+       378: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+       381: goto          32
+       384: iconst_1
+       385: ireturn
+
+  private static boolean verifyAudioConfig(int, int, android.media.AudioFormat, android.media.AudioDeviceInfo, java.util.List<android.media.AudioRecordingConfiguration>);
+    Code:
+         0: aload         4
+         2: invokeinterface #606,  1          // InterfaceMethod java/util/List.isEmpty:()Z
+         7: ifne          14
+        10: iconst_1
+        11: goto          15
+        14: iconst_0
+        15: invokestatic  #363                // Method assertTrue:(Z)V
+        18: aload         4
+        20: invokeinterface #609,  1          // InterfaceMethod java/util/List.iterator:()Ljava/util/Iterator;
+        25: astore        5
+        27: aload         5
+        29: invokeinterface #615,  1          // InterfaceMethod java/util/Iterator.hasNext:()Z
+        34: ifeq          208
+        37: aload         5
+        39: invokeinterface #620,  1          // InterfaceMethod java/util/Iterator.next:()Ljava/lang/Object;
+        44: checkcast     #623                // class android/media/AudioRecordingConfiguration
+        47: astore        6
+        49: aload         6
+        51: invokevirtual #689                // Method android/media/AudioRecordingConfiguration.getAudioDevice:()Landroid/media/AudioDeviceInfo;
+        54: astore        7
+        56: aload         7
+        58: ifnonnull     64
+        61: goto          27
+        64: aload         6
+        66: invokevirtual #628                // Method android/media/AudioRecordingConfiguration.getClientAudioSource:()I
+        69: iload_0
+        70: if_icmpne     205
+        73: aload         6
+        75: invokevirtual #642                // Method android/media/AudioRecordingConfiguration.getClientAudioSessionId:()I
+        78: iload_1
+        79: if_icmpne     205
+        82: aload         6
+        84: invokevirtual #684                // Method android/media/AudioRecordingConfiguration.getClientFormat:()Landroid/media/AudioFormat;
+        87: invokevirtual #675                // Method android/media/AudioFormat.getEncoding:()I
+        90: aload_2
+        91: invokevirtual #675                // Method android/media/AudioFormat.getEncoding:()I
+        94: if_icmpne     205
+        97: aload         6
+        99: invokevirtual #684                // Method android/media/AudioRecordingConfiguration.getClientFormat:()Landroid/media/AudioFormat;
+       102: invokevirtual #683                // Method android/media/AudioFormat.getSampleRate:()I
+       105: aload_2
+       106: invokevirtual #683                // Method android/media/AudioFormat.getSampleRate:()I
+       109: if_icmpne     205
+       112: aload         6
+       114: invokevirtual #684                // Method android/media/AudioRecordingConfiguration.getClientFormat:()Landroid/media/AudioFormat;
+       117: invokevirtual #667                // Method android/media/AudioFormat.getChannelMask:()I
+       120: aload_2
+       121: invokevirtual #667                // Method android/media/AudioFormat.getChannelMask:()I
+       124: if_icmpne     205
+       127: aload         6
+       129: invokevirtual #684                // Method android/media/AudioRecordingConfiguration.getClientFormat:()Landroid/media/AudioFormat;
+       132: invokevirtual #662                // Method android/media/AudioFormat.getChannelIndexMask:()I
+       135: aload_2
+       136: invokevirtual #662                // Method android/media/AudioFormat.getChannelIndexMask:()I
+       139: if_icmpne     205
+       142: aload         6
+       144: invokevirtual #654                // Method android/media/AudioRecordingConfiguration.getFormat:()Landroid/media/AudioFormat;
+       147: invokevirtual #675                // Method android/media/AudioFormat.getEncoding:()I
+       150: ifeq          205
+       153: aload         6
+       155: invokevirtual #654                // Method android/media/AudioRecordingConfiguration.getFormat:()Landroid/media/AudioFormat;
+       158: invokevirtual #683                // Method android/media/AudioFormat.getSampleRate:()I
+       161: ifle          205
+       164: aload         6
+       166: invokevirtual #654                // Method android/media/AudioRecordingConfiguration.getFormat:()Landroid/media/AudioFormat;
+       169: invokevirtual #667                // Method android/media/AudioFormat.getChannelMask:()I
+       172: ifne          186
+       175: aload         6
+       177: invokevirtual #654                // Method android/media/AudioRecordingConfiguration.getFormat:()Landroid/media/AudioFormat;
+       180: invokevirtual #662                // Method android/media/AudioFormat.getChannelIndexMask:()I
+       183: ifeq          205
+       186: aload         7
+       188: aload_3
+       189: invokestatic  #710                // Method checkDeviceMatch:(Landroid/media/AudioDeviceInfo;Landroid/media/AudioDeviceInfo;)Z
+       192: ifeq          205
+       195: ldc           #127                // String WebRtcAudioRecordExternal
+       197: ldc_w         #714                // String verifyAudioConfig: PASS
+       200: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+       203: iconst_1
+       204: ireturn
+       205: goto          27
+       208: ldc           #127                // String WebRtcAudioRecordExternal
+       210: ldc_w         #716                // String verifyAudioConfig: FAILED
+       213: invokestatic  #347                // Method org/webrtc/Logging.e:(Ljava/lang/String;Ljava/lang/String;)V
+       216: iconst_0
+       217: ireturn
+
+  private static boolean checkDeviceMatch(android.media.AudioDeviceInfo, android.media.AudioDeviceInfo);
+    Code:
+         0: aload_0
+         1: invokevirtual #328                // Method android/media/AudioDeviceInfo.getId:()I
+         4: aload_1
+         5: invokevirtual #328                // Method android/media/AudioDeviceInfo.getId:()I
+         8: if_icmpne     26
+        11: aload_0
+        12: invokevirtual #699                // Method android/media/AudioDeviceInfo.getType:()I
+        15: aload_1
+        16: invokevirtual #699                // Method android/media/AudioDeviceInfo.getType:()I
+        19: if_icmpne     26
+        22: iconst_1
+        23: goto          27
+        26: iconst_0
+        27: ireturn
+
+  private static java.lang.String audioStateToString(int);
+    Code:
+         0: iload_0
+         1: lookupswitch  { // 2
+                       0: 28
+                       1: 32
+                 default: 36
+            }
+        28: ldc_w         #718                // String START
+        31: areturn
+        32: ldc_w         #720                // String STOP
+        35: areturn
+        36: ldc_w         #722                // String INVALID
+        39: areturn
+
+  static java.util.concurrent.ScheduledExecutorService newDefaultScheduler();
+    Code:
+         0: new           #724                // class java/util/concurrent/atomic/AtomicInteger
+         3: dup
+         4: iconst_0
+         5: invokespecial #726                // Method java/util/concurrent/atomic/AtomicInteger."<init>":(I)V
+         8: astore_0
+         9: iconst_0
+        10: new           #728                // class org/webrtc/audio/WebRtcAudioRecord$1
+        13: dup
+        14: aload_0
+        15: invokespecial #730                // Method org/webrtc/audio/WebRtcAudioRecord$1."<init>":(Ljava/util/concurrent/atomic/AtomicInteger;)V
+        18: invokestatic  #733                // Method java/util/concurrent/Executors.newScheduledThreadPool:(ILjava/util/concurrent/ThreadFactory;)Ljava/util/concurrent/ScheduledExecutorService;
+        21: areturn
+
+  private java.lang.String lambda$scheduleLogRecordingConfigurationsTask$0(android.media.AudioRecord) throws java.lang.Exception;
+    Code:
+         0: aload_0
+         1: getfield      #175                // Field audioRecord:Landroid/media/AudioRecord;
+         4: aload_1
+         5: if_acmpne     18
+         8: aload_0
+         9: aload_1
+        10: iconst_1
+        11: invokevirtual #248                // Method logRecordingConfigurations:(Landroid/media/AudioRecord;Z)I
+        14: pop
+        15: goto          26
+        18: ldc           #127                // String WebRtcAudioRecordExternal
+        20: ldc_w         #739                // String audio record has changed
+        23: invokestatic  #139                // Method org/webrtc/Logging.d:(Ljava/lang/String;Ljava/lang/String;)V
+        26: ldc_w         #741                // String Scheduled task is done
+        29: areturn
+
+  static {};
+    Code:
+         0: new           #724                // class java/util/concurrent/atomic/AtomicInteger
+         3: dup
+         4: iconst_0
+         5: invokespecial #726                // Method java/util/concurrent/atomic/AtomicInteger."<init>":(I)V
+         8: putstatic     #743                // Field nextSchedulerId:Ljava/util/concurrent/atomic/AtomicInteger;
+        11: return
+}

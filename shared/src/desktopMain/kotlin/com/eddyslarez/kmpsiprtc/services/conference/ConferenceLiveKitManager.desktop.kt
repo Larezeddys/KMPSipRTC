@@ -49,6 +49,9 @@ actual class ConferenceLiveKitManager actual constructor() {
     private var subscriberReady = false
     private val pendingOffers = mutableListOf<String>()
     private var selectedScreenShareSourceId: String? = null
+    private var selectedCameraId: String? = null
+    private var selectedMicrophoneId: String? = null
+    private var selectedSpeakerId: String? = null
 
     // Estado interno
     private val _participants = MutableStateFlow<List<LkParticipant>>(emptyList())
@@ -100,10 +103,12 @@ actual class ConferenceLiveKitManager actual constructor() {
                 }
             }
 
-            _connectionState.value = LkConnectionState.CONNECTED
+            // NO marcar CONNECTED aquí — solo el handshake de signaling terminó.
+            // El estado pasa a CONNECTED cuando el publisher PeerConnection llegue a
+            // WebRtcConnectionState.CONNECTED (ver listener en setupPublisher).
             localIdentity = joinResponse?.participantIdentity ?: participantName
             if (localName.isEmpty()) localName = joinResponse?.participantName ?: participantName
-            log.d(tag = TAG) { "Conectado a LiveKit Desktop. Identity: $localIdentity, name: $localName" }
+            log.d(tag = TAG) { "Signaling listo (Identity: $localIdentity, name: $localName). Esperando publisher RTC..." }
 
             // Cargar participantes que ya estaban en la sala
             joinResponse?.otherParticipants?.forEach { info ->
@@ -144,8 +149,9 @@ actual class ConferenceLiveKitManager actual constructor() {
         _videoTracks.value = emptyList()
         _chatMessages.value = emptyList()
         _mediaState.value = LkMediaState()
-        raisedHands.clear()
-        localHandRaised = false
+        // cleanup() ya resetea raisedHands, joinResponse, subscriberReady, pendingOffers, etc.
+        // Conservamos selectedCameraId / selectedMicrophoneId / selectedSpeakerId /
+        // selectedScreenShareSourceId para que la próxima conferencia respete las prefs.
     }
 
     actual suspend fun setMicrophoneEnabled(enabled: Boolean) {
@@ -162,12 +168,24 @@ actual class ConferenceLiveKitManager actual constructor() {
         }
 
         if (enabled) {
-            // Agregar video track y publicar
-            val videoTrack = pub.addLocalVideoTrack()
-            if (videoTrack == null) {
-                log.w(tag = TAG) { "No se pudo activar la cámara" }
+            // Resolver dispositivo de cámara: el persistido, si existe; si no, la primera.
+            val availableDevices = try { pub.enumerateVideoDevices() } catch (_: Exception) { emptyList() }
+            val targetDevice = selectedCameraId
+                ?.let { id -> availableDevices.firstOrNull { it.name == id } }
+                ?: availableDevices.firstOrNull()
+            if (targetDevice == null && availableDevices.isEmpty()) {
+                log.w(tag = TAG) { "No hay cámaras disponibles en el sistema" }
                 return
             }
+            log.d(tag = TAG) { "Activando cámara: ${targetDevice?.name ?: "(default)"}" }
+
+            // Agregar video track y publicar
+            val videoTrack = if (targetDevice != null) pub.addLocalVideoTrack(targetDevice) else pub.addLocalVideoTrack()
+            if (videoTrack == null) {
+                log.w(tag = TAG) { "No se pudo activar la cámara (addLocalVideoTrack devolvió null)" }
+                return
+            }
+            selectedCameraId = targetDevice?.name ?: selectedCameraId
 
             // Notificar a LiveKit que vamos a publicar un video track
             val cid = "video-${currentTimeMs()}"
@@ -219,9 +237,21 @@ actual class ConferenceLiveKitManager actual constructor() {
         }
 
         if (enabled) {
-            val screenTrack = pub.getLocalScreenShareTrack() ?: pub.addLocalScreenShareTrack(selectedScreenShareSourceId)
+            // Si no hay fuente persistida, intentar usar la primera disponible.
+            val sourceId = selectedScreenShareSourceId ?: run {
+                try {
+                    val sources = pub.enumerateScreenShareSources()
+                    sources.firstOrNull()?.first?.also { selectedScreenShareSourceId = it }
+                } catch (e: Exception) {
+                    log.w(tag = TAG) { "Error enumerando screen sources: ${e.message}" }
+                    null
+                }
+            }
+            log.d(tag = TAG) { "Activando screen share: source=${sourceId ?: "(default)"}" }
+
+            val screenTrack = pub.getLocalScreenShareTrack() ?: pub.addLocalScreenShareTrack(sourceId)
             if (screenTrack == null) {
-                log.w(tag = TAG) { "No se pudo activar screen share Desktop" }
+                log.w(tag = TAG) { "No se pudo activar screen share Desktop (addLocalScreenShareTrack devolvió null)" }
                 _mediaState.value = _mediaState.value.copy(screenShareEnabled = false)
                 rebuildParticipantList()
                 return
@@ -278,11 +308,35 @@ actual class ConferenceLiveKitManager actual constructor() {
         val webRtc = publisherWebRtc ?: DesktopWebRtcManager().also { it.initialize() }
         try {
             val (inputs, outputs) = webRtc.getAllAudioDevices()
-            inputs.forEach { d ->
-                microphones.add(LkDevice(d.descriptor, d.name))
+
+            // Heurística de clasificación: JavaSound expone muchos mixers como
+            // duales (target + source lines), lo que hace que el mismo dispositivo
+            // físico aparezca en ambas listas. Forzamos por nombre.
+            fun nameSuggestsMic(n: String): Boolean {
+                val lower = n.lowercase()
+                return listOf("micrófono", "microfono", "microphone", "captur",
+                    "input", "mic ", "mic(").any { lower.contains(it) }
             }
+            fun nameSuggestsSpeaker(n: String): Boolean {
+                val lower = n.lowercase()
+                return listOf("altavoc", "altavoz", "speaker", "headphone",
+                    "audífon", "audifon", "output", "playback").any { lower.contains(it) }
+            }
+
+            val seenMics = mutableSetOf<String>()
+            val seenSpeakers = mutableSetOf<String>()
+
+            // 1) Inputs declarados: incluir solo si suenan a mic, excluir si son speakers.
+            inputs.forEach { d ->
+                val n = d.name
+                if (nameSuggestsSpeaker(n) && !nameSuggestsMic(n)) return@forEach
+                if (seenMics.add(n)) microphones.add(LkDevice(n, n))
+            }
+            // 2) Outputs declarados: incluir solo si suenan a speaker, excluir si son mics.
             outputs.forEach { d ->
-                speakers.add(LkDevice(d.descriptor, d.name))
+                val n = d.name
+                if (nameSuggestsMic(n) && !nameSuggestsSpeaker(n)) return@forEach
+                if (seenSpeakers.add(n)) speakers.add(LkDevice(n, n))
             }
         } catch (e: Exception) {
             log.w(tag = TAG) { "Error enumerando dispositivos: ${e.message}" }
@@ -290,12 +344,18 @@ actual class ConferenceLiveKitManager actual constructor() {
             speakers.add(LkDevice("default", "Speaker por defecto"))
         }
 
-        // Enumerar cámaras via webrtc-java
+        // Enumerar cámaras vía webrtc-java. Usamos `webRtc` (que es el publisher si
+        // existe, o un manager temporal). Las cámaras se enumeran a nivel de
+        // PeerConnectionFactory — no requieren publisher establecido.
         try {
-            val pub = publisherWebRtc
-            val videoDevices = pub?.enumerateVideoDevices().orEmpty()
+            val videoDevices = webRtc.enumerateVideoDevices()
+            val seenCams = mutableSetOf<String>()
             videoDevices.forEach { d ->
-                cameras.add(LkDevice(d.name, d.name))
+                // Dedupe: webrtc-java a veces devuelve la misma cámara dos veces
+                // (driver físico + virtual) — colapsamos por nombre.
+                if (seenCams.add(d.name)) {
+                    cameras.add(LkDevice(d.name, d.name))
+                }
             }
         } catch (e: Exception) {
             log.w(tag = TAG) { "Error enumerando cámaras: ${e.message}" }
@@ -317,40 +377,52 @@ actual class ConferenceLiveKitManager actual constructor() {
             microphones = microphones,
             speakers = speakers,
             screenShareSources = screenShareSources,
-            selectedCameraId = cameras.firstOrNull()?.id,
-            selectedMicrophoneId = microphones.firstOrNull()?.id,
-            selectedSpeakerId = speakers.firstOrNull()?.id,
+            selectedCameraId = selectedCameraId
+                ?: cameras.firstOrNull { it.id != "none" }?.id
+                ?: cameras.firstOrNull()?.id,
+            selectedMicrophoneId = selectedMicrophoneId ?: microphones.firstOrNull()?.id,
+            selectedSpeakerId = selectedSpeakerId ?: speakers.firstOrNull()?.id,
             selectedScreenShareSourceId = selectedScreenShareSourceId ?: screenShareSources.firstOrNull()?.id,
         )
     }
 
     actual suspend fun selectCamera(deviceId: String) {
         log.d(tag = TAG) { "selectCamera: $deviceId" }
-        // Si la cámara está activa, apagar y reencender con el nuevo dispositivo
+        selectedCameraId = deviceId
+        // Si la cámara está activa, re-aplicar (toggle off+on) para que tome efecto.
+        // setCameraEnabled(true) usará el selectedCameraId persistido.
         if (_mediaState.value.cameraEnabled) {
             setCameraEnabled(false)
-            // Buscar el dispositivo por nombre
-            val pub = publisherWebRtc
-            val device = pub?.enumerateVideoDevices().orEmpty().firstOrNull { device -> device.name == deviceId }
-            if (device != null) {
-                pub?.addLocalVideoTrack(device)
-            }
+            delay(400)  // Esperar al SDP del 'off' antes de enviar el 'on'
             setCameraEnabled(true)
         }
     }
 
     actual suspend fun selectMicrophone(deviceId: String) {
-        publisherWebRtc?.selectAudioInputDeviceByName(deviceId)
+        log.d(tag = TAG) { "selectMicrophone: $deviceId" }
+        selectedMicrophoneId = deviceId
+        val ok = publisherWebRtc?.selectAudioInputDeviceByName(deviceId) ?: false
+        if (!ok) log.w(tag = TAG) { "selectMicrophone falló para: $deviceId" }
     }
 
     actual suspend fun selectSpeaker(deviceId: String) {
-        subscriberWebRtc?.selectAudioOutputDeviceByName(deviceId)
+        log.d(tag = TAG) { "selectSpeaker: $deviceId" }
+        selectedSpeakerId = deviceId
+        // Aplicar a ambos PCs por si la salida se enruta por cualquiera de ellos.
+        val okSub = subscriberWebRtc?.selectAudioOutputDeviceByName(deviceId) ?: false
+        val okPub = publisherWebRtc?.selectAudioOutputDeviceByName(deviceId) ?: false
+        if (!okSub && !okPub) log.w(tag = TAG) { "selectSpeaker falló para: $deviceId" }
     }
 
     actual suspend fun selectScreenShareSource(deviceId: String) {
+        log.d(tag = TAG) { "selectScreenShareSource: $deviceId" }
         selectedScreenShareSourceId = deviceId
         if (_mediaState.value.screenShareEnabled) {
+            // Damos tiempo a que la renegociación SDP del 'off' se procese ANTES
+            // de iniciar la del 'on'. Sin este delay el SFU recibe dos offers
+            // pisándose y nada termina publicado correctamente.
             setScreenShareEnabled(false)
+            delay(400)
             setScreenShareEnabled(true)
         }
     }
@@ -464,6 +536,14 @@ actual class ConferenceLiveKitManager actual constructor() {
 
             override fun onTrackPublished(published: LiveKitTrackPublished) {
                 log.d(tag = TAG) { "Track publicado: ${published.trackSid}" }
+                // Fallback: el callback de cambio de estado del publisher PC no siempre
+                // se dispara en webrtc-java/JVM. Cuando el SFU confirma la publicación
+                // del primer track significa que el handshake completo (SDP + ICE +
+                // signaling) está estable. Lo usamos como señal definitiva de CONNECTED.
+                if (_connectionState.value != LkConnectionState.CONNECTED) {
+                    _connectionState.value = LkConnectionState.CONNECTED
+                    log.d(tag = TAG) { "Marcando CONNECTED por TrackPublished (fallback)" }
+                }
             }
 
             override fun onLeave(canReconnect: Boolean, reason: Int) {
@@ -476,9 +556,23 @@ actual class ConferenceLiveKitManager actual constructor() {
             }
 
             override fun onDisconnected() {
-                // Solo marcar DISCONNECTED si no fue un disconnect intencional
-                // (cuando desconectamos manualmente, disconnect() ya setea el estado)
-                log.d(tag = TAG) { "Signaling onDisconnected callback" }
+                log.w(tag = TAG) { "Signaling onDisconnected — WebSocket cayó" }
+                // Si estábamos en sesión activa, el WebSocket murió por su cuenta
+                // (no fue un disconnect intencional desde la app, ya que disconnect()
+                // pone el estado a DISCONNECTED ANTES de cerrar el socket).
+                // En ese caso, propagamos el estado a la UI para que vuelva al catálogo
+                // y el usuario pueda reintentar.
+                val current = _connectionState.value
+                if (current == LkConnectionState.CONNECTED ||
+                    current == LkConnectionState.CONNECTING) {
+                    scope.launch {
+                        cleanup()
+                        _connectionState.value = LkConnectionState.DISCONNECTED
+                        _participants.value = emptyList()
+                        _videoTracks.value = emptyList()
+                        _mediaState.value = LkMediaState()
+                    }
+                }
             }
 
             override fun onError(error: Exception) {
@@ -492,10 +586,24 @@ actual class ConferenceLiveKitManager actual constructor() {
     private suspend fun setupPublisher() {
         log.d(tag = TAG) { "Inicializando publisher + subscriber WebRTC" }
 
+        // CRÍTICO: extraer ICE servers (STUN + TURN con credenciales) del JoinResponse.
+        // Sin TURN, los clientes detrás de NAT estricta / CGNAT / VPN nunca consiguen
+        // establecer el peer connection — el SFU los expulsa como
+        // PEER_CONNECTION_DISCONNECTED tras ~20s sin que ICE complete.
+        val iceServersTriples: List<Triple<List<String>, String?, String?>> =
+            joinResponse?.iceServers?.map { srv ->
+                Triple(srv.urls, srv.username.ifBlank { null }, srv.credential.ifBlank { null })
+            } ?: emptyList()
+        log.d(tag = TAG) {
+            "ICE servers del JoinResponse: ${iceServersTriples.size} entries — " +
+            iceServersTriples.joinToString { it.first.joinToString(",") }
+        }
+
         // 1. Crear subscriber PRIMERO (el offer puede llegar durante setupPublisher)
         val sub = DesktopWebRtcManager()
         subscriberWebRtc = sub
         sub.initialize()
+        if (iceServersTriples.isNotEmpty()) sub.setIceServers(iceServersTriples)
         sub.setListener(object : WebRtcEventListener {
             override fun onIceCandidate(candidate: String, sdpMid: String, sdpMLineIndex: Int) {
                 scope.launch {
@@ -549,6 +657,8 @@ actual class ConferenceLiveKitManager actual constructor() {
         val pub = DesktopWebRtcManager()
         publisherWebRtc = pub
         pub.initialize()
+        // ICE servers también para publisher — DEBE estar antes de createOffer.
+        if (iceServersTriples.isNotEmpty()) pub.setIceServers(iceServersTriples)
         pub.setAudioEnabled(true)
         pub.setMuted(true)
 
@@ -564,6 +674,24 @@ actual class ConferenceLiveKitManager actual constructor() {
             }
             override fun onConnectionStateChange(state: WebRtcConnectionState) {
                 log.d(tag = TAG) { "Publisher state: $state" }
+                when (state) {
+                    WebRtcConnectionState.CONNECTED -> {
+                        if (_connectionState.value != LkConnectionState.CONNECTED) {
+                            _connectionState.value = LkConnectionState.CONNECTED
+                            log.d(tag = TAG) { "Publisher RTC CONNECTED — sala lista" }
+                        }
+                    }
+                    WebRtcConnectionState.FAILED -> {
+                        log.e(tag = TAG) { "Publisher RTC FAILED — marcando ERROR" }
+                        _connectionState.value = LkConnectionState.ERROR
+                    }
+                    // NO actuamos en DISCONNECTED/CLOSED: durante renegociaciones (al añadir
+                    // cámara o screen share) el publisher pasa por estados transitorios y
+                    // marcar RECONNECTING/ERROR aquí expulsa al usuario de la sala sin
+                    // motivo. La señal real de pérdida de conexión es signalingClient.disconnect
+                    // (manejado en onLeave/onDisconnected) o el estado FAILED.
+                    else -> { /* mantener estado actual */ }
+                }
             }
             override fun onRemoteAudioTrack() {}
             override fun onAudioDeviceChanged(device: AudioDevice?) {}
@@ -767,7 +895,8 @@ actual class ConferenceLiveKitManager actual constructor() {
         remoteParticipants.clear()
         raisedHands.clear()
         localHandRaised = false
-        selectedScreenShareSourceId = null
+        // No reseteamos las preferencias de dispositivos (camera/mic/speaker/screen):
+        // se conservan entre reconexiones para no obligar al usuario a re-seleccionar.
     }
 
     private fun extractJsonField(json: String, field: String): String? {

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./gradlew :shared:compileKotlinDesktop --no-daemon -q)",
+      "Bash(./gradlew :shared:compileKotlinDesktop)",
+      "Bash(find \"C:/Users/Eddys Larez\" -name \"AVFAudio*\" -type f 2>/dev/null | head -10)",
+      "PowerShell(cd \"C:\\\\Users\\\\Eddys Larez\\\\Downloads\\\\sip-library-android-new-KmpV1\\\\sip-library-android-new-KmpV1\"; $env:GRADLE_OPTS=\"-Dorg.gradle.daemon=false -Dorg.gradle.parallel=false\"; .\\\\gradlew.bat :shared:compileKotlinDesktop --no-daemon --max-workers=1 --console=plain -q 2>&1 | Select-Object -Last 100)",
+      "Bash(grep -i \"\\\\.kt$\")"
+    ]
+  }
+}

@@ -96,7 +96,10 @@ class DesktopPeerConnectionController(
     @Volatile
     private var currentConnectionState = WebRtcConnectionState.DISCONNECTED
 
-    private val iceServers = listOf(
+    // ICE servers configurables. Default = STUN públicos como fallback.
+    // El cliente debe llamar setIceServers() con los valores del JoinResponse
+    // de LiveKit ANTES de crear el PeerConnection para incluir TURN.
+    private var iceServers: List<RTCIceServer> = listOf(
         RTCIceServer().apply {
             urls = listOf(
                 "stun:stun.l.google.com:19302",
@@ -104,6 +107,31 @@ class DesktopPeerConnectionController(
             )
         }
     )
+
+    /**
+     * Sustituye los iceServers actuales por los recibidos del SFU (típicamente
+     * en el JoinResponse de LiveKit, que incluye TURN con credenciales generadas).
+     * El primer STUN público se mantiene como fallback.
+     */
+    fun setIceServers(servers: List<Triple<List<String>, String?, String?>>) {
+        if (servers.isEmpty()) return
+        val newList = mutableListOf<RTCIceServer>()
+        servers.forEach { (urls, username, credential) ->
+            if (urls.isNotEmpty()) {
+                newList.add(RTCIceServer().apply {
+                    this.urls = urls
+                    if (!username.isNullOrBlank()) this.username = username
+                    if (!credential.isNullOrBlank()) this.password = credential
+                })
+            }
+        }
+        // Conservamos un STUN público como fallback adicional por robustez.
+        newList.add(RTCIceServer().apply {
+            urls = listOf("stun:stun.l.google.com:19302")
+        })
+        iceServers = newList
+        log.d(TAG) { "ICE servers actualizados: ${newList.size} entries (TURN del SFU + fallback STUN)" }
+    }
 
     // ==================== AUDIO DEVICE MODULE ====================
 
