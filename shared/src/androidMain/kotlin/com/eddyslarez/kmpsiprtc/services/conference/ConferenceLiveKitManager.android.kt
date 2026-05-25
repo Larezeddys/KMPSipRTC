@@ -127,7 +127,25 @@ actual class ConferenceLiveKitManager actual constructor() {
 
     actual suspend fun setScreenShareEnabled(enabled: Boolean) {
         val lp = room?.localParticipant ?: return
-        lp.setScreenShareEnabled(enabled)
+        if (enabled) {
+            val captureData = LkScreenCaptureBridge.pendingMediaProjectionData
+            if (captureData == null) {
+                log.w(tag = TAG) {
+                    "setScreenShareEnabled(true) sin MediaProjection data. " +
+                    "El composeApp debe llamar LkScreenCaptureBridge.setPendingMediaProjectionData(intent) primero."
+                }
+                return
+            }
+            // LiveKit Android 2.x: el Intent se entrega vía ScreenCaptureParams.
+            val params = io.livekit.android.room.track.screencapture.ScreenCaptureParams(
+                mediaProjectionPermissionResultData = captureData
+            )
+            lp.setScreenShareEnabled(true, screenCaptureParams = params)
+        } else {
+            lp.setScreenShareEnabled(false)
+            // El data ya no es válido tras stop — el usuario tendrá que reaceptar el dialog.
+            LkScreenCaptureBridge.setPendingMediaProjectionData(null)
+        }
         _mediaState.value = _mediaState.value.copy(screenShareEnabled = enabled)
         updateParticipants()
         updateVideoTracks()
