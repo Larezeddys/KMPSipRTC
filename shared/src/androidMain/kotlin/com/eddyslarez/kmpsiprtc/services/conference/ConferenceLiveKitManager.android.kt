@@ -45,6 +45,20 @@ actual class ConferenceLiveKitManager actual constructor() {
     private val raisedHands = mutableMapOf<String, Long>()
     private var localHandRaised = false
 
+    private fun handAttributes(raised: Boolean, at: Long): Map<String, String> {
+        return if (raised) {
+            mapOf(
+                "handRaised" to "true",
+                "handRaisedAt" to at.toString()
+            )
+        } else {
+            mapOf(
+                "handRaised" to "false",
+                "handRaisedAt" to ""
+            )
+        }
+    }
+
     /**
      * Debe llamarse antes de connect() para proveer el contexto Android.
      */
@@ -165,6 +179,12 @@ actual class ConferenceLiveKitManager actual constructor() {
             raisedHands.remove(identity)
         }
 
+        try {
+            lp.updateAttributes(handAttributes(raised, now))
+        } catch (e: Exception) {
+            log.e(tag = TAG) { "Error actualizando atributos de mano: ${e.message}" }
+        }
+
         val type = if (raised) "hand/raise" else "hand/lower"
         val payload = """{"type":"$type","at":$now,"participantIdentity":"$identity","author":"$name"}""".encodeToByteArray()
         try {
@@ -280,6 +300,7 @@ actual class ConferenceLiveKitManager actual constructor() {
                 when (event) {
                     is RoomEvent.ParticipantConnected -> {
                         log.d(tag = TAG) { "Participante conectado: ${event.participant.identity}" }
+                        applyParticipantHandAttributes(event.participant)
                         updateParticipants()
                     }
                     is RoomEvent.ParticipantDisconnected -> {
@@ -314,6 +335,10 @@ actual class ConferenceLiveKitManager actual constructor() {
                         updateParticipants()
                     }
                     is RoomEvent.ActiveSpeakersChanged -> {
+                        updateParticipants()
+                    }
+                    is RoomEvent.ParticipantAttributesChanged -> {
+                        applyParticipantHandAttributes(event.participant)
                         updateParticipants()
                     }
                     is RoomEvent.Reconnecting -> {
@@ -395,6 +420,23 @@ actual class ConferenceLiveKitManager actual constructor() {
         }
 
         updateParticipants()
+    }
+
+    private fun applyParticipantHandAttributes(participant: Participant) {
+        val identity = participant.identity?.value ?: return
+        val attrs = participant.attributes
+        val raised = attrs["handRaised"]?.equals("true", ignoreCase = true) == true
+        val at = attrs["handRaisedAt"]?.toLongOrNull() ?: System.currentTimeMillis()
+
+        if (raised) {
+            raisedHands[identity] = at
+        } else {
+            raisedHands.remove(identity)
+        }
+
+        if (identity == room?.localParticipant?.identity?.value) {
+            localHandRaised = raised
+        }
     }
 
     private fun updateParticipants() {
