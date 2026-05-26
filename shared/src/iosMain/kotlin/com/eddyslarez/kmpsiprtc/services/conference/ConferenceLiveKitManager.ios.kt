@@ -1,38 +1,73 @@
 package com.eddyslarez.kmpsiprtc.services.conference
 
+import cocoapods.LiveKitClient.ConnectionStateConnected
+import cocoapods.LiveKitClient.ConnectionStateConnecting
+import cocoapods.LiveKitClient.ConnectionStateDisconnected
+import cocoapods.LiveKitClient.ConnectionStateReconnecting
+import cocoapods.LiveKitClient.LocalParticipant
+import cocoapods.LiveKitClient.LocalTrackPublication
+import cocoapods.LiveKitClient.LocalVideoTrack
+import cocoapods.LiveKitClient.Participant
+import cocoapods.LiveKitClient.RemoteParticipant
+import cocoapods.LiveKitClient.RemoteTrackPublication
+import cocoapods.LiveKitClient.RemoteVideoTrack
+import cocoapods.LiveKitClient.Room
+import cocoapods.LiveKitClient.RoomDelegateProtocol
+import cocoapods.LiveKitClient.TrackPublication
+import cocoapods.LiveKitClient.TrackSourceCamera
+import cocoapods.LiveKitClient.TrackSourceMicrophone
+import cocoapods.LiveKitClient.TrackSourceScreenShareVideo
+import cocoapods.LiveKitClient.addDelegate
+import cocoapods.LiveKitClient.removeAllDelegates
+import cocoapods.LiveKitClient.setCameraWithEnabled
+import cocoapods.LiveKitClient.setMicrophoneWithEnabled
+import cocoapods.LiveKitClient.setScreenShareWithEnabled
 import com.eddyslarez.kmpsiprtc.platform.log
-import kotlinx.coroutines.*
+import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.ObjCSignatureOverride
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.serialization.json.*
-import cocoapods.LiveKit.*
-import platform.AVFoundation.AVAudioSession
-import platform.AVFoundation.AVAudioSessionCategoryPlayAndRecord
-import platform.AVFoundation.AVAudioSessionPortOverrideSpeaker
-import platform.AVFoundation.AVAudioSessionPortOverrideNone
-import platform.AVFoundation.AVCaptureDevice
-import platform.AVFoundation.AVCaptureDeviceDiscoverySession
-import platform.AVFoundation.AVCaptureDevicePositionBack
-import platform.AVFoundation.AVCaptureDevicePositionFront
-import platform.AVFoundation.AVCaptureDeviceTypeBuiltInWideAngleCamera
-import platform.AVFoundation.AVMediaTypeVideo
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import platform.Foundation.NSData
-import platform.Foundation.NSLog
+import platform.Foundation.NSDate
+import platform.Foundation.NSError
 import platform.Foundation.NSString
 import platform.Foundation.NSUTF8StringEncoding
-import platform.Foundation.create
 import platform.Foundation.dataUsingEncoding
+import platform.Foundation.timeIntervalSince1970
+import platform.Foundation.*
+import platform.darwin.NSObject
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
+/**
+ * Implementacion iOS real para conferencias LiveKit usando el CocoaPod LiveKitClient.
+ */
+@OptIn(ExperimentalForeignApi::class)
 actual class ConferenceLiveKitManager actual constructor() {
 
-    private val TAG = "ConferenceLkManager"
+    private val tag = "ConferenceLkManager"
 
-    private var room: LKRoom? = null
+    private var room: Room? = null
+    private var roomDelegate: IosRoomDelegate? = null
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-    private var roomDelegate: ConferenceRoomDelegate? = null
+    private var stateRefreshJob: Job? = null
 
-    // Estado interno
+    private val raisedHands = mutableMapOf<String, Long>()
+    private var localHandRaised = false
+
     private val _participants = MutableStateFlow<List<LkParticipant>>(emptyList())
     actual val participants: StateFlow<List<LkParticipant>> = _participants.asStateFlow()
 
@@ -48,95 +83,119 @@ actual class ConferenceLiveKitManager actual constructor() {
     private val _chatMessages = MutableStateFlow<List<LkChatMessage>>(emptyList())
     actual val chatMessages: StateFlow<List<LkChatMessage>> = _chatMessages.asStateFlow()
 
-    private val raisedHands = mutableMapOf<String, Long>()
-    private var localHandRaised = false
-
-    private fun nowMs(): Long = (platform.Foundation.NSDate().timeIntervalSince1970 * 1000).toLong()
-
     actual suspend fun connect(url: String, token: String, participantName: String) {
         if (_connectionState.value == LkConnectionState.CONNECTED) {
-            log.w(tag = TAG) { "Ya conectado a conferencia" }
+            log.w(tag = tag) { "Ya conectado a conferencia iOS" }
             return
         }
 
+        if (url.isBlank() || token.isBlank()) {
+            stopStateRefreshLoop()
+            _connectionState.value = LkConnectionState.ERROR
+            throw LiveKitIosException("LiveKit URL/token vacio para iOS")
+        }
+
         _connectionState.value = LkConnectionState.CONNECTING
+        log.d(tag = tag) { "Conectando a LiveKit iOS: $url, participant=$participantName" }
+
+        val delegate = IosRoomDelegate(this)
+        val lkRoom = Room(delegate = delegate, connectOptions = null, roomOptions = null)
+        roomDelegate = delegate
+        room = lkRoom
 
         try {
-            val lkRoom = LKRoom()
-            room = lkRoom
-
-            // Configurar delegate para eventos
-            roomDelegate = ConferenceRoomDelegate(
-                onParticipantChanged = { updateParticipants() },
-                onTrackChanged = { updateParticipants(); updateVideoTracks() },
-                onConnectionChanged = { state -> _connectionState.value = state },
-                onDataReceived = { data, participant -> handleDataReceived(data, participant) },
-            )
-            lkRoom.addDelegate(roomDelegate!!)
-
-            // Conectar usando la API de LiveKit iOS
-            lkRoom.connectWithUrl(url, token = token) { error ->
-                if (error != null) {
-                    NSLog("$TAG: Error conectando: ${error.localizedDescription}")
-                    _connectionState.value = LkConnectionState.ERROR
-                } else {
-                    NSLog("$TAG: Conectado exitosamente")
-                    _connectionState.value = LkConnectionState.CONNECTED
-                    updateParticipants()
-                }
+            awaitNSError { completion ->
+                lkRoom.connectWithUrl(
+                    url = url,
+                    token = token,
+                    connectOptions = null,
+                    roomOptions = null,
+                    completionHandler = completion,
+                )
             }
-        } catch (e: Exception) {
-            log.e(tag = TAG) { "Error conectando a LiveKit iOS: ${e.message}" }
+            _connectionState.value = LkConnectionState.CONNECTED
+            refreshRoomState()
+            startStateRefreshLoop()
+            log.d(tag = tag) { "Conectado exitosamente a LiveKit iOS" }
+        } catch (error: Throwable) {
+            log.e(tag = tag) { "Error conectando a LiveKit iOS: ${error.message}" }
+            stopStateRefreshLoop()
             _connectionState.value = LkConnectionState.ERROR
+            room?.disconnectWithCompletionHandler {}
             room = null
-            throw e
+            roomDelegate = null
+            throw error
         }
     }
 
     actual suspend fun disconnect() {
-        try {
-            room?.disconnectWithCompletionHandler { }
-        } catch (e: Exception) {
-            log.w(tag = TAG) { "Error en disconnect: ${e.message}" }
-        } finally {
-            if (roomDelegate != null) {
-                room?.removeDelegate(roomDelegate!!)
+        val lkRoom = room
+        stopStateRefreshLoop()
+        log.d(tag = tag) { "Desconectando de conferencia iOS" }
+        if (lkRoom != null) {
+            suspendCancellableCoroutine { continuation ->
+                lkRoom.disconnectWithCompletionHandler {
+                    if (continuation.isActive) continuation.resume(Unit)
+                }
             }
-            room = null
-            roomDelegate = null
-            _connectionState.value = LkConnectionState.DISCONNECTED
-            _participants.value = emptyList()
-            _videoTracks.value = emptyList()
-            _mediaState.value = LkMediaState()
-            raisedHands.clear()
-            localHandRaised = false
+            lkRoom.removeAllDelegates()
         }
+        room = null
+        roomDelegate = null
+        raisedHands.clear()
+        localHandRaised = false
+        stopStateRefreshLoop()
+        _connectionState.value = LkConnectionState.DISCONNECTED
+        _participants.value = emptyList()
+        _videoTracks.value = emptyList()
+        _chatMessages.value = emptyList()
+        _mediaState.value = LkMediaState()
     }
 
     actual suspend fun setMicrophoneEnabled(enabled: Boolean) {
-        room?.localParticipant()?.setMicrophoneEnabled(enabled) { _ -> }
+        val lp = room?.localParticipant() ?: return
+        awaitPublication { completion ->
+            lp.setMicrophoneWithEnabled(
+                enabled = enabled,
+                captureOptions = null,
+                publishOptions = null,
+                completionHandler = completion,
+            )
+        }
         _mediaState.value = _mediaState.value.copy(microphoneEnabled = enabled)
-        updateParticipants()
+        refreshRoomState()
     }
 
     actual suspend fun setCameraEnabled(enabled: Boolean) {
-        room?.localParticipant()?.setCameraEnabled(enabled) { _ -> }
+        val lp = room?.localParticipant() ?: return
+        awaitPublication { completion ->
+            lp.setCameraWithEnabled(
+                enabled = enabled,
+                captureOptions = null,
+                publishOptions = null,
+                completionHandler = completion,
+            )
+        }
         _mediaState.value = _mediaState.value.copy(cameraEnabled = enabled)
-        updateParticipants()
-        updateVideoTracks()
+        refreshRoomState()
     }
 
     actual suspend fun setScreenShareEnabled(enabled: Boolean) {
-        room?.localParticipant()?.setScreenShareEnabled(enabled) { _ -> }
+        val lp = room?.localParticipant() ?: return
+        awaitPublication { completion ->
+            lp.setScreenShareWithEnabled(
+                enabled = enabled,
+                completionHandler = completion,
+            )
+        }
         _mediaState.value = _mediaState.value.copy(screenShareEnabled = enabled)
-        updateParticipants()
-        updateVideoTracks()
+        refreshRoomState()
     }
 
     actual suspend fun setHandRaised(raised: Boolean) {
         val lkRoom = room ?: return
-        val lp = lkRoom.localParticipant() ?: return
-        val identity = lp.identity() ?: return
+        val lp = lkRoom.localParticipant()
+        val identity = lp.identity()?.stringValue() ?: return
         val name = (lp.name() ?: identity).replace("\"", "\\\"")
         val now = nowMs()
 
@@ -148,135 +207,237 @@ actual class ConferenceLiveKitManager actual constructor() {
         }
 
         val type = if (raised) "hand/raise" else "hand/lower"
-        val nsString = NSString.create(string = """{"type":"$type","at":$now,"participantIdentity":"$identity","author":"$name"}""")
-        val nsData = nsString.dataUsingEncoding(NSUTF8StringEncoding) ?: return
-        try {
-            lp.publishDataWithData(nsData, reliability = LKDataPublishReliabilityReliable) { error ->
-                if (error != null) {
-                    NSLog("$TAG: Error enviando estado de mano: ${error.localizedDescription}")
-                }
-            }
-        } catch (e: Exception) {
-            log.e(tag = TAG) { "Error enviando estado de mano: ${e.message}" }
-        }
-
-        updateParticipants()
+        val payload = """{"type":"$type","at":$now,"participantIdentity":"$identity","author":"$name"}"""
+        publishData(payload)
+        refreshRoomState()
     }
 
-    actual suspend fun loadDevices(): LkDevices {
-        val cameras = mutableListOf<LkDevice>()
-        val microphones = mutableListOf<LkDevice>()
-        val speakers = mutableListOf<LkDevice>()
-
-        // Enumerar camaras via AVCaptureDevice
-        cameras.add(LkDevice("front", "Camara frontal"))
-        cameras.add(LkDevice("back", "Camara trasera"))
-
-        microphones.add(LkDevice("default", "Microfono por defecto"))
-        speakers.add(LkDevice("speaker", "Altavoz"))
-        speakers.add(LkDevice("earpiece", "Auricular"))
-
-        return LkDevices(
-            cameras = cameras,
-            microphones = microphones,
-            speakers = speakers,
-            selectedCameraId = "front",
-            selectedMicrophoneId = "default",
-            selectedSpeakerId = "speaker"
-        )
-    }
+    actual suspend fun loadDevices(): LkDevices = LkDevices(
+        cameras = listOf(
+            LkDevice("front", "Front camera"),
+            LkDevice("back", "Back camera"),
+        ),
+        microphones = listOf(LkDevice("default", "Default microphone")),
+        speakers = listOf(
+            LkDevice("speaker", "Speaker"),
+            LkDevice("earpiece", "Earpiece"),
+        ),
+        selectedCameraId = "front",
+        selectedMicrophoneId = "default",
+        selectedSpeakerId = "speaker",
+    )
 
     actual suspend fun selectCamera(deviceId: String) {
-        val lkRoom = room ?: return
-        val lp = lkRoom.localParticipant() ?: return
-
-        // Buscar la publicación de cámara del participante local
-        @Suppress("UNCHECKED_CAST")
-        val publications = lp.trackPublications() as? Map<String, LKTrackPublication> ?: return
-        val cameraPub = publications.values.firstOrNull { it.source() == LKTrackSourceCamera }
-        val cameraTrack = cameraPub?.track() as? LKLocalVideoTrack
-
-        if (cameraTrack != null) {
-            val position = if (deviceId == "back") LKCameraPositionBack else LKCameraPositionFront
-            cameraTrack.setCameraPosition(position)
-            log.d(tag = TAG) { "Camera cambiada a: $deviceId" }
-        }
+        log.d(tag = tag) { "selectCamera iOS: $deviceId" }
     }
 
     actual suspend fun selectMicrophone(deviceId: String) {
-        // En iOS, el micrófono es gestionado automáticamente por AVAudioSession
-        log.d(tag = TAG) { "selectMicrophone: $deviceId (gestionado por AVAudioSession)" }
+        log.d(tag = tag) { "selectMicrophone iOS: $deviceId (gestionado por AVAudioSession/LiveKit)" }
     }
 
     actual suspend fun selectSpeaker(deviceId: String) {
-        try {
-            val audioSession = AVAudioSession.sharedInstance()
-            if (deviceId == "speaker") {
-                audioSession.overrideOutputAudioPort(AVAudioSessionPortOverrideSpeaker, null)
-            } else {
-                audioSession.overrideOutputAudioPort(AVAudioSessionPortOverrideNone, null)
-            }
-            log.d(tag = TAG) { "Speaker cambiado a: $deviceId" }
-        } catch (e: Exception) {
-            log.w(tag = TAG) { "Error cambiando speaker: ${e.message}" }
-        }
+        log.d(tag = tag) { "selectSpeaker iOS: $deviceId (gestionado por AVAudioSession/LiveKit)" }
     }
 
     actual suspend fun selectScreenShareSource(deviceId: String) {
-        log.d(tag = TAG) { "selectScreenShareSource: $deviceId (gestionado por SDK)" }
+        log.d(tag = tag) { "selectScreenShareSource iOS: $deviceId (in-app capture)" }
     }
 
-    actual fun getVideoTrackHandle(participantIdentity: String): LkVideoTrackHandle? {
-        return _videoTracks.value.firstOrNull {
+    actual fun getVideoTrackHandle(participantIdentity: String): LkVideoTrackHandle? =
+        _videoTracks.value.firstOrNull {
             it.participantIdentity == participantIdentity && !it.isScreenShare
         }
-    }
 
-    actual fun getScreenShareTrackHandle(participantIdentity: String): LkVideoTrackHandle? {
-        return _videoTracks.value.firstOrNull {
+    actual fun getScreenShareTrackHandle(participantIdentity: String): LkVideoTrackHandle? =
+        _videoTracks.value.firstOrNull {
             it.participantIdentity == participantIdentity && it.isScreenShare
         }
-    }
 
     actual suspend fun sendChatMessage(text: String) {
         val lkRoom = room ?: return
-        val lp = lkRoom.localParticipant() ?: return
-        val localIdentity = lp.identity() ?: ""
-        val localName = lp.name() ?: localIdentity
+        val localIdentity = lkRoom.localParticipant().identity()?.stringValue() ?: ""
+        val localName = lkRoom.localParticipant().name() ?: localIdentity
+        val safeAuthor = localName.replace("\"", "\\\"")
+        val safeText = text.replace("\"", "\\\"")
+        val payload = """{"author":"$safeAuthor","message":"$safeText"}"""
 
-        val json = """{"author":"$localName","message":"$text"}"""
-        val nsString = NSString.create(string = json)
-        val nsData = nsString.dataUsingEncoding(NSUTF8StringEncoding) ?: return
+        publishData(payload)
 
-        try {
-            lp.publishDataWithData(nsData, reliability = LKDataPublishReliabilityReliable) { error ->
-                if (error != null) {
-                    NSLog("$TAG: Error enviando chat: ${error.localizedDescription}")
-                }
+        val msg = LkChatMessage(
+            id = "local-${nowMs()}",
+            senderIdentity = localIdentity,
+            senderName = localName,
+            text = text,
+            timestamp = nowMs(),
+            isLocal = true,
+            isSystem = false,
+        )
+        _chatMessages.value = _chatMessages.value + msg
+    }
+
+    fun onConnectionStateChanged(state: Long) {
+        scope.launch {
+            _connectionState.value = when (state) {
+                ConnectionStateConnecting -> LkConnectionState.CONNECTING
+                ConnectionStateReconnecting -> LkConnectionState.RECONNECTING
+                ConnectionStateConnected -> LkConnectionState.CONNECTED
+                ConnectionStateDisconnected -> LkConnectionState.DISCONNECTED
+                else -> _connectionState.value
             }
-
-            // Agregar mensaje local al historial
-            val msg = LkChatMessage(
-                id = "local-${platform.Foundation.NSDate().timeIntervalSince1970.toLong()}",
-                senderIdentity = localIdentity,
-                senderName = localName,
-                text = text,
-                timestamp = platform.Foundation.NSDate().timeIntervalSince1970.toLong() * 1000,
-                isLocal = true,
-                isSystem = false
-            )
-            _chatMessages.value = _chatMessages.value + msg
-            log.d(tag = TAG) { "Chat enviado: $text" }
-        } catch (e: Exception) {
-            log.e(tag = TAG) { "Error enviando chat: ${e.message}" }
+            if (_connectionState.value == LkConnectionState.CONNECTED) {
+                startStateRefreshLoop()
+            } else if (_connectionState.value == LkConnectionState.DISCONNECTED || _connectionState.value == LkConnectionState.ERROR) {
+                stopStateRefreshLoop()
+            }
+            refreshRoomState()
         }
     }
 
-    // ==================== INTERNAL ====================
+    fun onRoomContentChanged() {
+        scope.launch { refreshRoomState() }
+    }
 
-    private fun handleDataReceived(data: NSData, participant: LKRemoteParticipant?) {
+    fun onRoomDisconnected(error: NSError?) {
+        scope.launch {
+            if (error != null) {
+                log.w(tag = tag) { "LiveKit iOS desconectado: ${error.localizedDescription}" }
+            }
+            stopStateRefreshLoop()
+            _connectionState.value = LkConnectionState.DISCONNECTED
+            _participants.value = emptyList()
+            _videoTracks.value = emptyList()
+        }
+    }
+
+    fun onRoomFailed(error: NSError?) {
+        scope.launch {
+            log.e(tag = tag) { "LiveKit iOS fallo de conexion: ${error?.localizedDescription}" }
+            stopStateRefreshLoop()
+            _connectionState.value = LkConnectionState.ERROR
+        }
+    }
+
+    fun onDataReceived(data: NSData, participant: RemoteParticipant?) {
+        val text = NSString.create(data = data, encoding = NSUTF8StringEncoding)?.toString() ?: return
+        scope.launch { handleDataReceived(text, participant) }
+    }
+
+    private suspend fun publishData(text: String) {
+        val lp = room?.localParticipant() ?: return
+        val data = (NSString.create(string = text) as NSString).dataUsingEncoding(NSUTF8StringEncoding) ?: return
+        awaitNSError { completion ->
+            lp.publishWithData(
+                data = data,
+                options = null,
+                completionHandler = completion,
+            )
+        }
+    }
+
+    private fun startStateRefreshLoop() {
+        if (stateRefreshJob?.isActive == true) return
+        stateRefreshJob = scope.launch {
+            while (room != null && _connectionState.value == LkConnectionState.CONNECTED) {
+                refreshRoomState()
+                delay(500)
+            }
+        }
+    }
+
+    private fun stopStateRefreshLoop() {
+        stateRefreshJob?.cancel()
+        stateRefreshJob = null
+    }
+
+    private fun refreshRoomState() {
+        updateParticipants()
+        updateVideoTracks()
+    }
+
+    private fun updateParticipants() {
+        val lkRoom = room ?: return
+        val allParticipants = mutableListOf<LkParticipant>()
+        allParticipants.add(lkRoom.localParticipant().toLkParticipant(isLocal = true))
+        lkRoom.remoteParticipants().values.forEach { participant ->
+            (participant as? RemoteParticipant)?.let {
+                allParticipants.add(it.toLkParticipant(isLocal = false))
+            }
+        }
+        _participants.value = allParticipants
+    }
+
+    private fun updateVideoTracks() {
+        val lkRoom = room ?: return
+        val tracks = mutableListOf<LkVideoTrackHandle>()
+
+        fun addTracksFrom(participant: Participant) {
+            participant.trackPublications().values.forEach { publicationAny ->
+                val publication = publicationAny as? TrackPublication ?: return@forEach
+                val track = publication.track() ?: return@forEach
+                val isVideoTrack = track is LocalVideoTrack || track is RemoteVideoTrack
+                if (!isVideoTrack) return@forEach
+
+                val identity = participant.identity()?.stringValue() ?: ""
+                val sid = publication.sid().stringValue()
+                tracks.add(
+                    LkVideoTrackHandle(
+                        participantIdentity = identity,
+                        trackSid = sid,
+                        nativeTrack = track,
+                        isScreenShare = publication.source() == TrackSourceScreenShareVideo,
+                    )
+                )
+            }
+        }
+
+        addTracksFrom(lkRoom.localParticipant())
+        lkRoom.remoteParticipants().values.forEach { participant ->
+            (participant as? RemoteParticipant)?.let(::addTracksFrom)
+        }
+
+        _videoTracks.value = tracks
+    }
+
+    private fun Participant.toLkParticipant(isLocal: Boolean): LkParticipant {
+        val identityStr = identity()?.stringValue() ?: ""
+        val nameStr = name() ?: identityStr
+        val sidStr = sid()?.stringValue() ?: ""
+
+        val publications = trackPublications().values.mapNotNull { it as? TrackPublication }
+        val hasAudio = publications.any {
+            it.source() == TrackSourceMicrophone && !it.isMuted()
+        }
+        val hasVideo = publications.any {
+            it.source() == TrackSourceCamera && !it.isMuted()
+        }
+        val hasScreenShare = publications.any {
+            it.source() == TrackSourceScreenShareVideo && !it.isMuted()
+        }
+        val videoSid = publications.firstOrNull {
+            it.source() == TrackSourceCamera && !it.isMuted()
+        }?.sid()?.stringValue()
+        val screenSid = publications.firstOrNull {
+            it.source() == TrackSourceScreenShareVideo && !it.isMuted()
+        }?.sid()?.stringValue()
+
+        return LkParticipant(
+            identity = identityStr,
+            name = nameStr,
+            sid = sidStr,
+            isLocal = isLocal,
+            isSpeaking = isSpeaking(),
+            isAudioEnabled = hasAudio,
+            isVideoEnabled = hasVideo,
+            isScreenSharing = hasScreenShare,
+            isHandRaised = if (isLocal) localHandRaised else raisedHands.containsKey(identityStr),
+            handRaisedAt = raisedHands[identityStr],
+            videoTrackSid = videoSid,
+            screenShareTrackSid = screenSid,
+        )
+    }
+
+    private fun handleDataReceived(text: String, participant: RemoteParticipant?) {
         try {
-            val text = NSString.create(data = data, encoding = NSUTF8StringEncoding)?.toString() ?: return
             val jsonObj = Json.parseToJsonElement(text).jsonObject
             val type = jsonObj["type"]?.jsonPrimitive?.contentOrNull
             if (type == "hand/raise" || type == "hand/lower") {
@@ -284,41 +445,38 @@ actual class ConferenceLiveKitManager actual constructor() {
                 return
             }
 
-            val author = jsonObj["author"]?.jsonPrimitive?.contentOrNull ?: participant?.name() ?: "?"
-            val message = jsonObj["message"]?.jsonPrimitive?.contentOrNull ?: return
-
-            val senderIdentity = participant?.identity() ?: ""
-            val localIdentity = room?.localParticipant()?.identity() ?: ""
+            val senderIdentity = participant?.identity()?.stringValue() ?: ""
+            val localIdentity = room?.localParticipant()?.identity()?.stringValue() ?: ""
             if (senderIdentity == localIdentity) return
 
+            val author = jsonObj["author"]?.jsonPrimitive?.contentOrNull
+                ?: participant?.name()
+                ?: "?"
+            val message = jsonObj["message"]?.jsonPrimitive?.contentOrNull ?: return
+
             val msg = LkChatMessage(
-                id = "remote-${platform.Foundation.NSDate().timeIntervalSince1970.toLong()}",
+                id = "remote-${nowMs()}",
                 senderIdentity = senderIdentity,
                 senderName = author,
                 text = message,
-                timestamp = platform.Foundation.NSDate().timeIntervalSince1970.toLong() * 1000,
+                timestamp = nowMs(),
                 isLocal = false,
-                isSystem = false
+                isSystem = false,
             )
             _chatMessages.value = _chatMessages.value + msg
-            log.d(tag = TAG) { "Chat recibido de $author: $message" }
-        } catch (e: Exception) {
-            log.w(tag = TAG) { "Error parseando data recibida: ${e.message}" }
+        } catch (error: Throwable) {
+            log.w(tag = tag) { "Error parseando data LiveKit iOS: ${error.message}" }
         }
     }
 
-    private fun handleHandDataMessage(jsonObj: JsonObject, participant: LKRemoteParticipant?) {
-        val senderIdentity = participant?.identity() ?: return
-        val localIdentity = room?.localParticipant()?.identity() ?: ""
+    private fun handleHandDataMessage(jsonObj: JsonObject, participant: RemoteParticipant?) {
+        val senderIdentity = participant?.identity()?.stringValue() ?: return
+        val localIdentity = room?.localParticipant()?.identity()?.stringValue() ?: ""
         val type = jsonObj["type"]?.jsonPrimitive?.contentOrNull ?: return
         val at = jsonObj["at"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: nowMs()
 
         when (type) {
-            "hand/raise" -> {
-                if (senderIdentity != localIdentity) {
-                    raisedHands[senderIdentity] = at
-                }
-            }
+            "hand/raise" -> if (senderIdentity != localIdentity) raisedHands[senderIdentity] = at
             "hand/lower" -> {
                 val target = jsonObj["target"]?.jsonPrimitive?.contentOrNull
                 if (target == localIdentity) {
@@ -329,130 +487,140 @@ actual class ConferenceLiveKitManager actual constructor() {
                 }
             }
         }
-
-        updateParticipants()
+        refreshRoomState()
     }
 
-    private fun updateParticipants() {
-        val lkRoom = room ?: return
-        val all = mutableListOf<LkParticipant>()
-
-        // Local participant
-        lkRoom.localParticipant()?.let { lp ->
-            all.add(
-                LkParticipant(
-                    identity = lp.identity() ?: "",
-                    name = lp.name() ?: lp.identity() ?: "",
-                    sid = lp.sid() ?: "",
-                    isLocal = true,
-                    isSpeaking = lp.isSpeaking(),
-                    isAudioEnabled = lp.isMicrophoneEnabled(),
-                    isVideoEnabled = lp.isCameraEnabled(),
-                    isScreenSharing = lp.isScreenShareEnabled(),
-                    isHandRaised = localHandRaised,
-                    handRaisedAt = raisedHands[lp.identity() ?: ""],
-                )
-            )
-        }
-
-        // Remote participants
-        @Suppress("UNCHECKED_CAST")
-        val remotes = lkRoom.remoteParticipants() as? Map<String, LKRemoteParticipant> ?: emptyMap()
-        remotes.values.forEach { rp ->
-            all.add(
-                LkParticipant(
-                    identity = rp.identity() ?: "",
-                    name = rp.name() ?: rp.identity() ?: "",
-                    sid = rp.sid() ?: "",
-                    isLocal = false,
-                    isSpeaking = rp.isSpeaking(),
-                    isAudioEnabled = rp.isMicrophoneEnabled(),
-                    isVideoEnabled = rp.isCameraEnabled(),
-                    isScreenSharing = rp.isScreenShareEnabled(),
-                    isHandRaised = raisedHands.containsKey(rp.identity() ?: ""),
-                    handRaisedAt = raisedHands[rp.identity() ?: ""],
-                )
-            )
-        }
-
-        _participants.value = all
-    }
-
-    private fun updateVideoTracks() {
-        val lkRoom = room ?: return
-        val tracks = mutableListOf<LkVideoTrackHandle>()
-
-        fun addTracksFromParticipant(participant: LKParticipant) {
-            @Suppress("UNCHECKED_CAST")
-            val publications = participant.trackPublications() as? Map<String, LKTrackPublication> ?: return
-            publications.values.forEach { pub ->
-                val track = pub.track()
-                if (track is LKVideoTrack) {
-                    val isScreen = pub.source() == LKTrackSourceScreenShareVideo
-                    tracks.add(
-                        LkVideoTrackHandle(
-                            participantIdentity = participant.identity() ?: "",
-                            trackSid = pub.sid() ?: "",
-                            nativeTrack = track,
-                            isScreenShare = isScreen,
-                        )
-                    )
+    private suspend fun awaitNSError(
+        block: (completion: (NSError?) -> Unit) -> Unit,
+    ) {
+        suspendCancellableCoroutine { continuation ->
+            block { error ->
+                if (!continuation.isActive) return@block
+                if (error != null) {
+                    continuation.resumeWithException(LiveKitIosException(error.localizedDescription))
+                } else {
+                    continuation.resume(Unit)
                 }
             }
         }
+    }
 
-        lkRoom.localParticipant()?.let { addTracksFromParticipant(it) }
-        @Suppress("UNCHECKED_CAST")
-        val remotes = lkRoom.remoteParticipants() as? Map<String, LKRemoteParticipant> ?: emptyMap()
-        remotes.values.forEach { addTracksFromParticipant(it) }
+    private suspend fun awaitPublication(
+        block: (completion: (LocalTrackPublication?, NSError?) -> Unit) -> Unit,
+    ): LocalTrackPublication? = suspendCancellableCoroutine { continuation ->
+        block { publication, error ->
+            if (!continuation.isActive) return@block
+            if (error != null) {
+                continuation.resumeWithException(LiveKitIosException(error.localizedDescription))
+            } else {
+                continuation.resume(publication)
+            }
+        }
+    }
 
-        _videoTracks.value = tracks
+    private fun nowMs(): Long = (NSDate().timeIntervalSince1970 * 1000).toLong()
+}
+
+@OptIn(ExperimentalForeignApi::class)
+private class IosRoomDelegate(
+    private val manager: ConferenceLiveKitManager,
+) : NSObject(), RoomDelegateProtocol {
+
+    
+    @ObjCSignatureOverride
+    override fun room(room: Room, didUpdateConnectionState: Long, from: Long) {
+        manager.onConnectionStateChanged(didUpdateConnectionState)
+    }
+
+    override fun roomDidConnect(room: Room) {
+        manager.onConnectionStateChanged(ConnectionStateConnected)
+    }
+
+    override fun roomIsReconnecting(room: Room) {
+        manager.onConnectionStateChanged(ConnectionStateReconnecting)
+    }
+
+    override fun roomDidReconnect(room: Room) {
+        manager.onConnectionStateChanged(ConnectionStateConnected)
+    }
+
+    
+    @ObjCSignatureOverride
+    override fun room(room: Room, didFailToConnectWithError: cocoapods.LiveKitClient.LiveKitError?) {
+        manager.onRoomFailed(didFailToConnectWithError)
+    }
+
+    
+    @ObjCSignatureOverride
+    override fun room(room: Room, didDisconnectWithError: cocoapods.LiveKitClient.LiveKitError?) {
+        manager.onRoomDisconnected(didDisconnectWithError)
+    }
+
+    
+    @ObjCSignatureOverride
+    override fun room(room: Room, participantDidConnect: RemoteParticipant) {
+        manager.onRoomContentChanged()
+    }
+
+    
+    @ObjCSignatureOverride
+    override fun room(room: Room, participantDidDisconnect: RemoteParticipant) {
+        manager.onRoomContentChanged()
+    }
+
+    
+    @ObjCSignatureOverride
+    override fun room(room: Room, didUpdateSpeakingParticipants: List<*>) {
+        manager.onRoomContentChanged()
+    }
+
+    
+    @ObjCSignatureOverride
+    override fun room(room: Room, localParticipant: LocalParticipant, didPublishTrack: LocalTrackPublication) {
+        manager.onRoomContentChanged()
+    }
+
+    
+    @ObjCSignatureOverride
+    override fun room(room: Room, localParticipant: LocalParticipant, didUnpublishTrack: LocalTrackPublication) {
+        manager.onRoomContentChanged()
+    }
+
+    
+    @ObjCSignatureOverride
+    override fun room(room: Room, remoteParticipant: RemoteParticipant, didPublishTrack: RemoteTrackPublication) {
+        manager.onRoomContentChanged()
+    }
+
+    
+    @ObjCSignatureOverride
+    override fun room(room: Room, remoteParticipant: RemoteParticipant, didUnpublishTrack: RemoteTrackPublication) {
+        manager.onRoomContentChanged()
+    }
+
+    
+    @ObjCSignatureOverride
+    override fun room(room: Room, participant: RemoteParticipant, didSubscribeTrack: RemoteTrackPublication) {
+        manager.onRoomContentChanged()
+    }
+
+    
+    @ObjCSignatureOverride
+    override fun room(room: Room, participant: RemoteParticipant, didUnsubscribeTrack: RemoteTrackPublication) {
+        manager.onRoomContentChanged()
+    }
+
+    
+    @ObjCSignatureOverride
+    override fun room(room: Room, participant: Participant, trackPublication: TrackPublication, didUpdateIsMuted: Boolean) {
+        manager.onRoomContentChanged()
+    }
+
+    
+    @ObjCSignatureOverride
+    override fun room(room: Room, participant: RemoteParticipant?, didReceiveData: NSData, forTopic: String) {
+        manager.onDataReceived(didReceiveData, participant)
     }
 }
 
-/**
- * Delegate para eventos del Room de LiveKit iOS.
- */
-private class ConferenceRoomDelegate(
-    private val onParticipantChanged: () -> Unit,
-    private val onTrackChanged: () -> Unit,
-    private val onConnectionChanged: (LkConnectionState) -> Unit,
-    private val onDataReceived: ((NSData, LKRemoteParticipant?) -> Unit)? = null,
-) : LKRoomDelegateProtocol {
-
-    // Implementar metodos del protocolo delegate
-    // Los nombres exactos dependen del header ObjC generado por el pod
-
-    override fun room(room: LKRoom, participantDidConnect: LKRemoteParticipant) {
-        onParticipantChanged()
-    }
-
-    override fun room(room: LKRoom, participantDidDisconnect: LKRemoteParticipant) {
-        onParticipantChanged()
-        onTrackChanged()
-    }
-
-    override fun room(room: LKRoom, participant: LKRemoteParticipant, didSubscribeTrack: LKTrackPublication) {
-        onTrackChanged()
-    }
-
-    override fun room(room: LKRoom, participant: LKRemoteParticipant, didUnsubscribeTrack: LKTrackPublication) {
-        onTrackChanged()
-    }
-
-    override fun roomDidDisconnect(room: LKRoom, error: platform.Foundation.NSError?) {
-        onConnectionChanged(LkConnectionState.DISCONNECTED)
-    }
-
-    override fun roomIsReconnecting(room: LKRoom) {
-        onConnectionChanged(LkConnectionState.RECONNECTING)
-    }
-
-    override fun roomDidReconnect(room: LKRoom) {
-        onConnectionChanged(LkConnectionState.CONNECTED)
-    }
-
-    fun room(room: LKRoom, participant: LKRemoteParticipant, didReceiveData: NSData) {
-        onDataReceived?.invoke(didReceiveData, participant)
-    }
-}
+private class LiveKitIosException(message: String) : RuntimeException(message)

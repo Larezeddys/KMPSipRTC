@@ -91,7 +91,7 @@ kotlin {
         }
         pod("LiveKitClient") {
             version = "2.0.18"
-            moduleName = "LiveKit"
+            moduleName = "LiveKitClient"
         }
     }
 
