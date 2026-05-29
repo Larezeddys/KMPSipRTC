@@ -24,15 +24,15 @@ class UnifiedCallRouter(
      * Si hay LiveKitCallManager configurado, las llamadas Matrix van por LiveKit SFU.
      * Si no, van por P2P (comportamiento original).
      */
-    fun determineCallType(destination: String): CallType {
+    fun determineCallType(destination: String, forceNativeMatrix: Boolean = false): CallType {
         return when {
             // Si es un Matrix ID (@user:domain) o room ID (!room:domain)
             (destination.startsWith("@") || destination.startsWith("!")) && destination.contains(":") -> {
-                if (livekitCallManager != null) {
+                if (livekitCallManager != null && !forceNativeMatrix) {
                     log.d { "Routing to LiveKit SFU for: $destination" }
                     CallType.LIVEKIT_SFU
                 } else {
-                    log.d { "Routing to Matrix P2P for: $destination" }
+                    log.d { "Routing to Matrix native VoIP for: $destination" }
                     CallType.MATRIX_INTERNAL
                 }
             }
@@ -51,9 +51,10 @@ class UnifiedCallRouter(
     suspend fun makeCall(
         destination: String,
         isVideo: Boolean = false,
-        accountInfo: AccountInfo? = null
+        accountInfo: AccountInfo? = null,
+        forceNativeMatrix: Boolean = false
     ): Result<UnifiedCallInfo> {
-        val callType = determineCallType(destination)
+        val callType = determineCallType(destination, forceNativeMatrix)
 
         return when (callType) {
             CallType.LIVEKIT_SFU -> {

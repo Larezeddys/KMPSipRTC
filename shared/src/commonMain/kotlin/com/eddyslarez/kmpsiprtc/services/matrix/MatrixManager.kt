@@ -16,13 +16,23 @@ import net.folivo.trixnity.client.*
 import net.folivo.trixnity.client.room.message.audio
 import net.folivo.trixnity.client.room.message.file
 import net.folivo.trixnity.client.room.message.image
+import net.folivo.trixnity.client.room.message.react
+import net.folivo.trixnity.client.room.message.reply
+import net.folivo.trixnity.client.room.message.replace
 import net.folivo.trixnity.client.room.message.text
+import net.folivo.trixnity.client.room.message.thread
 import net.folivo.trixnity.client.room.message.video
+import net.folivo.trixnity.client.room.getTimelineEventReactionAggregation
 import net.folivo.trixnity.client.store.roomId
+import net.folivo.trixnity.client.store.sender
+import net.folivo.trixnity.client.store.eventId
 import net.folivo.trixnity.utils.toByteArrayFlow
+import net.folivo.trixnity.core.model.EventId
 import net.folivo.trixnity.core.model.UserId
 import net.folivo.trixnity.core.model.RoomId
+import net.folivo.trixnity.core.model.events.m.RelatesTo
 import net.folivo.trixnity.core.model.events.m.room.RoomMessageEventContent
+import net.folivo.trixnity.core.model.events.m.room.RedactionEventContent
 import net.folivo.trixnity.core.model.events.m.room.Membership
 import net.folivo.trixnity.core.model.events.m.call.CallEventContent
 import com.eddyslarez.kmpsiprtc.platform.log
@@ -41,6 +51,14 @@ class MatrixManager(
     private var matrixClient: MatrixClient? = null
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+
+    // Sub-managers especializados (comparten el MatrixClient vivo del coordinador).
+    /** Subida/descarga de media (avatares, adjuntos) vía el MediaService de Trixnity. */
+    val fileManager: MatrixFileManager = MatrixFileManager { matrixClient }
+    /** Perfil propio (nombre/avatar), presencia y perfiles de otros usuarios. */
+    val profileManager: MatrixProfileManager = MatrixProfileManager({ matrixClient }, fileManager)
+    /** Typing, read receipts y miembros de sala. */
+    val roomManager: MatrixRoomManager = MatrixRoomManager({ matrixClient }, config)
 
     private val TAG = "MatrixManager"
     private val CALL_VERSION = "1"
@@ -102,6 +120,25 @@ class MatrixManager(
     }
 
     /**
+     * Resuelve el baseUrl real del homeserver. Si [MatrixConfig.enableWellKnownDiscovery]
+     * está activo, usa `.well-known/matrix/client` (con fallback al valor dado).
+     * Prioridad: homeserverOverride → dominio del userId (@user:dominio) → config.homeserverUrl.
+     * Soporta cualquier homeserver Matrix, no solo el configurado por defecto.
+     */
+    private suspend fun resolveBaseUrl(userId: String, homeserverOverride: String?): Url {
+        val explicit = homeserverOverride?.takeIf { it.isNotBlank() }
+        if (!config.enableWellKnownDiscovery) {
+            return Url(explicit ?: config.homeserverUrl)
+        }
+        val domain = userId.substringAfter(":", "").takeIf { it.isNotBlank() }
+        val seed = explicit ?: domain?.let { "https://$it" } ?: config.homeserverUrl
+        return seed.serverDiscovery().getOrElse {
+            log.w(TAG) { "serverDiscovery failed for '$seed', using fallback: ${it.message}" }
+            Url(explicit ?: config.homeserverUrl)
+        }
+    }
+
+    /**
      * Login con password. homeserverOverride permite cambiar el servidor sin
      * recrear el MatrixManager (util cuando el usuario escribe su propio homeserver).
      */
@@ -120,11 +157,12 @@ class MatrixManager(
             )
             log.d { "Modulos de repositorios y media store creados" }
 
-            val baseUrlStr = homeserverOverride?.takeIf { it.isNotBlank() } ?: config.homeserverUrl
+            val baseUrl = resolveBaseUrl(userId, homeserverOverride)
+            log.d { "Resolved Matrix baseUrl: $baseUrl" }
 
             // Crear cliente Matrix usando la API correcta
             val loginResult = MatrixClient.loginWithPassword(
-                baseUrl = Url(baseUrlStr),
+                baseUrl = baseUrl,
                 identifier = IdentifierType.User(userId),
                 password = password,
                 deviceId = null,
@@ -473,6 +511,11 @@ class MatrixManager(
                                     content = content,
                                 )
                             }
+                            // Borrado (m.room.redaction): elimina el mensaje del cache.
+                            // También aplica a reacciones redactadas (no-op si no estaba).
+                            is RedactionEventContent -> {
+                                removeMessage(eventRoomId, content.redacts.full)
+                            }
                             else -> { /* Ignorar otros tipos de eventos */ }
                         }
                     } catch (e: Exception) {
@@ -663,30 +706,73 @@ class MatrixManager(
         timestamp: Long,
         content: RoomMessageEventContent,
     ) {
+        // 1) Edición (m.replace): no es un mensaje nuevo, actualiza el original.
+        val relatesTo = content.relatesTo
+        if (relatesTo is RelatesTo.Replace) {
+            val newBody = (relatesTo.newContent as? RoomMessageEventContent)?.body
+                ?: content.body.removePrefix("* ")
+            applyEdit(roomId, relatesTo.eventId.full, newBody)
+            return
+        }
+
+        // 2) Relaciones reply / thread para el modelo.
+        val replyToEventId = when (relatesTo) {
+            is RelatesTo.Reply -> relatesTo.replyTo.eventId.full
+            is RelatesTo.Thread -> relatesTo.replyTo?.eventId?.full
+            else -> null
+        }
+        val threadRootId = (relatesTo as? RelatesTo.Thread)?.eventId?.full
+
         val msgType = when (content.type) {
             "m.image" -> MessageType.IMAGE
             "m.video" -> MessageType.VIDEO
             "m.audio" -> MessageType.AUDIO
             "m.file" -> MessageType.FILE
-            else -> MessageType.TEXT // m.text, m.notice, m.emote, etc.
+            "m.notice" -> MessageType.NOTICE
+            else -> MessageType.TEXT // m.text, m.emote, etc.
         }
 
-        if (msgType == MessageType.TEXT) {
-            upsertTextMessage(roomId, eventId, senderId, content.body, timestamp)
+        if (msgType == MessageType.TEXT || msgType == MessageType.NOTICE) {
+            upsertTextMessage(
+                roomId = roomId,
+                eventId = eventId,
+                senderId = senderId,
+                body = content.body,
+                timestamp = timestamp,
+                type = msgType,
+                replyToEventId = replyToEventId,
+                threadRootId = threadRootId,
+            )
         } else {
-            // Para media usamos content.body (Matrix garantiza que sea el
-            // filename o un fallback textual). mxcUrl se deja null por ahora;
-            // las burbujas muestran "📎 nombre" sin preview.
+            // Resolver el mxc:// real de la media (FileBased) para descarga/preview.
+            val mxc = (content as? RoomMessageEventContent.FileBased)?.url
+            val realName = (content as? RoomMessageEventContent.FileBased)?.fileName ?: content.body
             upsertMediaMessage(
                 roomId = roomId,
                 eventId = eventId,
                 senderId = senderId,
                 timestamp = timestamp,
                 type = msgType,
-                mxcUrl = null,
-                fileName = content.body,
+                mxcUrl = mxc,
+                fileName = realName,
+                replyToEventId = replyToEventId,
+                threadRootId = threadRootId,
             )
         }
+    }
+
+    /**
+     * Aplica una edición (m.replace) al mensaje original: actualiza su contenido
+     * y lo marca como editado. Si el original aún no está en el cache, no hace nada.
+     */
+    private fun applyEdit(roomId: String, targetEventId: String, newBody: String) {
+        val current = _messages.value[roomId] ?: return
+        val idx = current.indexOfFirst { it.id == targetEventId }
+        if (idx < 0) return
+        val updated = current.toMutableList().apply {
+            set(idx, this[idx].copy(content = newBody, isEdited = true))
+        }
+        _messages.value = _messages.value + (roomId to updated)
     }
 
     /**
@@ -701,6 +787,8 @@ class MatrixManager(
         type: MessageType,
         mxcUrl: String?,
         fileName: String,
+        replyToEventId: String? = null,
+        threadRootId: String? = null,
     ) {
         val current = _messages.value[roomId] ?: emptyList()
         if (current.any { it.id == eventId }) return
@@ -716,7 +804,10 @@ class MatrixManager(
             timestamp = timestamp,
             type = type,
             mediaUrl = httpUrl,
+            mxcUrl = mxcUrl,
             fileName = fileName,
+            replyToEventId = replyToEventId,
+            threadRootId = threadRootId,
         )
 
         // Reemplazar optimista local (igual que upsertTextMessage)
@@ -775,6 +866,9 @@ class MatrixManager(
         senderId: String,
         body: String,
         timestamp: Long,
+        type: MessageType = MessageType.TEXT,
+        replyToEventId: String? = null,
+        threadRootId: String? = null,
     ) {
         val current = _messages.value[roomId] ?: emptyList()
 
@@ -788,7 +882,9 @@ class MatrixManager(
             senderDisplayName = extractDisplayName(senderId),
             content = body,
             timestamp = timestamp,
-            type = MessageType.TEXT,
+            type = type,
+            replyToEventId = replyToEventId,
+            threadRootId = threadRootId,
         )
 
         // 2) Buscar optimista local del mismo sender+content+timestamp cercano
@@ -989,6 +1085,175 @@ class MatrixManager(
     }
 
     /**
+     * Responder a un mensaje (m.in_reply_to). Mantiene soporte de thread si el
+     * mensaje respondido pertenece a uno (la DSL lo resuelve internamente).
+     */
+    suspend fun sendReply(roomId: String, replyToEventId: String, message: String): Result<Unit> {
+        return try {
+            val client = matrixClient ?: throw Exception("Not logged in")
+            client.room.sendMessage(RoomId(roomId)) {
+                reply(EventId(replyToEventId), null)
+                text(message)
+            }
+            Result.success(Unit)
+        } catch (e: Exception) {
+            log.e(TAG) { "sendReply failed: ${e.message}" }
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Enviar un mensaje dentro de un thread (rel_type m.thread). [threadRootId]
+     * es el evento raíz del hilo.
+     */
+    suspend fun sendThreadMessage(roomId: String, threadRootId: String, message: String): Result<Unit> {
+        return try {
+            val client = matrixClient ?: throw Exception("Not logged in")
+            client.room.sendMessage(RoomId(roomId)) {
+                thread(EventId(threadRootId), null, false)
+                text(message)
+            }
+            Result.success(Unit)
+        } catch (e: Exception) {
+            log.e(TAG) { "sendThreadMessage failed: ${e.message}" }
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Editar un mensaje propio (m.replace). [targetEventId] es el mensaje original.
+     */
+    suspend fun editMessage(roomId: String, targetEventId: String, newMessage: String): Result<Unit> {
+        return try {
+            val client = matrixClient ?: throw Exception("Not logged in")
+            client.room.sendMessage(RoomId(roomId)) {
+                replace(EventId(targetEventId))
+                text(newMessage)
+            }
+            // Optimista: reflejar la edición de inmediato.
+            applyEdit(roomId, targetEventId, newMessage)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            log.e(TAG) { "editMessage failed: ${e.message}" }
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Borrar (redactar) un mensaje. Funciona sobre mensajes propios o ajenos si
+     * el usuario tiene permisos en la sala.
+     */
+    suspend fun deleteMessage(roomId: String, eventId: String, reason: String? = null): Result<Unit> {
+        return try {
+            val client = matrixClient ?: throw Exception("Not logged in")
+            client.api.room.redactEvent(RoomId(roomId), EventId(eventId), reason).getOrThrow()
+            removeMessage(roomId, eventId)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            log.e(TAG) { "deleteMessage failed: ${e.message}" }
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Reenviar un mensaje a otra sala. No hay evento nativo de forward en Matrix:
+     * se re-envía el contenido. Para media se re-referencia el `mxc://` original.
+     */
+    suspend fun forwardMessage(targetRoomId: String, message: MatrixMessage): Result<Unit> {
+        return try {
+            val client = matrixClient ?: throw Exception("Not logged in")
+            when (message.type) {
+                MessageType.TEXT, MessageType.NOTICE,
+                MessageType.CALL_INVITE, MessageType.CALL_ANSWER, MessageType.CALL_HANGUP -> {
+                    client.room.sendMessage(RoomId(targetRoomId)) { text(message.content) }
+                }
+                else -> {
+                    // Media: descargar bytes del mxc original y re-subir al reenviar.
+                    val mxc = message.mxcUrl
+                    if (mxc == null) {
+                        client.room.sendMessage(RoomId(targetRoomId)) { text(message.content) }
+                    } else {
+                        val bytes = fileManager.getMediaBytes(mxc)
+                            ?: throw Exception("No se pudo descargar la media a reenviar")
+                        val mime = when (message.type) {
+                            MessageType.IMAGE -> "image/*"
+                            MessageType.VIDEO -> "video/*"
+                            MessageType.AUDIO -> "audio/*"
+                            else -> "application/octet-stream"
+                        }
+                        sendFile(targetRoomId, bytes, mime, message.fileName ?: message.content)
+                            .getOrThrow()
+                    }
+                }
+            }
+            Result.success(Unit)
+        } catch (e: Exception) {
+            log.e(TAG) { "forwardMessage failed: ${e.message}" }
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Reaccionar a un mensaje con un emoji (m.reaction / annotation).
+     */
+    suspend fun react(roomId: String, eventId: String, emoji: String): Result<Unit> {
+        return try {
+            val client = matrixClient ?: throw Exception("Not logged in")
+            client.room.sendMessage(RoomId(roomId)) {
+                react(EventId(eventId), emoji)
+            }
+            Result.success(Unit)
+        } catch (e: Exception) {
+            log.e(TAG) { "react failed: ${e.message}" }
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Quitar una reacción propia: redacta el evento m.reaction. [reactionEventId]
+     * se obtiene de [ReactionInfo.reactionEventIds] (vía [observeReactions]).
+     */
+    suspend fun removeReaction(roomId: String, reactionEventId: String): Result<Unit> {
+        return try {
+            val client = matrixClient ?: throw Exception("Not logged in")
+            client.api.room.redactEvent(RoomId(roomId), EventId(reactionEventId)).getOrThrow()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            log.e(TAG) { "removeReaction failed: ${e.message}" }
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Observa las reacciones agregadas de un mensaje: emoji -> [ReactionInfo].
+     * Pensado para llamarse por mensaje visible (Trixnity agrega bajo demanda).
+     */
+    fun observeReactions(roomId: String, eventId: String): Flow<Map<String, ReactionInfo>>? {
+        val client = matrixClient ?: return null
+        val myUserId = client.userId.full
+        return client.room
+            .getTimelineEventReactionAggregation(RoomId(roomId), EventId(eventId))
+            .map { aggregation ->
+                aggregation.reactions.mapValues { (_, events) ->
+                    ReactionInfo(
+                        count = events.size,
+                        reactedByMe = events.any { it.sender.full == myUserId },
+                        reactionEventIds = events.map { it.eventId.full },
+                    )
+                }
+            }
+    }
+
+    /**
+     * Elimina un mensaje del cache local (por borrado/redacción).
+     */
+    private fun removeMessage(roomId: String, eventId: String) {
+        val current = _messages.value[roomId] ?: return
+        if (current.none { it.id == eventId }) return
+        _messages.value = _messages.value + (roomId to current.filterNot { it.id == eventId })
+    }
+
+    /**
      * Crear sala nueva
      */
     suspend fun createRoom(
@@ -1021,17 +1286,11 @@ class MatrixManager(
     }
 
     /**
-     * Iniciar llamada de voz - envia m.call.invite
-     *
-     * @deprecated Matrix calls están deshabilitadas. Las llamadas reales usan
-     * el módulo de conferencias / LiveKit. Esta función retorna early con
-     * Result.failure si `config.enableVoip = false` (que es el default).
+     * Iniciar llamada de voz nativa Matrix - envia m.call.invite.
+     * Gateada por [MatrixConfig.enableVoip] (true por defecto). Convive con
+     * LiveKit: el [com.eddyslarez.kmpsiprtc.services.unified.UnifiedCallRouter]
+     * decide la ruta por destino.
      */
-    @Deprecated(
-        message = "Matrix calls deshabilitadas. Usa el módulo de conferencias/LiveKit.",
-        level = DeprecationLevel.WARNING
-    )
-    @Suppress("DEPRECATION")
     @OptIn(kotlin.time.ExperimentalTime::class)
     suspend fun startVoiceCall(roomId: String): Result<MatrixCall> {
         if (!config.enableVoip) {
@@ -1103,15 +1362,9 @@ class MatrixManager(
     }
 
     /**
-     * Iniciar videollamada - envia m.call.invite con video
-     *
-     * @deprecated Matrix video calls están deshabilitadas. Usa conference/LiveKit.
+     * Iniciar videollamada nativa Matrix - envia m.call.invite con video.
+     * Gateada por [MatrixConfig.enableVideo] (true por defecto).
      */
-    @Deprecated(
-        message = "Matrix video calls deshabilitadas. Usa el módulo de conferencias/LiveKit.",
-        level = DeprecationLevel.WARNING
-    )
-    @Suppress("DEPRECATION")
     suspend fun startVideoCall(roomId: String): Result<MatrixCall> {
         if (!config.enableVideo) {
             log.w(TAG) { "startVideoCall: bloqueado, MatrixConfig.enableVideo=false (chat-only)" }
@@ -1162,15 +1415,8 @@ class MatrixManager(
     }
 
     /**
-     * Responder llamada - envia m.call.answer
-     *
-     * @deprecated Matrix calls deshabilitadas. Usa conference/LiveKit.
+     * Responder llamada nativa Matrix - envia m.call.answer.
      */
-    @Deprecated(
-        message = "Matrix calls deshabilitadas. Usa el módulo de conferencias/LiveKit.",
-        level = DeprecationLevel.WARNING
-    )
-    @Suppress("DEPRECATION")
     suspend fun answerCall(callId: String): Result<Unit> {
         if (!config.enableVoip && !config.enableVideo) {
             log.w(TAG) { "answerCall: bloqueado, Matrix VoIP/Video deshabilitados por config" }
@@ -1219,19 +1465,9 @@ class MatrixManager(
     }
 
     /**
-     * Colgar llamada - envia m.call.hangup
-     *
-     * @deprecated Matrix calls deshabilitadas. Conservada para cleanup defensivo
-     * por si alguna versión anterior dejó una llamada activa.
+     * Colgar llamada nativa Matrix - envia m.call.hangup.
      */
-    @Deprecated(
-        message = "Matrix calls deshabilitadas. Usa el módulo de conferencias/LiveKit.",
-        level = DeprecationLevel.WARNING
-    )
-    @Suppress("DEPRECATION")
     suspend fun hangupCall(callId: String): Result<Unit> {
-        // Excepción al gate: hangupCall siempre se permite por cleanup defensivo —
-        // si la app encuentra una _activeCall heredada queremos poder terminarla.
         return try {
             val call = _activeCall.value ?: throw Exception("No active call")
             val client = matrixClient ?: throw Exception("Not logged in")

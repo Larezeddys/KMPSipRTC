@@ -146,6 +146,11 @@ class DesktopWebRtcManager : WebRtcManager {
     }
 
     fun enumerateScreenShareSources(): List<Pair<String, String>> {
+        if (isLinuxHost()) {
+            log.w(TAG) { "Fuentes de pantalla omitidas en Linux: capturer nativo inestable" }
+            return emptyList()
+        }
+
         var capturer: ScreenCapturer? = null
         return try {
             capturer = ScreenCapturer()
@@ -163,6 +168,11 @@ class DesktopWebRtcManager : WebRtcManager {
     }
 
     fun addLocalScreenShareTrack(sourceId: String? = null): VideoTrack? {
+        if (isLinuxHost()) {
+            log.w(TAG) { "Screen share local deshabilitado en Linux: capturer nativo inestable" }
+            return null
+        }
+
         ensureInitialized()
         if (!peerConnectionController.hasPeerConnection()) {
             peerConnectionController.createNewPeerConnection()
@@ -177,6 +187,9 @@ class DesktopWebRtcManager : WebRtcManager {
     fun getLocalScreenShareTrack(): VideoTrack? {
         return peerConnectionController.getLocalScreenShareTrack()
     }
+
+    private fun isLinuxHost(): Boolean =
+        System.getProperty("os.name").lowercase().contains("linux")
 
     fun setOnRemoteVideoTrack(listener: ((VideoTrack) -> Unit)?) {
         peerConnectionController.onRemoteVideoTrack = listener

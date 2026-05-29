@@ -97,6 +97,7 @@ actual class ConferenceLiveKitManager actual constructor() {
 
             // Actualizar participantes iniciales
             updateParticipants()
+            requestHandStateSync()
 
         } catch (e: Exception) {
             log.e(tag = TAG) { "Error conectando a LiveKit: ${e.message}" }
@@ -366,7 +367,7 @@ actual class ConferenceLiveKitManager actual constructor() {
             val text = data.decodeToString()
             val jsonObj = Json.parseToJsonElement(text).jsonObject
             val type = jsonObj["type"]?.jsonPrimitive?.contentOrNull
-            if (type == "hand/raise" || type == "hand/lower") {
+            if (type == "hand/raise" || type == "hand/lower" || type == "hand/sync/request" || type == "hand/sync/state") {
                 handleHandDataMessage(jsonObj, participant)
                 return
             }
@@ -417,9 +418,45 @@ actual class ConferenceLiveKitManager actual constructor() {
                     raisedHands.remove(target ?: senderIdentity)
                 }
             }
+            "hand/sync/request" -> publishLocalHandState()
+            "hand/sync/state" -> {
+                val target = jsonObj["participantIdentity"]?.jsonPrimitive?.contentOrNull ?: senderIdentity
+                val raised = jsonObj["raised"]?.jsonPrimitive?.contentOrNull?.equals("true", ignoreCase = true) == true
+                if (target == localIdentity) {
+                    localHandRaised = raised
+                }
+                if (raised) {
+                    raisedHands[target] = at
+                } else {
+                    raisedHands.remove(target)
+                }
+            }
         }
 
         updateParticipants()
+    }
+
+    private suspend fun requestHandStateSync() {
+        val identity = room?.localParticipant?.identity?.value ?: return
+        publishHandData("""{"type":"hand/sync/request","at":${System.currentTimeMillis()},"participantIdentity":"$identity"}""")
+        publishLocalHandState()
+    }
+
+    private fun publishLocalHandState() {
+        scope.launch {
+            val lkRoom = room ?: return@launch
+            val identity = lkRoom.localParticipant.identity?.value ?: return@launch
+            val name = (lkRoom.localParticipant.name ?: identity).replace("\"", "\\\"")
+            val at = raisedHands[identity] ?: System.currentTimeMillis()
+            publishHandData("""{"type":"hand/sync/state","raised":$localHandRaised,"at":$at,"participantIdentity":"$identity","author":"$name"}""")
+        }
+    }
+
+    private suspend fun publishHandData(payload: String) {
+        room?.localParticipant?.publishData(
+            data = payload.encodeToByteArray(),
+            reliability = DataPublishReliability.RELIABLE
+        )
     }
 
     private fun applyParticipantHandAttributes(participant: Participant) {
@@ -469,7 +506,7 @@ actual class ConferenceLiveKitManager actual constructor() {
                         LkVideoTrackHandle(
                             participantIdentity = participant.identity?.value ?: "",
                             trackSid = pub.sid,
-                            nativeTrack = track,
+                            nativeTrack = lkRoom to track,
                             isScreenShare = isScreen,
                         )
                     )

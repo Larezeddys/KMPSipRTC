@@ -76,6 +76,9 @@ actual class ConferenceLiveKitManager actual constructor() {
     private val raisedHands = mutableMapOf<String, Long>()
     private var localHandRaised = false
 
+    private val isLinuxHost: Boolean =
+        System.getProperty("os.name").lowercase().contains("linux")
+
     @OptIn(ExperimentalTime::class)
     private fun currentTimeMs(): Long = Clock.System.now().toEpochMilliseconds()
 
@@ -236,6 +239,16 @@ actual class ConferenceLiveKitManager actual constructor() {
             return
         }
 
+        if (enabled && isLinuxHost) {
+            // webrtc-java 0.10.0 crashes the process in DesktopCapturer.getDesktopSources()
+            // on Linux instead of returning an error. Keep conferences usable until the
+            // native Linux capturer is replaced or upgraded.
+            log.w(tag = TAG) { "Screen share local deshabilitado en Linux: capturer nativo inestable" }
+            _mediaState.value = _mediaState.value.copy(screenShareEnabled = false)
+            rebuildParticipantList()
+            return
+        }
+
         if (enabled) {
             // Si no hay fuente persistida, intentar usar la primera disponible.
             val sourceId = selectedScreenShareSourceId ?: run {
@@ -325,23 +338,29 @@ actual class ConferenceLiveKitManager actual constructor() {
 
             val seenMics = mutableSetOf<String>()
             val seenSpeakers = mutableSetOf<String>()
+            microphones.add(LkDevice("default", "Sistema por defecto"))
+            speakers.add(LkDevice("default", "Sistema por defecto"))
+            seenMics.add("default")
+            seenSpeakers.add("default")
 
             // 1) Inputs declarados: incluir solo si suenan a mic, excluir si son speakers.
             inputs.forEach { d ->
                 val n = d.name
                 if (nameSuggestsSpeaker(n) && !nameSuggestsMic(n)) return@forEach
-                if (seenMics.add(n)) microphones.add(LkDevice(n, n))
+                val label = linuxAudioDeviceLabel(n, isInput = true) ?: return@forEach
+                if (seenMics.add(label)) microphones.add(LkDevice(n, label))
             }
             // 2) Outputs declarados: incluir solo si suenan a speaker, excluir si son mics.
             outputs.forEach { d ->
                 val n = d.name
                 if (nameSuggestsMic(n) && !nameSuggestsSpeaker(n)) return@forEach
-                if (seenSpeakers.add(n)) speakers.add(LkDevice(n, n))
+                val label = linuxAudioDeviceLabel(n, isInput = false) ?: return@forEach
+                if (seenSpeakers.add(label)) speakers.add(LkDevice(n, label))
             }
         } catch (e: Exception) {
             log.w(tag = TAG) { "Error enumerando dispositivos: ${e.message}" }
-            microphones.add(LkDevice("default", "Microfono por defecto"))
-            speakers.add(LkDevice("default", "Speaker por defecto"))
+            microphones.add(LkDevice("default", "Sistema por defecto"))
+            speakers.add(LkDevice("default", "Sistema por defecto"))
         }
 
         // Enumerar cámaras vía webrtc-java. Usamos `webRtc` (que es el publisher si
@@ -364,12 +383,16 @@ actual class ConferenceLiveKitManager actual constructor() {
             cameras.add(LkDevice("none", "Sin cámara"))
         }
 
-        try {
-            webRtc.enumerateScreenShareSources().forEach { (id, name) ->
-                screenShareSources.add(LkDevice(id, name))
+        if (!isLinuxHost) {
+            try {
+                webRtc.enumerateScreenShareSources().forEach { (id, name) ->
+                    screenShareSources.add(LkDevice(id, name))
+                }
+            } catch (e: Exception) {
+                log.w(tag = TAG) { "Error enumerando pantallas: ${e.message}" }
             }
-        } catch (e: Exception) {
-            log.w(tag = TAG) { "Error enumerando pantallas: ${e.message}" }
+        } else {
+            log.w(tag = TAG) { "Fuentes de pantalla omitidas en Linux: capturer nativo inestable" }
         }
 
         return LkDevices(
@@ -386,6 +409,25 @@ actual class ConferenceLiveKitManager actual constructor() {
         )
     }
 
+    private fun linuxAudioDeviceLabel(rawName: String, isInput: Boolean): String? {
+        val lower = rawName.lowercase()
+        if (!isInput && (lower.contains("nvidia") || lower.contains("hdmi"))) return null
+        if (lower.contains("alsa_playback") || lower == "default") return null
+
+        val base = rawName
+            .replace(Regex("\\s*\\[(plug)?hw:[^]]+]", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("^Port\\s+", RegexOption.IGNORE_CASE), "")
+            .replace("Microsoft®", "Microsoft")
+            .trim()
+
+        return when {
+            lower.contains("vx2000") || lower.contains("life") -> "Microsoft LifeCam VX-2000"
+            lower.contains("pch") -> "Audio interno"
+            base.equals("device", ignoreCase = true) -> if (isInput) "Micrófono del sistema" else "Salida del sistema"
+            base.isBlank() -> null
+            else -> base
+        }
+    }
     actual suspend fun selectCamera(deviceId: String) {
         log.d(tag = TAG) { "selectCamera: $deviceId" }
         selectedCameraId = deviceId
@@ -401,6 +443,7 @@ actual class ConferenceLiveKitManager actual constructor() {
     actual suspend fun selectMicrophone(deviceId: String) {
         log.d(tag = TAG) { "selectMicrophone: $deviceId" }
         selectedMicrophoneId = deviceId
+        if (deviceId == "default") return
         val ok = publisherWebRtc?.selectAudioInputDeviceByName(deviceId) ?: false
         if (!ok) log.w(tag = TAG) { "selectMicrophone falló para: $deviceId" }
     }
@@ -408,6 +451,7 @@ actual class ConferenceLiveKitManager actual constructor() {
     actual suspend fun selectSpeaker(deviceId: String) {
         log.d(tag = TAG) { "selectSpeaker: $deviceId" }
         selectedSpeakerId = deviceId
+        if (deviceId == "default") return
         // Aplicar a ambos PCs por si la salida se enruta por cualquiera de ellos.
         val okSub = subscriberWebRtc?.selectAudioOutputDeviceByName(deviceId) ?: false
         val okPub = publisherWebRtc?.selectAudioOutputDeviceByName(deviceId) ?: false
@@ -529,6 +573,7 @@ actual class ConferenceLiveKitManager actual constructor() {
                             handRaisedAt = raisedHands[info.identity],
                         )
                         log.d(tag = TAG) { "Participant updated: ${info.name} (${info.identity}, state=${info.state})" }
+                        publishLocalHandState()
                     }
                 }
                 rebuildParticipantList()
@@ -543,6 +588,7 @@ actual class ConferenceLiveKitManager actual constructor() {
                 if (_connectionState.value != LkConnectionState.CONNECTED) {
                     _connectionState.value = LkConnectionState.CONNECTED
                     log.d(tag = TAG) { "Marcando CONNECTED por TrackPublished (fallback)" }
+                    requestHandStateSync()
                 }
             }
 
@@ -679,6 +725,7 @@ actual class ConferenceLiveKitManager actual constructor() {
                         if (_connectionState.value != LkConnectionState.CONNECTED) {
                             _connectionState.value = LkConnectionState.CONNECTED
                             log.d(tag = TAG) { "Publisher RTC CONNECTED — sala lista" }
+                            requestHandStateSync()
                         }
                     }
                     WebRtcConnectionState.FAILED -> {
@@ -802,7 +849,7 @@ actual class ConferenceLiveKitManager actual constructor() {
             // LiveKit web client envia: {"author":"nombre", "message":"texto"}
             val jsonObj = jsonParser.parseToJsonElement(text).jsonObject
             val type = jsonObj["type"]?.jsonPrimitive?.content
-            if (type == "hand/raise" || type == "hand/lower") {
+            if (type == "hand/raise" || type == "hand/lower" || type == "hand/sync/request" || type == "hand/sync/state") {
                 handleHandDataMessage(jsonObj)
                 return
             }
@@ -845,6 +892,19 @@ actual class ConferenceLiveKitManager actual constructor() {
         }
     }
 
+    private fun requestHandStateSync() {
+        if (localIdentity.isBlank()) return
+        publishHandData("""{"type":"hand/sync/request","at":${currentTimeMs()},"participantIdentity":"$localIdentity"}""")
+        publishLocalHandState()
+    }
+
+    private fun publishLocalHandState() {
+        if (localIdentity.isBlank()) return
+        val safeName = localName.replace("\"", "\\\"")
+        val at = raisedHands[localIdentity] ?: currentTimeMs()
+        publishHandData("""{"type":"hand/sync/state","raised":$localHandRaised,"at":$at,"participantIdentity":"$localIdentity","author":"$safeName"}""")
+    }
+
     private fun handleHandDataMessage(jsonObj: JsonObject) {
         val type = jsonObj["type"]?.jsonPrimitive?.content ?: return
         val at = jsonObj["at"]?.jsonPrimitive?.content?.toLongOrNull() ?: currentTimeMs()
@@ -869,6 +929,25 @@ actual class ConferenceLiveKitManager actual constructor() {
                     raisedHands.remove(localIdentity)
                 } else {
                     val identity = target ?: sender
+                    raisedHands.remove(identity)
+                    remoteParticipants[identity]?.let { participant ->
+                        remoteParticipants[identity] = participant.copy(isHandRaised = false, handRaisedAt = null)
+                    }
+                }
+            }
+            "hand/sync/request" -> publishLocalHandState()
+            "hand/sync/state" -> {
+                val identity = jsonObj["participantIdentity"]?.jsonPrimitive?.content ?: sender
+                val raised = jsonObj["raised"]?.jsonPrimitive?.content?.equals("true", ignoreCase = true) == true
+                if (identity == localIdentity) {
+                    localHandRaised = raised
+                }
+                if (raised) {
+                    raisedHands[identity] = at
+                    remoteParticipants[identity]?.let { participant ->
+                        remoteParticipants[identity] = participant.copy(isHandRaised = true, handRaisedAt = at)
+                    }
+                } else {
                     raisedHands.remove(identity)
                     remoteParticipants[identity]?.let { participant ->
                         remoteParticipants[identity] = participant.copy(isHandRaised = false, handRaisedAt = null)
@@ -904,4 +983,3 @@ actual class ConferenceLiveKitManager actual constructor() {
         return regex.find(json)?.groupValues?.get(1)
     }
 }
-

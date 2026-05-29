@@ -115,6 +115,7 @@ actual class ConferenceLiveKitManager actual constructor() {
             }
             _connectionState.value = LkConnectionState.CONNECTED
             refreshRoomState()
+            requestHandStateSync()
             startStateRefreshLoop()
             log.d(tag = tag) { "Conectado exitosamente a LiveKit iOS" }
         } catch (error: Throwable) {
@@ -440,7 +441,7 @@ actual class ConferenceLiveKitManager actual constructor() {
         try {
             val jsonObj = Json.parseToJsonElement(text).jsonObject
             val type = jsonObj["type"]?.jsonPrimitive?.contentOrNull
-            if (type == "hand/raise" || type == "hand/lower") {
+            if (type == "hand/raise" || type == "hand/lower" || type == "hand/sync/request" || type == "hand/sync/state") {
                 handleHandDataMessage(jsonObj, participant)
                 return
             }
@@ -486,8 +487,39 @@ actual class ConferenceLiveKitManager actual constructor() {
                     raisedHands.remove(target ?: senderIdentity)
                 }
             }
+            "hand/sync/request" -> publishLocalHandState()
+            "hand/sync/state" -> {
+                val target = jsonObj["participantIdentity"]?.jsonPrimitive?.contentOrNull ?: senderIdentity
+                val raised = jsonObj["raised"]?.jsonPrimitive?.contentOrNull?.equals("true", ignoreCase = true) == true
+                if (target == localIdentity) {
+                    localHandRaised = raised
+                }
+                if (raised) {
+                    raisedHands[target] = at
+                } else {
+                    raisedHands.remove(target)
+                }
+            }
         }
         refreshRoomState()
+    }
+
+    private fun requestHandStateSync() {
+        scope.launch {
+            val identity = room?.localParticipant()?.identity()?.stringValue() ?: return@launch
+            publishData("""{"type":"hand/sync/request","at":${nowMs()},"participantIdentity":"$identity"}""")
+            publishLocalHandState()
+        }
+    }
+
+    private fun publishLocalHandState() {
+        scope.launch {
+            val lp = room?.localParticipant() ?: return@launch
+            val identity = lp.identity()?.stringValue() ?: return@launch
+            val name = (lp.name() ?: identity).replace("\"", "\\\"")
+            val at = raisedHands[identity] ?: nowMs()
+            publishData("""{"type":"hand/sync/state","raised":$localHandRaised,"at":$at,"participantIdentity":"$identity","author":"$name"}""")
+        }
     }
 
     private suspend fun awaitNSError(

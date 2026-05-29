@@ -27,6 +27,11 @@ import com.eddyslarez.kmpsiprtc.services.matrix.MatrixConnectionState
 import com.eddyslarez.kmpsiprtc.services.matrix.MatrixManager
 import com.eddyslarez.kmpsiprtc.services.matrix.MatrixMessage
 import com.eddyslarez.kmpsiprtc.services.matrix.MatrixRoom
+import com.eddyslarez.kmpsiprtc.services.matrix.MatrixMember
+import com.eddyslarez.kmpsiprtc.services.matrix.MatrixPresence
+import com.eddyslarez.kmpsiprtc.services.matrix.MatrixUserPresence
+import com.eddyslarez.kmpsiprtc.services.matrix.MatrixUserProfile
+import com.eddyslarez.kmpsiprtc.services.matrix.ReactionInfo
 import com.eddyslarez.kmpsiprtc.services.unified.UnifiedCallInfo
 import com.eddyslarez.kmpsiprtc.services.unified.UnifiedCallRouter
 import kotlinx.datetime.Instant
@@ -3011,12 +3016,160 @@ class KmpSipRtc private constructor() {
         }
     }
 
+    // ==================== MENSAJERÍA RICA MATRIX (tipo Element) ====================
+
+    /** Responder a un mensaje (m.in_reply_to). */
+    fun replyMatrixMessage(roomId: String, replyToEventId: String, message: String, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
+        internalScope.launch { onComplete?.invoke(matrix.sendReply(roomId, replyToEventId, message)) }
+    }
+
+    /** Enviar un mensaje dentro de un thread (m.thread). */
+    fun sendMatrixThreadMessage(roomId: String, threadRootId: String, message: String, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
+        internalScope.launch { onComplete?.invoke(matrix.sendThreadMessage(roomId, threadRootId, message)) }
+    }
+
+    /** Editar un mensaje propio (m.replace). */
+    fun editMatrixMessage(roomId: String, targetEventId: String, newMessage: String, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
+        internalScope.launch { onComplete?.invoke(matrix.editMessage(roomId, targetEventId, newMessage)) }
+    }
+
+    /** Borrar (redactar) un mensaje. */
+    fun deleteMatrixMessage(roomId: String, eventId: String, reason: String? = null, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
+        internalScope.launch { onComplete?.invoke(matrix.deleteMessage(roomId, eventId, reason)) }
+    }
+
+    /** Reenviar un mensaje a otra sala. */
+    fun forwardMatrixMessage(targetRoomId: String, message: MatrixMessage, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
+        internalScope.launch { onComplete?.invoke(matrix.forwardMessage(targetRoomId, message)) }
+    }
+
+    /** Reaccionar a un mensaje con un emoji. */
+    fun reactToMatrixMessage(roomId: String, eventId: String, emoji: String, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
+        internalScope.launch { onComplete?.invoke(matrix.react(roomId, eventId, emoji)) }
+    }
+
+    /** Quitar una reacción propia (redacta el evento m.reaction). */
+    fun removeMatrixReaction(roomId: String, reactionEventId: String, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
+        internalScope.launch { onComplete?.invoke(matrix.removeReaction(roomId, reactionEventId)) }
+    }
+
+    /** Observa las reacciones agregadas de un mensaje (emoji -> info). */
+    fun getMatrixReactionsFlow(roomId: String, eventId: String): Flow<Map<String, ReactionInfo>>? {
+        checkInitialized()
+        return matrixManager?.observeReactions(roomId, eventId)
+    }
+
+    // ==================== PERFIL / PRESENCIA MATRIX ====================
+
+    /** Cambiar el display name propio. */
+    fun setMatrixDisplayName(name: String?, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
+        internalScope.launch { onComplete?.invoke(matrix.profileManager.setDisplayName(name)) }
+    }
+
+    /** Cambiar el avatar propio (sube los bytes y actualiza el perfil). */
+    fun setMatrixAvatar(bytes: ByteArray, mimeType: String, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
+        internalScope.launch { onComplete?.invoke(matrix.profileManager.setAvatar(bytes, mimeType)) }
+    }
+
+    /** Obtener el perfil global de un usuario. */
+    fun getMatrixProfile(userId: String, onComplete: ((Result<MatrixUserProfile>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
+        internalScope.launch { onComplete?.invoke(matrix.profileManager.getProfile(userId)) }
+    }
+
+    /** Display name propio observable. */
+    fun getMatrixOwnDisplayNameFlow(): StateFlow<String?>? {
+        checkInitialized()
+        return matrixManager?.profileManager?.myDisplayName
+    }
+
+    /** Avatar (mxc) propio observable. */
+    fun getMatrixOwnAvatarFlow(): StateFlow<String?>? {
+        checkInitialized()
+        return matrixManager?.profileManager?.myAvatarUrl
+    }
+
+    /** Publicar presencia propia (online/offline/unavailable). */
+    fun setMatrixPresence(presence: MatrixPresence, statusMessage: String? = null, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
+        internalScope.launch { onComplete?.invoke(matrix.profileManager.setPresence(presence, statusMessage)) }
+    }
+
+    /** Observar la presencia de un usuario. */
+    fun getMatrixPresenceFlow(userId: String): Flow<MatrixUserPresence?>? {
+        checkInitialized()
+        return matrixManager?.profileManager?.observePresence(userId)
+    }
+
+    // ==================== TYPING / READ RECEIPTS / MIEMBROS ====================
+
+    /** Notificar que el usuario está (o dejó de estar) escribiendo en una sala. */
+    fun setMatrixTyping(roomId: String, typing: Boolean, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
+        internalScope.launch { onComplete?.invoke(matrix.roomManager.setTyping(roomId, typing)) }
+    }
+
+    /** Observar qué usuarios están escribiendo en una sala. */
+    fun getMatrixTypingFlow(roomId: String): Flow<Set<String>>? {
+        checkInitialized()
+        return matrixManager?.roomManager?.observeTyping(roomId)
+    }
+
+    /** Marcar como leído hasta un evento. */
+    fun markMatrixRead(roomId: String, eventId: String, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
+        internalScope.launch { onComplete?.invoke(matrix.roomManager.markRead(roomId, eventId)) }
+    }
+
+    /** Observar read receipts de una sala (eventId -> userIds que leyeron). */
+    fun getMatrixReadReceiptsFlow(roomId: String): Flow<Map<String, Set<String>>>? {
+        checkInitialized()
+        return matrixManager?.roomManager?.observeReadReceipts(roomId)
+    }
+
+    /** Cargar y observar los miembros de una sala. */
+    fun getMatrixMembersFlow(roomId: String, onReady: ((Flow<List<MatrixMember>>?) -> Unit)) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onReady(null); return }
+        internalScope.launch { onReady(matrix.roomManager.loadMembers(roomId)) }
+    }
+
+    /** Descargar los bytes de una media `mxc://` (con cache). */
+    fun getMatrixMediaBytes(mxcUri: String, onComplete: ((ByteArray?) -> Unit)) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete(null); return }
+        internalScope.launch { onComplete(matrix.fileManager.getMediaBytes(mxcUri)) }
+    }
+
     /**
      * Llamada unificada (auto-detecta SIP o Matrix)
      */
     fun makeUnifiedCall(
         destination: String,
         isVideo: Boolean = false,
+        forceNativeMatrix: Boolean = false,
         onComplete: ((Result<UnifiedCallInfo>) -> Unit)? = null
     ) {
         checkInitialized()
@@ -3027,7 +3180,7 @@ class KmpSipRtc private constructor() {
 
         internalScope.launch {
             val accountInfo = sipCoreManager?.currentAccountInfo
-            val result = router.makeCall(destination, isVideo, accountInfo)
+            val result = router.makeCall(destination, isVideo, accountInfo, forceNativeMatrix)
             onComplete?.invoke(result)
         }
     }

@@ -3,38 +3,47 @@ package com.eddyslarez.kmpsiprtc.services.matrix
 /**
  * Configuración del cliente Matrix.
  *
- * Esta integración es **chat-only**. Las llamadas Matrix (`m.call.*`) y la
- * videollamada **están deshabilitadas por defecto** y nunca deben activarse
- * desde la app: las llamadas reales del producto van por el módulo de
- * conferencias / LiveKit, no por Matrix / Element Call.
+ * Librería de propósito general: funciona contra **cualquier homeserver** Matrix.
+ * El [homeserverUrl] puede ser una URL completa (`https://matrix.org`) o un
+ * dominio a descubrir vía `.well-known/matrix/client`. El login resuelve el
+ * baseUrl real antes de autenticar.
  *
- * E2EE también está deshabilitado por ahora. El homeserver de MCN además
- * tiene `io.element.e2ee.force_disable = true` en su `.well-known`, así que
- * no hay cifrado posible incluso si se activara aquí.
+ * **E2EE**: deshabilitado por ahora. No hay key management/device verification
+ * implementado; si una room está cifrada la UI debe señalarlo. El camino queda
+ * abierto para una iteración futura (Trixnity soporta Olm/Megolm).
  *
- * Los flags `enableVoip`, `enableVideo` y `enableEncryption` se conservan
- * para futura compatibilidad pero el código del MatrixManager los respeta
- * estrictamente: cualquier intento de iniciar/contestar una llamada con
- * los flags en `false` retorna sin efecto.
+ * **Llamadas**: el VoIP nativo de Matrix (`m.call.*`) está habilitado por
+ * defecto y convive con LiveKit. El `UnifiedCallRouter` decide la ruta por
+ * destino. Poner [enableVoip]/[enableVideo] en false desactiva el VoIP nativo
+ * (las llamadas irían sólo por LiveKit/conferencias).
  */
 data class MatrixConfig(
-    /** Homeserver de MCN por defecto. Puede sobreescribirse para staging/dev. */
-    val homeserverUrl: String = "https://matrix.m.mcn.hu",
-    val deviceDisplayName: String = "MCN Softphone",
     /**
-     * E2EE: deshabilitado. El homeserver lo fuerza off; además no hay UI ni
-     * key management implementado. Si una room está cifrada, la UI lo señala
-     * como "no soportado" y bloquea envío/lectura del contenido cifrado.
+     * Homeserver. URL completa o dominio. Si es un dominio (sin esquema o sin
+     * endpoint conocido) se intenta descubrir vía `.well-known/matrix/client`.
+     */
+    val homeserverUrl: String = "https://matrix.org",
+    val deviceDisplayName: String = "KMP SIP RTC",
+    /**
+     * Resolución automática del baseUrl vía `.well-known/matrix/client`.
+     * Útil cuando el usuario escribe sólo su dominio (`@user:dominio.com`).
+     */
+    val enableWellKnownDiscovery: Boolean = true,
+    /**
+     * E2EE: deshabilitado. Ver doc de clase.
      */
     val enableEncryption: Boolean = false,
     val syncTimeout: Long = 30000L,
-    /**
-     * VoIP Matrix: deshabilitado. Ver doc de clase. NO activar — las llamadas
-     * van por el módulo de conferencias.
-     */
-    val enableVoip: Boolean = false,
-    /** Video Matrix: deshabilitado. Ver doc de clase. NO activar. */
-    val enableVideo: Boolean = false,
+    /** VoIP nativo Matrix (audio). Convive con LiveKit. */
+    val enableVoip: Boolean = true,
+    /** Video nativo Matrix. Convive con LiveKit. */
+    val enableVideo: Boolean = true,
     val enableFileTransfer: Boolean = true,
-    val maxFileUploadSize: Long = 100 * 1024 * 1024 // 100MB
+    val maxFileUploadSize: Long = 100 * 1024 * 1024, // 100MB
+    /** Si true, marca automáticamente como leído el último mensaje al recibirlo. */
+    val autoMarkRead: Boolean = false,
+    /** Si true, publica y observa presencia (online/offline). */
+    val presenceEnabled: Boolean = true,
+    /** Timeout del indicador de "escribiendo" enviado al servidor (ms). */
+    val typingTimeoutMs: Long = 15000L,
 )

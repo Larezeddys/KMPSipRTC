@@ -986,6 +986,24 @@ class DesktopPeerConnectionController(
     fun getLocalVideoTrack(): VideoTrack? = localVideoTrack
 
     fun addLocalScreenShareTrack(sourceId: String? = null): VideoTrack? {
+        // Linux: el native capturer de webrtc-java puede crashear (SIGSEGV) en
+        // ciertos compositors (especialmente Wayland). En X11 con XDamage suele
+        // funcionar. Antes desactivábamos por completo; ahora lo permitimos
+        // pero con telemetry para reportar fácil si pasa el crash. El usuario
+        // puede desactivarlo via JVM flag -Dmcn.conference.disableLinuxScreenShare=true
+        if (isLinuxHost()) {
+            val opt = System.getProperty("mcn.conference.disableLinuxScreenShare", "false")
+            if (opt.equals("true", ignoreCase = true)) {
+                log.w(TAG) { "Screen share Linux deshabilitado por flag -Dmcn.conference.disableLinuxScreenShare" }
+                return null
+            }
+            log.w(TAG) {
+                "Linux detectado — intentando screen share. Si crashea (SIGSEGV), " +
+                "ejecuta la app con -Dmcn.conference.disableLinuxScreenShare=true. " +
+                "Causa raíz: webrtc-java native capturer no estable en Wayland."
+            }
+        }
+
         val factory = peerConnectionFactory ?: return null
         val pc = peerConnection ?: return null
 
@@ -1052,6 +1070,9 @@ class DesktopPeerConnectionController(
     }
 
     fun getLocalScreenShareTrack(): VideoTrack? = localScreenTrack
+
+    private fun isLinuxHost(): Boolean =
+        System.getProperty("os.name").lowercase().contains("linux")
 
     fun closePeerConnection() {
         log.d(TAG) { "Closing PeerConnection" }
@@ -1182,5 +1203,4 @@ class DesktopPeerConnectionController(
         }
     }
 }
-
 
