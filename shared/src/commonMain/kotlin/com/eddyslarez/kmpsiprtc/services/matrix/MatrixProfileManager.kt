@@ -68,6 +68,7 @@ class MatrixProfileManager(
         val client = clientProvider() ?: return Result.failure(IllegalStateException("Not logged in"))
         return try {
             val profile = client.api.user.getProfile(UserId(userId)).getOrThrow()
+            log.d(TAG) { "getProfile($userId): name=${profile.displayName}, avatar=${profile.avatarUrl}" }
             Result.success(
                 MatrixUserProfile(
                     userId = userId,

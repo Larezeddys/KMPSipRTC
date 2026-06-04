@@ -109,6 +109,14 @@ data class MatrixMessage(
     val threadRootId: String? = null,
     /** true si el mensaje fue editado (tiene un m.replace aplicado). */
     val isEdited: Boolean = false,
+    /**
+     * Cuerpo formateado (HTML) del mensaje cuando `format == "org.matrix.custom.html"`.
+     * null para mensajes de texto plano. La UI lo usa para renderizar markdown/código
+     * y para interoperar con Element.
+     */
+    val formattedBody: String? = null,
+    /** Formato del cuerpo (p. ej. "org.matrix.custom.html"), o null si es texto plano. */
+    val format: String? = null,
     /** Reacciones agregadas: emoji -> info. */
     val reactions: Map<String, ReactionInfo> = emptyMap(),
     /** Estado de entrega para mensajes propios. */

@@ -323,7 +323,8 @@ class KmpSipRtc private constructor() {
                             pingIntervalMs = config.pingIntervalMs,
                             incomingRingtoneUri = config.incomingRingtoneUri,
                             outgoingRingtoneUri = config.outgoingRingtoneUri,
-                            pushProduction = config.pushProduction
+                            pushProduction = config.pushProduction,
+                            callWaitingEnabled = config.callWaitingEnabled
                         )
                     )
 
@@ -1422,6 +1423,29 @@ class KmpSipRtc private constructor() {
     }
 
     // === API PÚBLICA - GESTIÓN DE LLAMADAS ===
+
+    /**
+     * Activa o desactiva la función "call waiting" (llamada en espera).
+     *
+     * Si está desactivado, una segunda llamada entrante mientras hay otra llamada activa
+     * se rechaza con 486 Busy Here (el llamante escucha tono de ocupado y no suena el
+     * ringtone que interferiría con la conversación en curso).
+     *
+     * Es modificable en caliente, sin reinicializar la biblioteca.
+     */
+    fun setCallWaitingEnabled(enabled: Boolean) {
+        checkInitialized()
+        sipCoreManager?.callWaitingEnabled = enabled
+        log.d(tag = TAG) { "Call waiting enabled set to: $enabled" }
+    }
+
+    /**
+     * Indica si la función "call waiting" está activada (por defecto true).
+     */
+    fun isCallWaitingEnabled(): Boolean {
+        checkInitialized()
+        return sipCoreManager?.callWaitingEnabled ?: true
+    }
 
     /**
      * Realiza una llamada saliente
@@ -3018,6 +3042,27 @@ class KmpSipRtc private constructor() {
 
     // ==================== MENSAJERÍA RICA MATRIX (tipo Element) ====================
 
+    /** Enviar un mensaje con cuerpo HTML formateado (markdown/código/links). */
+    fun sendMatrixFormattedMessage(roomId: String, body: String, html: String, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
+        internalScope.launch { onComplete?.invoke(matrix.sendFormattedMessage(roomId, body, html)) }
+    }
+
+    /** Responder con cuerpo HTML formateado. */
+    fun replyMatrixFormatted(roomId: String, replyToEventId: String, body: String, html: String, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
+        internalScope.launch { onComplete?.invoke(matrix.sendFormattedReply(roomId, replyToEventId, body, html)) }
+    }
+
+    /** Editar con cuerpo HTML formateado. */
+    fun editMatrixFormatted(roomId: String, targetEventId: String, body: String, html: String, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
+        internalScope.launch { onComplete?.invoke(matrix.editFormattedMessage(roomId, targetEventId, body, html)) }
+    }
+
     /** Responder a un mensaje (m.in_reply_to). */
     fun replyMatrixMessage(roomId: String, replyToEventId: String, message: String, onComplete: ((Result<Unit>) -> Unit)? = null) {
         checkInitialized()
@@ -3163,6 +3208,56 @@ class KmpSipRtc private constructor() {
         internalScope.launch { onComplete(matrix.fileManager.getMediaBytes(mxcUri)) }
     }
 
+    /** Fuerza la carga del historial de una sala (al abrirla). Idempotente. */
+    fun requestMatrixRoomHistory(roomId: String) {
+        checkInitialized()
+        matrixManager?.requestRoomHistory(roomId)
+    }
+
+    /**
+     * Pagina hacia atrás: carga [count] mensajes más antiguos en la sala.
+     * Devuelve por callback cuántos se añadieron (0 = inicio de la sala).
+     */
+    fun loadOlderMatrixMessages(roomId: String, count: Int = 30, onComplete: ((Int) -> Unit)) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete(0); return }
+        internalScope.launch { onComplete(matrix.loadOlderMessages(roomId, count)) }
+    }
+
+    /** Invitar a un usuario a una sala Matrix existente. */
+    fun inviteMatrixUser(roomId: String, userId: String, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
+        internalScope.launch { onComplete?.invoke(matrix.inviteUser(roomId, userId)) }
+    }
+
+    /** Abandonar una sala Matrix. */
+    fun leaveMatrixRoom(roomId: String, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
+        internalScope.launch { onComplete?.invoke(matrix.leaveRoom(roomId)) }
+    }
+
+    /** Fijar un mensaje (m.room.pinned_events). */
+    fun pinMatrixMessage(roomId: String, eventId: String, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
+        internalScope.launch { onComplete?.invoke(matrix.pinMessage(roomId, eventId)) }
+    }
+
+    /** Quitar un mensaje de los fijados. */
+    fun unpinMatrixMessage(roomId: String, eventId: String, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
+        internalScope.launch { onComplete?.invoke(matrix.unpinMessage(roomId, eventId)) }
+    }
+
+    /** Observa los eventIds fijados de una sala. */
+    fun getMatrixPinnedEventsFlow(roomId: String): Flow<List<String>>? {
+        checkInitialized()
+        return matrixManager?.observePinnedEvents(roomId)
+    }
+
     /**
      * Llamada unificada (auto-detecta SIP o Matrix)
      */
@@ -3199,6 +3294,12 @@ class KmpSipRtc private constructor() {
     fun getMatrixMessagesFlow(): Flow<Map<String, List<MatrixMessage>>>? {
         checkInitialized()
         return matrixManager?.messages
+    }
+
+    /** Mensajes entrantes en vivo (de otros usuarios) para notificaciones locales. */
+    fun getMatrixIncomingMessagesFlow(): Flow<MatrixMessage>? {
+        checkInitialized()
+        return matrixManager?.incomingMessages
     }
 
     /**

@@ -23,9 +23,12 @@ import net.folivo.trixnity.client.room.message.text
 import net.folivo.trixnity.client.room.message.thread
 import net.folivo.trixnity.client.room.message.video
 import net.folivo.trixnity.client.room.getTimelineEventReactionAggregation
+import net.folivo.trixnity.client.room.getState
 import net.folivo.trixnity.client.store.roomId
 import net.folivo.trixnity.client.store.sender
 import net.folivo.trixnity.client.store.eventId
+import net.folivo.trixnity.client.store.originTimestamp
+import net.folivo.trixnity.client.store.TimelineEvent
 import net.folivo.trixnity.utils.toByteArrayFlow
 import net.folivo.trixnity.core.model.EventId
 import net.folivo.trixnity.core.model.UserId
@@ -39,6 +42,7 @@ import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.utils.generateId
 import io.ktor.http.Url
 import kotlinx.serialization.json.Json
+import net.folivo.trixnity.clientserverapi.client.SyncState
 import net.folivo.trixnity.clientserverapi.model.authentication.IdentifierType
 import net.folivo.trixnity.clientserverapi.model.media.Media
 import kotlin.time.Duration.Companion.seconds
@@ -61,10 +65,16 @@ class MatrixManager(
     val roomManager: MatrixRoomManager = MatrixRoomManager({ matrixClient }, config)
 
     private val TAG = "MatrixManager"
+    private val HTML_FORMAT = "org.matrix.custom.html"
     private val CALL_VERSION = "1"
     private val CALL_LIFETIME = 60000L // 60 segundos para que expire el invite
     private var storedAccessToken: String? = null
     private var storedUserId: String? = null
+
+    // Control de "sync siempre vivo": queremos estar sincronizando mientras haya
+    // sesión. El watchdog reinicia el sync si Trixnity lo deja en STOPPED.
+    private var wantSync: Boolean = false
+    private var syncWatchdogJob: Job? = null
 
     // Referencia a SipCoreManager para notificar cambios de estado
     private var sipCoreManager: com.eddyslarez.kmpsiprtc.core.SipCoreManager? = null
@@ -90,6 +100,14 @@ class MatrixManager(
 
     private val _messages = MutableStateFlow<Map<String, List<MatrixMessage>>>(emptyMap())
     val messages: StateFlow<Map<String, List<MatrixMessage>>> = _messages.asStateFlow()
+
+    // Mensajes entrantes EN VIVO (de otros usuarios), para notificaciones locales.
+    // Solo emite desde el observer de sync (no en la carga histórica).
+    private val _incomingMessages = MutableSharedFlow<MatrixMessage>(
+        replay = 0,
+        extraBufferCapacity = 64,
+    )
+    val incomingMessages: SharedFlow<MatrixMessage> = _incomingMessages.asSharedFlow()
 
     /**
      * Listener para notificar eventos de llamada Matrix a la app
@@ -180,12 +198,14 @@ class MatrixManager(
                 log.d { "Login exitoso para $userId (resolved: ${storedUserId})" }
 
                 // Iniciar sincronizacion
+                wantSync = true
                 client.startSync()
                 _connectionState.value = MatrixConnectionState.Connected
                 log.d { "Sincronizacion iniciada, estado: Connected" }
 
                 observeMatrixChanges()
                 setupWebRtcListener()
+                startSyncWatchdog()
                 log.d { "Observando cambios de Matrix..." }
             }.onFailure { error ->
                 log.e(TAG) { "Login fallido: $error" }
@@ -227,10 +247,12 @@ class MatrixManager(
             clientResult.onSuccess { client ->
                 if (client != null) {
                     matrixClient = client
+                    wantSync = true
                     client.startSync()
                     _connectionState.value = MatrixConnectionState.Connected
                     observeMatrixChanges()
                     setupWebRtcListener()
+                    startSyncWatchdog()
                     log.d { "Login from store successful" }
                 } else {
                     log.d { "No stored session found" }
@@ -283,26 +305,52 @@ class MatrixManager(
      * Idempotente: si no hay cliente o ya está pausado, no hace nada.
      */
     suspend fun pauseSync() {
-        val client = matrixClient ?: return
-        try {
-            log.d(TAG) { "Pausing Matrix sync (background)" }
-            client.stopSync()
-        } catch (e: Exception) {
-            log.w(TAG) { "pauseSync failed: ${e.message}" }
-        }
+        // Política "siempre vivo": NO detenemos el sync al ir a background para
+        // que sigan llegando los mensajes. (El proceso lo mantiene vivo el
+        // foreground service de SIP en Android; en Desktop el proceso vive.)
+        log.d(TAG) { "pauseSync ignorado (keep-alive): el sync de Matrix se mantiene activo" }
     }
 
     /**
-     * Reanuda el long-polling de sync. Llamar cuando la app vuelve a foreground.
-     * Idempotente: si ya está corriendo Trixnity ignora la segunda llamada.
+     * Asegura que el sync esté corriendo (foreground, red recuperada, etc.).
+     * Idempotente.
      */
     suspend fun resumeSync() {
         val client = matrixClient ?: return
         try {
-            log.d(TAG) { "Resuming Matrix sync (foreground)" }
-            client.startSync()
+            if (client.syncState.value != SyncState.RUNNING && client.syncState.value != SyncState.STARTED) {
+                log.d(TAG) { "resumeSync: (re)starting sync, state=${client.syncState.value}" }
+                client.startSync()
+            }
         } catch (e: Exception) {
             log.w(TAG) { "resumeSync failed: ${e.message}" }
+        }
+    }
+
+    /**
+     * Watchdog que mantiene el sync SIEMPRE vivo: observa [MatrixClient.syncState]
+     * y, si Trixnity lo deja en STOPPED mientras seguimos logueados ([wantSync]),
+     * lo reinicia con un pequeño backoff. Garantiza reconexión automática en
+     * Desktop (red caída, errores) y en Android mientras el proceso siga vivo.
+     */
+    private fun startSyncWatchdog() {
+        syncWatchdogJob?.cancel()
+        val client = matrixClient ?: return
+        syncWatchdogJob = scope.launch {
+            client.syncState.collect { state ->
+                if (state == SyncState.STOPPED && wantSync && matrixClient != null) {
+                    log.w(TAG) { "Sync STOPPED de forma inesperada — reiniciando…" }
+                    delay(2000)
+                    if (wantSync) {
+                        try {
+                            matrixClient?.startSync()
+                            log.d(TAG) { "Sync reiniciado por watchdog" }
+                        } catch (e: Exception) {
+                            log.w(TAG) { "Watchdog restart failed: ${e.message}" }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -313,6 +361,9 @@ class MatrixManager(
         try {
             log.d { "Logging out from Matrix" }
 
+            wantSync = false
+            syncWatchdogJob?.cancel()
+            syncWatchdogJob = null
             matrixClient?.logout()
             matrixClient = null
 
@@ -320,6 +371,11 @@ class MatrixManager(
             _rooms.value = emptyList()
             _activeCall.value = null
             _messages.value = emptyMap()
+            historicalLoaded.clear()
+            oldestLoaded.clear()
+            followJob?.cancel()
+            followJob = null
+            followedRoom = null
 
         } catch (e: Exception) {
             log.e(TAG, { "Logout error: $e" })
@@ -378,8 +434,25 @@ class MatrixManager(
     }
 
     /**
+     * Texto de preview para la lista de salas, derivado del último evento del
+     * timeline (como Element). Devuelve null para eventos no-mensaje (llamadas, etc.).
+     */
+    private fun previewTextOf(ev: TimelineEvent): String? {
+        val content = ev.content?.getOrNull() as? RoomMessageEventContent ?: return null
+        val name = (content as? RoomMessageEventContent.FileBased)?.fileName ?: content.body
+        return when (content.type) {
+            "m.image" -> "📷 $name"
+            "m.video" -> "🎬 $name"
+            "m.audio" -> "🎤 $name"
+            "m.file" -> "📎 $name"
+            else -> content.body
+        }
+    }
+
+    /**
      * Observa cambios en Matrix (rooms, mensajes, eventos de llamada)
      */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private fun observeMatrixChanges() {
         val client = matrixClient ?: return
 
@@ -393,28 +466,22 @@ class MatrixManager(
                     }
                     val myUserId = client.userId.full
                     val roomFlows: List<Flow<MatrixRoom?>> = roomsMap.entries.map { (roomId, roomFlow) ->
-                        roomFlow.map { room ->
+                        // Preview de la lista: combinamos cada sala con el cache compartido
+                        // `_messages` (un único StateFlow, ligero). Así el preview se
+                        // actualiza cuando llega/carga un mensaje, SIN crear un flow pesado
+                        // por sala (getLastTimelineEvent saturaba el dispatcher con +100 salas
+                        // y bloqueaba la recepción de mensajes nuevos).
+                        combine(roomFlow, _messages) { room, messagesMap ->
                             room?.let {
-                                // Auto-join: si recibimos una invitación, aceptarla
-                                // automáticamente. Sin esto, sendTextMessage falla con
-                                // "missing permissions" porque el room está en estado
-                                // INVITED, no JOINED. Element acepta automáticamente
-                                // las invitaciones de DM; replicamos ese comportamiento.
+                                // Auto-join de invitaciones (UX tipo Element para DMs).
                                 if (it.membership == Membership.INVITE) {
                                     autoJoinInvitedRoom(roomId.full)
                                 }
-
-                                // Si ya estamos joineados, cargar el timeline persistido del
-                                // store. Idempotente: solo carga la primera vez por sesión.
+                                // Cargar historial persistido al estar joineado (idempotente).
                                 if (it.membership == Membership.JOIN) {
                                     loadHistoricalTimeline(roomId.full)
                                 }
 
-                                // Resolver nombre de sala correctamente.
-                                // Para DMs sin nombre explícito usamos heroes del room
-                                // (los otros miembros). Esto evita que la UI muestre
-                                // el room ID en bruto ("tuoDDUkoEHPEnDNtZj") y muestre
-                                // el display name del otro participante.
                                 val heroes: List<String> = try {
                                     it.name?.heroes?.map { h -> h.full } ?: emptyList()
                                 } catch (_: Throwable) { emptyList() }
@@ -426,24 +493,20 @@ class MatrixManager(
                                     myUserId = myUserId,
                                     heroes = heroes,
                                 )
-                                // Calcular ultimo mensaje y timestamp desde el cache de mensajes
-                                val roomMessages = _messages.value[roomId.full]
-                                val lastMsg = roomMessages?.lastOrNull()
-                                // Avatar mxc:// → URL HTTPS (con token si está disponible).
-                                // null si el room no tiene avatar — la UI muestra placeholder.
-                                val avatarHttp = it.avatarUrl
+
+                                val cachedLast = messagesMap[roomId.full]?.lastOrNull()
+                                val avatarMxc = it.avatarUrl
                                     ?.takeIf { mxc -> mxc.startsWith("mxc://") }
-                                    ?.let { mxc -> resolveMxcToHttpUrl(mxc) }
 
                                 MatrixRoom(
                                     id = roomId.full,
                                     name = resolvedName,
-                                    avatarUrl = avatarHttp,
+                                    avatarUrl = avatarMxc,
                                     isDirect = it.isDirect,
                                     isEncrypted = false,
                                     unreadCount = 0,
-                                    lastMessage = lastMsg?.content,
-                                    lastMessageTime = lastMsg?.timestamp,
+                                    lastMessage = cachedLast?.content,
+                                    lastMessageTime = cachedLast?.timestamp,
                                 )
                             }
                         }
@@ -471,33 +534,11 @@ class MatrixManager(
                         val content = timelineEvent.content?.getOrNull()
                         val senderId = event.sender.full
                         val myUserId = matrixClient?.userId?.full ?: return@collect
+                        log.d(TAG) { "TIMELINE-EVT room=$eventRoomId sender=$senderId type=${content?.let { it::class.simpleName } ?: "null"}" }
 
                         when (content) {
-                            // Manejar eventos de llamada Matrix (solo de otros usuarios)
-                            is CallEventContent.Invite -> {
-                                if (senderId != myUserId) {
-                                    handleCallInvite(eventRoomId, senderId, content)
-                                    // Mostrar evento de llamada en el chat
-                                    addCallEventMessage(eventRoomId, event.id.full, senderId, event.originTimestamp, MessageType.CALL_INVITE)
-                                }
-                            }
-                            is CallEventContent.Answer -> {
-                                if (senderId != myUserId) {
-                                    handleCallAnswer(eventRoomId, senderId, content)
-                                    addCallEventMessage(eventRoomId, event.id.full, senderId, event.originTimestamp, MessageType.CALL_ANSWER)
-                                }
-                            }
-                            is CallEventContent.Hangup -> {
-                                if (senderId != myUserId) {
-                                    handleCallHangup(eventRoomId, senderId, content)
-                                    addCallEventMessage(eventRoomId, event.id.full, senderId, event.originTimestamp, MessageType.CALL_HANGUP)
-                                }
-                            }
-                            is CallEventContent.Candidates -> {
-                                if (senderId != myUserId) {
-                                    handleCallCandidates(eventRoomId, senderId, content)
-                                }
-                            }
+                            // Eventos de llamada Matrix (dedup por eventId en processCallEvent).
+                            is CallEventContent -> processCallEvent(timelineEvent)
                             // Procesar mensajes de chat (texto + media). Antes se filtraba
                             // por sender != yo, lo que perdía mensajes propios al re-loguear.
                             // Ahora dedupe por event.id o por timestamp+sender+content si
@@ -510,6 +551,28 @@ class MatrixManager(
                                     timestamp = event.originTimestamp,
                                     content = content,
                                 )
+                                // Emitir entrante EN VIVO (de otros) para notificaciones.
+                                if (senderId != myUserId) {
+                                    val preview = (content as? RoomMessageEventContent.TextBased)?.body
+                                        ?: when (content.type) {
+                                            "m.image" -> "📷 Imagen"
+                                            "m.video" -> "🎬 Vídeo"
+                                            "m.audio" -> "🎤 Audio"
+                                            "m.file" -> "📎 Archivo"
+                                            else -> "Mensaje"
+                                        }
+                                    _incomingMessages.tryEmit(
+                                        MatrixMessage(
+                                            id = event.id.full,
+                                            roomId = eventRoomId,
+                                            senderId = senderId,
+                                            senderDisplayName = extractDisplayName(senderId),
+                                            content = preview,
+                                            timestamp = event.originTimestamp,
+                                            type = MessageType.TEXT,
+                                        )
+                                    )
+                                }
                             }
                             // Borrado (m.room.redaction): elimina el mensaje del cache.
                             // También aplica a reacciones redactadas (no-op si no estaba).
@@ -528,6 +591,46 @@ class MatrixManager(
         }
     }
 
+    // EventIds de eventos de llamada ya procesados, para no manejarlos dos veces
+    // (los entrega tanto el observador global como el seguidor de sala).
+    private val processedCallEvents = mutableSetOf<String>()
+
+    /**
+     * Procesa un evento m.call.* (invite/answer/candidates/hangup) recibido por
+     * CUALQUIER observador (global o seguidor de sala), con dedup por eventId.
+     * Esto arregla el caso en que el observador global no entrega los eventos de
+     * llamada de ciertas salas, dejando la llamada colgada en "conectando".
+     */
+    @OptIn(kotlin.time.ExperimentalTime::class)
+    private suspend fun processCallEvent(timelineEvent: TimelineEvent) {
+        val content = timelineEvent.content?.getOrNull()
+        if (content !is CallEventContent) return
+        val eventId = timelineEvent.event.id.full
+        if (!processedCallEvents.add(eventId)) return
+        val roomId = timelineEvent.roomId.full
+        val senderId = timelineEvent.event.sender.full
+        val myUserId = matrixClient?.userId?.full ?: return
+        if (senderId == myUserId) return
+        val ts = timelineEvent.event.originTimestamp
+        log.d(TAG) { "CALL-EVT ${content::class.simpleName} room=$roomId from=$senderId" }
+        when (content) {
+            is CallEventContent.Invite -> {
+                handleCallInvite(roomId, senderId, content)
+                addCallEventMessage(roomId, eventId, senderId, ts, MessageType.CALL_INVITE)
+            }
+            is CallEventContent.Answer -> {
+                handleCallAnswer(roomId, senderId, content)
+                addCallEventMessage(roomId, eventId, senderId, ts, MessageType.CALL_ANSWER)
+            }
+            is CallEventContent.Hangup -> {
+                handleCallHangup(roomId, senderId, content)
+                addCallEventMessage(roomId, eventId, senderId, ts, MessageType.CALL_HANGUP)
+            }
+            is CallEventContent.Candidates -> handleCallCandidates(roomId, senderId, content)
+            else -> { /* otros m.call.* (select_answer, negotiate…) no soportados */ }
+        }
+    }
+
     /**
      * Maneja m.call.invite recibido
      */
@@ -539,6 +642,9 @@ class MatrixManager(
     ) {
         try {
             log.d(TAG) { "Received m.call.invite from $senderId in $roomId" }
+            // Seguir la sala para recibir candidates/hangup del otro extremo aunque
+            // el observador global no entregue eventos de esta sala.
+            followRoom(roomId)
 
             val callId = content.callId
             val sdp = content.offer.sdp
@@ -557,6 +663,7 @@ class MatrixManager(
             // NO inicializar WebRTC aqui (se hara en acceptCall via CallManager)
 
             // Alimentar CallStateManager con CallData de tipo Matrix
+            val callerName = extractDisplayName(senderId).ifBlank { resolveCallDisplayName(roomId) }
             val callData = CallData(
                 callId = callId,
                 from = senderId,
@@ -565,7 +672,9 @@ class MatrixManager(
                 startTime = kotlin.time.Clock.System.now().toEpochMilliseconds(),
                 callType = CallType.MATRIX_INTERNAL,
                 roomId = roomId,
-                remoteSdp = sdp
+                remoteSdp = sdp,
+                remoteDisplayName = callerName,
+                sipName = callerName,
             )
             CallStateManager.incomingCallReceived(callId, senderId, callData)
 
@@ -709,9 +818,11 @@ class MatrixManager(
         // 1) Edición (m.replace): no es un mensaje nuevo, actualiza el original.
         val relatesTo = content.relatesTo
         if (relatesTo is RelatesTo.Replace) {
-            val newBody = (relatesTo.newContent as? RoomMessageEventContent)?.body
-                ?: content.body.removePrefix("* ")
-            applyEdit(roomId, relatesTo.eventId.full, newBody)
+            val newContent = relatesTo.newContent as? RoomMessageEventContent
+            val newBody = newContent?.body ?: content.body.removePrefix("* ")
+            val newHtml = (newContent as? RoomMessageEventContent.TextBased)?.formattedBody
+                ?: (content as? RoomMessageEventContent.TextBased)?.formattedBody
+            applyEdit(roomId, relatesTo.eventId.full, newBody, newHtml)
             return
         }
 
@@ -733,6 +844,7 @@ class MatrixManager(
         }
 
         if (msgType == MessageType.TEXT || msgType == MessageType.NOTICE) {
+            val textBased = content as? RoomMessageEventContent.TextBased
             upsertTextMessage(
                 roomId = roomId,
                 eventId = eventId,
@@ -742,6 +854,8 @@ class MatrixManager(
                 type = msgType,
                 replyToEventId = replyToEventId,
                 threadRootId = threadRootId,
+                formattedBody = textBased?.formattedBody,
+                format = textBased?.format,
             )
         } else {
             // Resolver el mxc:// real de la media (FileBased) para descarga/preview.
@@ -765,12 +879,16 @@ class MatrixManager(
      * Aplica una edición (m.replace) al mensaje original: actualiza su contenido
      * y lo marca como editado. Si el original aún no está en el cache, no hace nada.
      */
-    private fun applyEdit(roomId: String, targetEventId: String, newBody: String) {
+    private fun applyEdit(roomId: String, targetEventId: String, newBody: String, newFormattedBody: String? = null) {
         val current = _messages.value[roomId] ?: return
         val idx = current.indexOfFirst { it.id == targetEventId }
         if (idx < 0) return
         val updated = current.toMutableList().apply {
-            set(idx, this[idx].copy(content = newBody, isEdited = true))
+            set(idx, this[idx].copy(
+                content = newBody,
+                isEdited = true,
+                formattedBody = newFormattedBody ?: this[idx].formattedBody,
+            ))
         }
         _messages.value = _messages.value + (roomId to updated)
     }
@@ -810,13 +928,15 @@ class MatrixManager(
             threadRootId = threadRootId,
         )
 
-        // Reemplazar optimista local (igual que upsertTextMessage)
+        // Reemplazar optimista local. NO exigimos igualdad de fileName: el nombre
+        // del eco del servidor suele diferir del optimista (p. ej. "voice-1947.wav"),
+        // lo que dejaba la nota de voz propia con spinner infinito (sin mxc). Basta
+        // con sender + tipo + cercanía temporal.
         val replaceIdx = current.indexOfFirst { existing ->
             existing.id.startsWith("local_") &&
                 existing.senderId == senderId &&
                 existing.type == type &&
-                existing.fileName == fileName &&
-                kotlin.math.abs(existing.timestamp - timestamp) < 30_000L
+                kotlin.math.abs(existing.timestamp - timestamp) < 60_000L
         }
         val updated = if (replaceIdx >= 0) {
             current.toMutableList().apply { set(replaceIdx, msg) }
@@ -869,6 +989,8 @@ class MatrixManager(
         type: MessageType = MessageType.TEXT,
         replyToEventId: String? = null,
         threadRootId: String? = null,
+        formattedBody: String? = null,
+        format: String? = null,
     ) {
         val current = _messages.value[roomId] ?: emptyList()
 
@@ -885,6 +1007,8 @@ class MatrixManager(
             type = type,
             replyToEventId = replyToEventId,
             threadRootId = threadRootId,
+            formattedBody = formattedBody,
+            format = format,
         )
 
         // 2) Buscar optimista local del mismo sender+content+timestamp cercano
@@ -896,8 +1020,10 @@ class MatrixManager(
         }
 
         val updated = if (replaceIdx >= 0) {
+            log.d(TAG) { "UPSERT replace-optimistic room=$roomId event=$eventId" }
             current.toMutableList().apply { set(replaceIdx, newMessage) }
         } else {
+            log.d(TAG) { "UPSERT insert-new room=$roomId event=$eventId sender=$senderId" }
             // 3) Insertar manteniendo orden cronológico (mayor timestamp al final)
             val combined = (current + newMessage).sortedBy { it.timestamp }
             combined
@@ -908,6 +1034,9 @@ class MatrixManager(
     // Cache de rooms cuyo timeline histórico ya cargamos en esta sesión, para
     // no relanzar la carga cada vez que el observer re-emite.
     private val historicalLoaded = mutableSetOf<String>()
+
+    // Evento más antiguo cargado por sala, para paginar hacia atrás (scroll back).
+    private val oldestLoaded = mutableMapOf<String, net.folivo.trixnity.client.store.TimelineEvent>()
 
     /**
      * Carga los últimos N eventos persistidos del store de Trixnity para una
@@ -926,7 +1055,12 @@ class MatrixManager(
                 val last = client.room.getLastTimelineEvent(rid)
                     .firstOrNull()
                     ?.firstOrNull()
-                    ?: return@launch
+                if (last == null) {
+                    // El timeline aún no está disponible (sync en curso). Liberar el
+                    // gate para reintentar la próxima vez que se abra la sala.
+                    historicalLoaded.remove(roomId)
+                    return@launch
+                }
 
                 val history = mutableListOf(last)
                 var current: net.folivo.trixnity.client.store.TimelineEvent? = last
@@ -937,6 +1071,8 @@ class MatrixManager(
                     history.add(prev)
                     current = prev
                 }
+                // Guardar el más antiguo para poder paginar hacia atrás.
+                current?.let { oldestLoaded[roomId] = it }
                 // Procesar del más antiguo al más reciente
                 history.reversed().forEach { tev ->
                     val content = tev.content?.getOrNull() as? RoomMessageEventContent
@@ -955,6 +1091,107 @@ class MatrixManager(
                 // Permitir reintentar más tarde
                 historicalLoaded.remove(roomId)
             }
+        }
+    }
+
+    /**
+     * Solicita explícitamente la carga del historial de una sala (al abrirla).
+     * Idempotente: si ya se cargó en esta sesión no hace nada. Útil cuando se
+     * navega directo a una sala antes de que el observer de rooms dispare la
+     * carga, o como reintento si la primera carga falló.
+     */
+    fun requestRoomHistory(roomId: String) {
+        loadHistoricalTimeline(roomId)
+        followRoom(roomId)
+    }
+
+    // Seguimiento EN VIVO de la sala abierta. El observador global
+    // (getTimelineEventsFromNowOn) a veces no entrega eventos de ciertas salas;
+    // este flujo por-sala (uno solo, barato) garantiza que el eco de tus propios
+    // mensajes y las respuestas entrantes lleguen siempre a la sala que estás viendo.
+    private var followJob: Job? = null
+    private var followedRoom: String? = null
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    fun followRoom(roomId: String) {
+        val client = matrixClient ?: return
+        if (followedRoom == roomId && followJob?.isActive == true) return
+        followedRoom = roomId
+        followJob?.cancel()
+        followJob = scope.launch {
+            try {
+                client.room.getLastTimelineEvent(RoomId(roomId))
+                    .flatMapLatest { inner -> inner ?: flowOf(null) }
+                    .collect { tev ->
+                        val ev = tev ?: return@collect
+                        val content = ev.content?.getOrNull() ?: return@collect
+                        when (content) {
+                            is RoomMessageEventContent -> processRoomMessageContent(
+                                roomId = ev.event.roomId.full,
+                                eventId = ev.event.id.full,
+                                senderId = ev.event.sender.full,
+                                timestamp = ev.event.originTimestamp,
+                                content = content,
+                            )
+                            is RedactionEventContent -> removeMessage(ev.event.roomId.full, content.redacts.full)
+                            // Eventos de llamada de la sala seguida (dedup por eventId).
+                            is CallEventContent -> processCallEvent(ev)
+                            else -> { }
+                        }
+                    }
+            } catch (e: Exception) {
+                log.w(TAG) { "followRoom($roomId) failed: ${e.message}" }
+            }
+        }
+    }
+
+    /**
+     * Pagina hacia atrás: carga [count] mensajes MÁS ANTIGUOS que el más viejo ya
+     * cargado en la sala (rellenando gaps desde el servidor si hace falta).
+     * Devuelve cuántos mensajes nuevos se añadieron (0 = se llegó al inicio de la sala).
+     */
+    @OptIn(kotlin.time.ExperimentalTime::class)
+    suspend fun loadOlderMessages(roomId: String, count: Int = 30): Int {
+        val client = matrixClient ?: return 0
+        // Si aún no hay punto de partida, asegurar la carga inicial primero.
+        var start = oldestLoaded[roomId]
+        if (start == null) {
+            loadHistoricalTimeline(roomId)
+            // Esperar brevemente a que se fije el punto más antiguo.
+            repeat(20) {
+                start = oldestLoaded[roomId]
+                if (start != null) return@repeat
+                kotlinx.coroutines.delay(150)
+            }
+            start = oldestLoaded[roomId] ?: return 0
+        }
+        return try {
+            var current = start
+            var added = 0
+            while (added < count) {
+                val prevFlow = current?.let { ev ->
+                    client.room.getPreviousTimelineEvent(ev) { fetchTimeout = 10.seconds }
+                } ?: break
+                val prev = prevFlow.firstOrNull() ?: break
+                current = prev
+                val content = prev.content?.getOrNull() as? RoomMessageEventContent
+                if (content != null) {
+                    processRoomMessageContent(
+                        roomId = prev.event.roomId.full,
+                        eventId = prev.event.id.full,
+                        senderId = prev.event.sender.full,
+                        timestamp = prev.event.originTimestamp,
+                        content = content,
+                    )
+                    added++
+                }
+            }
+            current?.let { oldestLoaded[roomId] = it }
+            log.d(TAG) { "loadOlderMessages($roomId): +$added (count target=$count)" }
+            added
+        } catch (e: Exception) {
+            log.w(TAG) { "loadOlderMessages($roomId) failed: ${e.message}" }
+            0
         }
     }
 
@@ -1081,6 +1318,96 @@ class MatrixManager(
         } catch (e: Exception) {
             log.e(TAG, { "Error sending message: $e" })
             Result.failure(e)
+        }
+    }
+
+    /**
+     * Enviar un mensaje con cuerpo formateado HTML (`org.matrix.custom.html`).
+     * [body] es el fallback en texto plano; [html] el cuerpo formateado (negrita,
+     * itálica, links, `<pre><code>` para bloques de código, etc.). Element y otros
+     * clientes lo renderizan. Inserta optimista con el formato para feedback inmediato.
+     */
+    @OptIn(kotlin.time.ExperimentalTime::class)
+    suspend fun sendFormattedMessage(roomId: String, body: String, html: String): Result<Unit> {
+        return try {
+            val client = matrixClient ?: throw Exception("Not logged in")
+            val myUserId = client.userId.full
+            val now = kotlin.time.Clock.System.now().toEpochMilliseconds()
+
+            val optimistic = MatrixMessage(
+                id = "local_$now",
+                roomId = roomId,
+                senderId = myUserId,
+                senderDisplayName = extractDisplayName(myUserId),
+                content = body,
+                timestamp = now,
+                type = MessageType.TEXT,
+                formattedBody = html,
+                format = HTML_FORMAT,
+            )
+            val current = _messages.value[roomId] ?: emptyList()
+            _messages.value = _messages.value + (roomId to (current + optimistic))
+
+            ensureJoinedBeforeSend(roomId)
+
+            client.room.sendMessage(RoomId(roomId)) {
+                text(body = body, format = HTML_FORMAT, formattedBody = html)
+            }
+            Result.success(Unit)
+        } catch (e: Exception) {
+            log.e(TAG) { "sendFormattedMessage failed: ${e.message}" }
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Responder con cuerpo formateado HTML.
+     */
+    suspend fun sendFormattedReply(roomId: String, replyToEventId: String, body: String, html: String): Result<Unit> {
+        return try {
+            val client = matrixClient ?: throw Exception("Not logged in")
+            client.room.sendMessage(RoomId(roomId)) {
+                reply(EventId(replyToEventId), null)
+                text(body = body, format = HTML_FORMAT, formattedBody = html)
+            }
+            Result.success(Unit)
+        } catch (e: Exception) {
+            log.e(TAG) { "sendFormattedReply failed: ${e.message}" }
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Editar un mensaje con cuerpo formateado HTML (m.replace).
+     */
+    suspend fun editFormattedMessage(roomId: String, targetEventId: String, body: String, html: String): Result<Unit> {
+        return try {
+            val client = matrixClient ?: throw Exception("Not logged in")
+            client.room.sendMessage(RoomId(roomId)) {
+                replace(EventId(targetEventId))
+                text(body = body, format = HTML_FORMAT, formattedBody = html)
+            }
+            applyEdit(roomId, targetEventId, body, html)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            log.e(TAG) { "editFormattedMessage failed: ${e.message}" }
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Defensa: si el room está en estado INVITE, joinear antes de enviar para
+     * evitar "missing permissions". No-op si ya estamos joineados.
+     */
+    private suspend fun ensureJoinedBeforeSend(roomId: String) {
+        val client = matrixClient ?: return
+        try {
+            val currentRoom = client.room.getById(RoomId(roomId)).firstOrNull()
+            if (currentRoom?.membership == Membership.INVITE) {
+                client.api.room.joinRoom(RoomId(roomId)).getOrThrow()
+            }
+        } catch (e: Throwable) {
+            log.w(TAG) { "ensureJoinedBeforeSend failed for $roomId: ${e.message}" }
         }
     }
 
@@ -1286,6 +1613,95 @@ class MatrixManager(
     }
 
     /**
+     * Invita a un usuario a una sala existente (m.room.invite).
+     */
+    suspend fun inviteUser(roomId: String, userId: String): Result<Unit> {
+        return try {
+            val client = matrixClient ?: throw Exception("Not logged in")
+            client.api.room.inviteUser(RoomId(roomId), UserId(userId)).getOrThrow()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            log.e(TAG) { "inviteUser failed: ${e.message}" }
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Abandonar una sala (m.room.leave). Tras esto el room desaparece del sync.
+     */
+    suspend fun leaveRoom(roomId: String): Result<Unit> {
+        return try {
+            val client = matrixClient ?: throw Exception("Not logged in")
+            client.api.room.leaveRoom(RoomId(roomId)).getOrThrow()
+            // Limpiar cache local de mensajes de esa sala.
+            _messages.value = _messages.value - roomId
+            Result.success(Unit)
+        } catch (e: Exception) {
+            log.e(TAG) { "leaveRoom failed: ${e.message}" }
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Observa los eventos fijados de una sala (m.room.pinned_events). Devuelve
+     * la lista de eventIds fijados (el más reciente al final).
+     */
+    fun observePinnedEvents(roomId: String): Flow<List<String>>? {
+        val client = matrixClient ?: return null
+        return client.room
+            .getState<net.folivo.trixnity.core.model.events.m.room.PinnedEventsEventContent>(RoomId(roomId))
+            .map { stateEvent ->
+                stateEvent?.content?.pinned?.map { it.full } ?: emptyList()
+            }
+    }
+
+    /**
+     * Fija un mensaje: añade su eventId a m.room.pinned_events (state event).
+     */
+    suspend fun pinMessage(roomId: String, eventId: String): Result<Unit> {
+        return try {
+            val client = matrixClient ?: throw Exception("Not logged in")
+            val current = client.room
+                .getState<net.folivo.trixnity.core.model.events.m.room.PinnedEventsEventContent>(RoomId(roomId))
+                .firstOrNull()?.content?.pinned ?: emptyList()
+            val target = EventId(eventId)
+            if (current.contains(target)) return Result.success(Unit)
+            client.api.room.sendStateEvent(
+                roomId = RoomId(roomId),
+                eventContent = net.folivo.trixnity.core.model.events.m.room.PinnedEventsEventContent(
+                    pinned = current + target
+                ),
+            ).getOrThrow()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            log.e(TAG) { "pinMessage failed: ${e.message}" }
+            Result.failure(e)
+        }
+    }
+
+    /** Quita un mensaje de los fijados. */
+    suspend fun unpinMessage(roomId: String, eventId: String): Result<Unit> {
+        return try {
+            val client = matrixClient ?: throw Exception("Not logged in")
+            val current = client.room
+                .getState<net.folivo.trixnity.core.model.events.m.room.PinnedEventsEventContent>(RoomId(roomId))
+                .firstOrNull()?.content?.pinned ?: emptyList()
+            val target = EventId(eventId)
+            if (!current.contains(target)) return Result.success(Unit)
+            client.api.room.sendStateEvent(
+                roomId = RoomId(roomId),
+                eventContent = net.folivo.trixnity.core.model.events.m.room.PinnedEventsEventContent(
+                    pinned = current - target
+                ),
+            ).getOrThrow()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            log.e(TAG) { "unpinMessage failed: ${e.message}" }
+            Result.failure(e)
+        }
+    }
+
+    /**
      * Iniciar llamada de voz nativa Matrix - envia m.call.invite.
      * Gateada por [MatrixConfig.enableVoip] (true por defecto). Convive con
      * LiveKit: el [com.eddyslarez.kmpsiprtc.services.unified.UnifiedCallRouter]
@@ -1299,6 +1715,9 @@ class MatrixManager(
         }
         return try {
             log.d { "Starting Matrix voice call in room: $roomId" }
+            // Seguir la sala para recibir el m.call.answer y candidates del callee
+            // aunque el observador global no entregue eventos de esta sala.
+            followRoom(roomId)
 
             val client = matrixClient ?: throw Exception("Not logged in to Matrix")
             val myUserId = client.userId.full
@@ -1319,6 +1738,7 @@ class MatrixManager(
             _activeCall.value = call
 
             // Alimentar CallStateManager con CallData de tipo Matrix
+            val displayName = resolveCallDisplayName(roomId)
             val callData = CallData(
                 callId = callId,
                 from = myUserId,
@@ -1327,7 +1747,9 @@ class MatrixManager(
                 startTime = kotlin.time.Clock.System.now().toEpochMilliseconds(),
                 callType = CallType.MATRIX_INTERNAL,
                 roomId = roomId,
-                localSdp = offerSdp
+                localSdp = offerSdp,
+                remoteDisplayName = displayName,
+                sipName = displayName,
             )
             CallStateManager.startOutgoingCall(callId, roomId, callData)
             sipCoreManager?.notifyCallStateChanged(CallState.OUTGOING_INIT)
@@ -1365,6 +1787,7 @@ class MatrixManager(
      * Iniciar videollamada nativa Matrix - envia m.call.invite con video.
      * Gateada por [MatrixConfig.enableVideo] (true por defecto).
      */
+    @OptIn(kotlin.time.ExperimentalTime::class)
     suspend fun startVideoCall(roomId: String): Result<MatrixCall> {
         if (!config.enableVideo) {
             log.w(TAG) { "startVideoCall: bloqueado, MatrixConfig.enableVideo=false (chat-only)" }
@@ -1372,8 +1795,10 @@ class MatrixManager(
         }
         return try {
             log.d { "Starting Matrix video call in room: $roomId" }
+            followRoom(roomId)
 
             val client = matrixClient ?: throw Exception("Not logged in to Matrix")
+            val myUserId = client.userId.full
 
             webRtcManager.initialize()
             webRtcManager.prepareAudioForCall()
@@ -1389,7 +1814,24 @@ class MatrixManager(
             )
             _activeCall.value = call
 
-            // Enviar m.call.invite
+            // Alimentar CallStateManager (igual que en voz) para no corromper la
+            // máquina de estados (sin esto: "Invalid state transition: ENDED -> CONNECTED").
+            val displayName = resolveCallDisplayName(roomId)
+            val callData = CallData(
+                callId = callId,
+                from = myUserId,
+                to = roomId,
+                direction = CallDirections.OUTGOING,
+                startTime = kotlin.time.Clock.System.now().toEpochMilliseconds(),
+                callType = CallType.MATRIX_INTERNAL,
+                roomId = roomId,
+                localSdp = offerSdp,
+                remoteDisplayName = displayName,
+                sipName = displayName,
+            )
+            CallStateManager.startOutgoingCall(callId, roomId, callData)
+            sipCoreManager?.notifyCallStateChanged(CallState.OUTGOING_INIT)
+
             client.api.room.sendMessageEvent(
                 roomId = RoomId(roomId),
                 eventContent = CallEventContent.Invite(
@@ -1404,6 +1846,9 @@ class MatrixManager(
                 )
             )
 
+            CallStateManager.outgoingCallRinging(callId)
+            sipCoreManager?.notifyCallStateChanged(CallState.OUTGOING_RINGING)
+
             log.d(TAG) { "m.call.invite (video) sent for call $callId" }
             Result.success(call)
 
@@ -1413,6 +1858,10 @@ class MatrixManager(
             Result.failure(e)
         }
     }
+
+    /** Nombre legible del contacto/sala para la pantalla de llamada (evita mostrar el roomId). */
+    private fun resolveCallDisplayName(roomId: String): String =
+        _rooms.value.firstOrNull { it.id == roomId }?.name?.takeIf { it.isNotBlank() } ?: roomId
 
     /**
      * Responder llamada nativa Matrix - envia m.call.answer.

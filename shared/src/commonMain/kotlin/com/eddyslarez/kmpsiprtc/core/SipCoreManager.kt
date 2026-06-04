@@ -102,6 +102,11 @@ class SipCoreManager private constructor(
     // Se limpia cuando termina la llamada.
     var isIncomingPushCallPending: Boolean = false
 
+    // Activa/desactiva "call waiting". Sembrado desde la config; modificable en caliente.
+    // Si esta en false, una 2da llamada entrante durante una llamada activa se rechaza
+    // con 486 Busy Here (ver SipMessageHandler.handleInviteRequest).
+    var callWaitingEnabled: Boolean = config.callWaitingEnabled
+
     // === LIFECYCLE DEBOUNCE STATE ===
     // Evita re-registros excesivos cuando el SO emite ráfagas de eventos
     // (rotaciones en Android, alerts/Control Center/Face ID en iOS).

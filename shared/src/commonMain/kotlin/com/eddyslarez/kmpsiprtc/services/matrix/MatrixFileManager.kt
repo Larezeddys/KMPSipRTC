@@ -27,11 +27,16 @@ class MatrixFileManager(
      * o la descarga falla. [maxSize] limita el tamaño (null = sin límite).
      */
     suspend fun getMediaBytes(mxcUri: String, maxSize: Long? = null): ByteArray? {
-        val client = clientProvider() ?: return null
+        val client = clientProvider() ?: run {
+            log.w(TAG) { "getMediaBytes: no Matrix client (not logged in) for $mxcUri" }
+            return null
+        }
         return try {
-            client.media.getMedia(mxcUri).getOrThrow().toByteArray(maxSize = maxSize)
+            val bytes = client.media.getMedia(mxcUri).getOrThrow().toByteArray(maxSize = maxSize)
+            log.d(TAG) { "getMediaBytes OK $mxcUri -> ${bytes?.size ?: 0} bytes" }
+            bytes
         } catch (e: Exception) {
-            log.w(TAG) { "getMediaBytes failed for $mxcUri: ${e.message}" }
+            log.w(TAG) { "getMediaBytes FAILED for $mxcUri: ${e.message}" }
             null
         }
     }

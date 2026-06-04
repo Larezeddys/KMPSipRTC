@@ -28,7 +28,20 @@ data class SipConfig(
      *   Debug   -> pushProduction = false (envia pn-production=false)
      *   Release -> pushProduction = true  (no envia pn-production)
      */
-    val pushProduction: Boolean = true
+    val pushProduction: Boolean = true,
+    /**
+     * Activa/desactiva la funcion "call waiting" (llamada en espera).
+     *
+     *   - true  (por defecto): comportamiento clasico. Una segunda llamada entrante
+     *     mientras hay una llamada activa suena normalmente (multi-llamada).
+     *   - false: una segunda llamada entrante mientras hay otra llamada activa se
+     *     rechaza con 486 Busy Here. El llamante escucha tono de ocupado y no se
+     *     reproduce ringtone que interfiera con la conversacion en curso.
+     *
+     * Es modificable en caliente vía KmpSipRtc.setCallWaitingEnabled(...) sin
+     * reinicializar la libreria.
+     */
+    val callWaitingEnabled: Boolean = true
 ) {
     /**
      * Valida la configuracion y retorna una lista de errores encontrados.

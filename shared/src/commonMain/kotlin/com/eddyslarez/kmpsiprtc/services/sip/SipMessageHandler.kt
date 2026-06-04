@@ -668,6 +668,21 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 callData.lastCSeqValue = cseqParts[0].toIntOrNull() ?: 1
             }
 
+            // Call waiting: si esta desactivado y ya hay otra llamada activa, rechazar con
+            // 486 Busy Here. Asi el segundo llamante recibe tono de ocupado y NO se reproduce
+            // ringtone que interfiera con la conversacion en curso. La comprobacion por callId
+            // evita rechazar un re-INVITE in-dialog (mismo Call-ID).
+            if (!sipCoreManager.callWaitingEnabled) {
+                val hasOtherActiveCall = MultiCallManager.getActiveCalls()
+                    .any { it.callId != callData.callId }
+                if (hasOtherActiveCall) {
+                    log.d(tag = TAG) { "[INVITE] Call waiting disabled — rejecting incoming call ${callData.callId} with 486 Busy Here" }
+                    val busyResponse = SipMessageBuilder.buildBusyHereResponse(accountInfo, callData)
+                    sendViaSharedWebSocket(busyResponse)
+                    return
+                }
+            }
+
             // Normalizar para callbacks (To con .invalid / transport=ws)
             val normalizedCallData = CallDataNormalizer.normalize(callData)
 
