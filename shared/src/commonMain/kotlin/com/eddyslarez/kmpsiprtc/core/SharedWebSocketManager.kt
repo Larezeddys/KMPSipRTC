@@ -50,7 +50,7 @@ class SharedWebSocketManager(
         private const val RECONNECT_DEGRADED_DELAY = 60000L // 60s despues de degradado
         private const val RECONNECT_JITTER_FACTOR = 0.1    // 10% jitter
         private const val DEGRADED_THRESHOLD = 10           // Intentos antes de notificar degradado
-        private const val MAX_RECONNECT_ATTEMPTS = 30       // Limite maximo de intentos de reconexion
+        private const val FAILED_NOTIFY_THRESHOLD = 30      // Intentos antes de notificar onConnectionFailed (informativo)
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -588,18 +588,22 @@ class SharedWebSocketManager(
     @OptIn(ExperimentalTime::class)
     private fun scheduleReconnect() {
         reconnectJob?.cancel()
-        reconnectAttempts++
+        // Evitar overflow en desconexiones muy largas (dias): cap del contador.
+        if (reconnectAttempts < Int.MAX_VALUE - 1) reconnectAttempts++
 
-        // Guard: limite maximo de intentos para evitar reconexion infinita
-        if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+        // NUNCA rendirse: una app de llamadas no puede quedar pasivamente
+        // desconectada. Al alcanzar FAILED_NOTIFY_THRESHOLD se notifica
+        // onConnectionFailed UNA vez (para que la app pueda avisar al usuario),
+        // pero la reconexion continua en fase degradada (60s) indefinidamente
+        // mientras no sea un shutdown explicito.
+        if (reconnectAttempts == FAILED_NOTIFY_THRESHOLD) {
             log.e(tag = TAG) {
-                "Max reconnection attempts ($MAX_RECONNECT_ATTEMPTS) reached. Giving up."
+                "Reconnection still failing after $FAILED_NOTIFY_THRESHOLD attempts. " +
+                        "Notifying app, but continuing to retry every ${RECONNECT_DEGRADED_DELAY / 1000}s."
             }
-            _connectionState.value = WebSocketConnectionState.DISCONNECTED
             connectionEventListener?.onConnectionFailed(
-                Exception("Max reconnection attempts ($MAX_RECONNECT_ATTEMPTS) exceeded")
+                Exception("Reconnection failing after $FAILED_NOTIFY_THRESHOLD attempts (still retrying)")
             )
-            return
         }
 
         // Determinar delay segun fase
@@ -623,7 +627,7 @@ class SharedWebSocketManager(
             connectionEventListener?.onConnectionDegraded(reconnectAttempts, lastError)
         }
 
-        log.d(tag = TAG) { "Scheduling reconnect attempt $reconnectAttempts/$MAX_RECONNECT_ATTEMPTS in ${delayMs}ms" }
+        log.d(tag = TAG) { "Scheduling reconnect attempt $reconnectAttempts in ${delayMs}ms" }
 
         reconnectJob = scope.launch {
             delay(delayMs)

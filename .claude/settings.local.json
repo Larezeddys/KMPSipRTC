@@ -77,7 +77,27 @@
       "Bash(./gradlew :shared:compileDebugKotlinAndroid --console=plain)",
       "Read(//c/Users/Eddys Larez/Downloads/MCNSoftphone/MCNSoftphone/**)",
       "Bash(cat settings.gradle.kts)",
-      "Bash(cat settings.gradle)"
+      "Bash(cat settings.gradle)",
+      "Bash(echo \"=== 53030e8 exists & in history? ===\")",
+      "Bash(git -C '/c/Users/Eddys Larez/Desktop/softphone-android' log --oneline 53030e8346e224af06250c57df78f9edc56a97b5^..HEAD)",
+      "Bash(git -C '/c/Users/Eddys Larez/Desktop/softphone-android' cat-file -t bed8e193129cd4dd3cd677f8436c402f62dd6d4d)",
+      "Bash(sed -n '1,60p' composeApp/src/commonMain/kotlin/KotlinBackgroundHandler.kt)",
+      "Bash(sed -n '1,100p' composeApp/src/androidMain/kotlin/com/mcn/softphone/kmp/infrastructure/RegistrationService.android.kt)",
+      "Bash(grep -v \"//\")",
+      "Bash(awk '/fun handleNotification/,/^    fun [a-z]/' composeApp/src/commonMain/kotlin/KotlinBackgroundHandler.kt)",
+      "Bash(sed -n '60,78p' composeApp/src/commonMain/kotlin/KotlinBackgroundHandler.kt)",
+      "Bash(sed -n '1,40p' composeApp/src/androidMain/kotlin/com/mcn/softphone/kmp/platform/ServiceManager.android.kt)",
+      "Bash(sed -n '1,30p' build.gradle.kts)",
+      "Bash(sed -n '1,40p' composeApp/build.gradle.kts)",
+      "Bash(sed -n '1,15p' gradle/libs.versions.toml)",
+      "Bash(python -)",
+      "Bash(sed -n '352,402p' iosApp/iosApp/AppDelegate.swift)",
+      "Bash(cat core/src/commonMain/kotlin/com/mcn/softphone/core/useCase/app/GetAppInBackgroundUseCase.kt)",
+      "Bash(sed -n '120,230p' shared/src/commonMain/kotlin/com/eddyslarez/kmpsiprtc/services/sip/SipMessageBuilder.kt)",
+      "Bash(sed -n '1,60p' shared/src/iosMain/kotlin/com/eddyslarez/kmpsiprtc/core/NetworkManager.ios.kt)",
+      "Bash(awk '/actual fun handleIncomingCall/,/^    actual fun [a-z]/' sip/src/iosMain/kotlin/com/mcn/softphone/sip/callManager/IncomingCallHandler.ios.kt)",
+      "Bash(sed -n '133,265p' sip/src/iosMain/kotlin/com/mcn/softphone/sip/callManager/IncomingCallHandler.ios.kt)",
+      "Bash(sed -n '540,565p' sip/src/iosMain/kotlin/com/mcn/softphone/sip/callManager/IncomingCallHandler.ios.kt)"
     ]
   }
 }

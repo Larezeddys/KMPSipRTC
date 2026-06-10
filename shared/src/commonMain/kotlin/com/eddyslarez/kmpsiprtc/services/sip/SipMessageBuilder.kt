@@ -13,6 +13,11 @@ object SipMessageBuilder {
     // Mantener registro largo para compatibilidad con modelos legacy y OpenSIPS.
     // 259200s = 3 dias.
     private const val DEFAULT_EXPIRES = 259200
+    // Registro en modo PUSH (con pn-prid): 30 dias. El binding debe sobrevivir
+    // largos periodos sin abrir la app — iOS no permite refrescarlo en background;
+    // el refresh solo ocurre al recibir un push o al volver a foreground. Si el
+    // servidor acorta el valor en el 200 OK, el cliente respeta ese Expires.
+    private const val PUSH_EXPIRES = 2592000
     private const val UNREGISTER_EXPIRES = 0
     private const val TAG = "SipMessageBuilder"
 
@@ -87,8 +92,9 @@ object SipMessageBuilder {
         if (isAppInBackground) {
             builder.append(";+sip.pnsreg")
         }
-        builder.append(";expires=$DEFAULT_EXPIRES\r\n")
-        builder.append("Expires: $DEFAULT_EXPIRES\r\n")
+        val expires = if (isAppInBackground) PUSH_EXPIRES else DEFAULT_EXPIRES
+        builder.append(";expires=$expires\r\n")
+        builder.append("Expires: $expires\r\n")
 
         // RFC 3261: Usar Authorization para 401, Proxy-Authorization para 407
         if (isAuthenticated && accountInfo.authorizationHeader.value != null) {
