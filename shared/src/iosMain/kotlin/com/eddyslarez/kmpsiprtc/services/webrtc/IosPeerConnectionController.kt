@@ -51,7 +51,7 @@ class IosPeerConnectionController(
     @Volatile
     private var currentConnectionState = WebRtcConnectionState.DISCONNECTED
 
-    private val iceServers = listOf(
+    private val defaultIceServers = listOf(
         IceServer(
             urls = listOf(
                 "stun:stun.l.google.com:19302",
@@ -59,6 +59,25 @@ class IosPeerConnectionController(
             )
         )
     )
+
+    // Mutable: las llamadas Matrix inyectan los TURN del homeserver antes de
+    // crear el peer (sin TURN fallan los NATs simétricos 4G↔WiFi).
+    private var iceServers: List<IceServer> = defaultIceServers
+
+    fun setIceServers(servers: List<com.eddyslarez.kmpsiprtc.data.models.IceServerInfo>) {
+        iceServers = if (servers.isEmpty()) {
+            defaultIceServers
+        } else {
+            servers.map { info ->
+                IceServer(
+                    urls = info.urls,
+                    username = info.username ?: "",
+                    password = info.credential ?: "",
+                )
+            }
+        }
+        log.d(TAG) { "ICE servers configurados: ${iceServers.size}" }
+    }
 
     // ==================== INITIALIZATION ====================
 

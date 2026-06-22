@@ -39,6 +39,16 @@ class IosWebRtcManager : WebRtcManager {
 
     val isInitialized: Boolean get() = _isInitialized.value
 
+    // ICE servers recibidos antes de que el controller exista (se aplican al iniciar)
+    private var pendingIceServers: List<com.eddyslarez.kmpsiprtc.data.models.IceServerInfo>? = null
+
+    override fun setIceServers(servers: List<com.eddyslarez.kmpsiprtc.data.models.IceServerInfo>) {
+        pendingIceServers = servers
+        if (::peerConnectionController.isInitialized) {
+            peerConnectionController.setIceServers(servers)
+        }
+    }
+
     override fun initialize() {
         log.d(TAG) { "🔧 Initializing WebRTC Manager..." }
 
@@ -69,6 +79,8 @@ class IosWebRtcManager : WebRtcManager {
                 }
             )
             peerConnectionController.initialize()
+            // Aplicar ICE servers que llegaron antes de la inicialización
+            pendingIceServers?.let { peerConnectionController.setIceServers(it) }
 
             _isInitialized.value = true
             log.d(TAG) { "✅✅✅ WebRTC initialized successfully ✅✅✅" }

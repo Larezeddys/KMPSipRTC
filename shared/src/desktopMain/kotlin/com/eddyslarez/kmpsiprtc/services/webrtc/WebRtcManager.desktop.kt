@@ -110,9 +110,15 @@ class DesktopWebRtcManager : WebRtcManager {
      * @param servers Lista de (urls, username, credential) — el cliente
      *   extrae estos del LiveKitJoinResponse.iceServers.
      */
-    fun setIceServers(servers: List<Triple<List<String>, String?, String?>>) {
+    /**
+     * Override de la interfaz común: aplica ICE servers (STUN + TURN con
+     * credenciales) al PeerConnection. Usado por llamadas Matrix 1:1 (TURN del
+     * homeserver) — mismo camino interno que usa LiveKit en sus controllers.
+     * DEBE llamarse ANTES de createOffer/createAnswer.
+     */
+    override fun setIceServers(servers: List<com.eddyslarez.kmpsiprtc.data.models.IceServerInfo>) {
         ensureInitialized()
-        peerConnectionController.setIceServers(servers)
+        peerConnectionController.setIceServers(servers.map { Triple(it.urls, it.username, it.credential) })
     }
 
     fun sendDataChannelMessage(data: ByteArray): Boolean {

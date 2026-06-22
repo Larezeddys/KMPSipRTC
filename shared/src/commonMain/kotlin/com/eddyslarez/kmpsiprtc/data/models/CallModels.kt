@@ -121,6 +121,17 @@ data class DtmfQueueStatus(
     val isProcessing: Boolean,
     val pendingDigits: String
 )
+
+/**
+ * Servidor ICE (STUN/TURN) para WebRTC. Las llamadas Matrix obtienen estos
+ * valores del homeserver via GET /_matrix/client/v3/voip/turnServer.
+ */
+@Serializable
+data class IceServerInfo(
+    val urls: List<String>,
+    val username: String? = null,
+    val credential: String? = null,
+)
 //
 //enum class AppLifecycleEvent {
 //    EnterBackground,

@@ -1097,15 +1097,19 @@ class KmpSipRtc private constructor() {
      */
     private fun handleIncomingCall() {
 
-        val manager = sipCoreManager ?: return
-        val account = manager.currentAccountInfo
+        // Las llamadas MATRIX no dependen de SipCoreManager: el guard duro
+        // `?: return` perdia el evento Incoming cuando el core SIP no estaba
+        // disponible. Ahora manager es opcional y el fallback de MultiCallManager
+        // cubre el caso Matrix-only.
+        val manager = sipCoreManager
+        val account = manager?.currentAccountInfo
 
         // Buscar callData en AccountInfo o en MultiCallManager (para llamadas Matrix)
         val callData = account?.currentCallData?.value
             ?: MultiCallManager.getAllCalls().firstOrNull { it.direction == CallDirections.INCOMING }
             ?: return
 
-        val currentAccount = manager.currentAccountInfo
+        val currentAccount = manager?.currentAccountInfo
         if (currentAccount != null) {
             val accountKey = "${currentAccount.username}@${currentAccount.domain}"
             log.d(tag = TAG) { "Determined account key from current account: $accountKey" }
@@ -2889,6 +2893,40 @@ class KmpSipRtc private constructor() {
     }
 
     /**
+     * Restaura la sesión Matrix persistida (sin password). Devuelve failure si
+     * no hay sesión almacenada o si el store no se puede abrir — en ese caso la
+     * app debe mostrar el formulario de login normal.
+     */
+    fun loginMatrixFromStore(onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run {
+            onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized")))
+            return
+        }
+
+        internalScope.launch {
+            val result = matrix.loginFromStore()
+            if (result.isSuccess) {
+                val accessToken = matrix.getAccessToken()
+                if (accessToken != null) {
+                    livekitCallManager?.setMatrixAccessToken(accessToken)
+                }
+            }
+            onComplete?.invoke(result)
+        }
+    }
+
+    /**
+     * Variante suspendida de [loginMatrixFromStore].
+     */
+    suspend fun loginMatrixFromStoreSuspend(): Result<Unit> =
+        suspendCancellableCoroutine { cont ->
+            loginMatrixFromStore { result ->
+                cont.resume(result) {}
+            }
+        }
+
+    /**
      * Logout de Matrix
      */
     fun logoutMatrix(onComplete: ((Result<Unit>) -> Unit)? = null) {
@@ -3238,6 +3276,16 @@ class KmpSipRtc private constructor() {
         internalScope.launch { onComplete?.invoke(matrix.leaveRoom(roomId)) }
     }
 
+    /**
+     * Une al usuario a una sala Matrix (catálogo BackOffice / invitación / pública).
+     * Idempotente; tras unirse la lib carga el historial.
+     */
+    fun joinMatrixRoom(roomId: String, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
+        internalScope.launch { onComplete?.invoke(matrix.joinRoom(roomId)) }
+    }
+
     /** Fijar un mensaje (m.room.pinned_events). */
     fun pinMatrixMessage(roomId: String, eventId: String, onComplete: ((Result<Unit>) -> Unit)? = null) {
         checkInitialized()
@@ -3256,6 +3304,43 @@ class KmpSipRtc private constructor() {
     fun getMatrixPinnedEventsFlow(roomId: String): Flow<List<String>>? {
         checkInitialized()
         return matrixManager?.observePinnedEvents(roomId)
+    }
+
+    /** Silencia/des-silencia una sala Matrix (push rule, como Element). */
+    fun setMatrixRoomMuted(roomId: String, muted: Boolean, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
+        internalScope.launch { onComplete?.invoke(matrix.setRoomMuted(roomId, muted)) }
+    }
+
+    /** Salas Matrix silenciadas (sincronizadas con las push rules del servidor). */
+    fun getMatrixMutedRoomsFlow(): kotlinx.coroutines.flow.StateFlow<Set<String>>? {
+        checkInitialized()
+        return matrixManager?.mutedRooms
+    }
+
+    /** Marca/desmarca una sala Matrix como favorita (tag m.favourite del servidor). */
+    fun setMatrixRoomFavorite(roomId: String, favorite: Boolean, onComplete: ((Result<Unit>) -> Unit)? = null) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
+        internalScope.launch { onComplete?.invoke(matrix.setRoomFavorite(roomId, favorite)) }
+    }
+
+    /** Salas Matrix favoritas (tag m.favourite, sincronizado con el servidor). */
+    fun getMatrixFavoriteRoomsFlow(): kotlinx.coroutines.flow.StateFlow<Set<String>>? {
+        checkInitialized()
+        return matrixManager?.favoriteRooms
+    }
+
+    /**
+     * Descarga los bytes de la media de un EVENTO (maneja también salas
+     * cifradas, donde la media viaja como EncryptedFile y la descarga por
+     * mxc directa no sirve).
+     */
+    fun getMatrixMediaBytesForEvent(roomId: String, eventId: String, onComplete: ((ByteArray?) -> Unit)) {
+        checkInitialized()
+        val matrix = matrixManager ?: run { onComplete(null); return }
+        internalScope.launch { onComplete(matrix.getMediaBytesForEvent(roomId, eventId)) }
     }
 
     /**

@@ -16,6 +16,16 @@ data class MatrixRoom(
     val lastMessage: String? = null,
     val lastMessageTime: Long? = null,
     val members: List<String> = emptyList(),
+    /**
+     * true si esta "sala" es en realidad un Space de Matrix (m.space): un grupo
+     * que contiene otras salas/subgrupos. Los spaces no tienen timeline de chat.
+     */
+    val isSpace: Boolean = false,
+    /**
+     * Para spaces: roomIds de los hijos directos (salas y subgrupos), resueltos
+     * desde los state events `m.space.child`. Vacío para salas normales.
+     */
+    val childRoomIds: List<String> = emptyList(),
 )
 
 /**

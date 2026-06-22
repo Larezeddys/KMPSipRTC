@@ -1302,6 +1302,10 @@ class SipCoreManager private constructor(
         }
 
         currentAccountInfo = accountInfo
+        // Aplicar el ringback (RBT) de la cuenta saliente antes de que llegue el 180.
+        scope.launch {
+            runCatching { applyAccountRingtoneUris(sipName, domain, preferGlobal = false) }
+        }
         callManager?.makeCall(phoneNumber, accountInfo, recordCall = recordCall)
     }
 
@@ -1350,8 +1354,14 @@ class SipCoreManager private constructor(
         if (preferGlobal) return
 
         val account = databaseManager?.getSipAccountByCredentials(username, domain) ?: return
-        account.incomingRingtoneUri?.let { audioManager.saveIncomingRingtoneUri(it, databaseManager) }
-        account.outgoingRingtoneUri?.let { audioManager.saveOutgoingRingtoneUri(it, databaseManager) }
+        // Transient: el tono de esta cuenta se aplica al reproductor sin
+        // sobrescribir el tono global del usuario en la BD.
+        account.incomingRingtoneUri?.let { audioManager.applyIncomingRingtoneTransient(it) }
+        account.outgoingRingtoneUri?.let { audioManager.applyOutgoingRingtoneTransient(it) }
+        log.d(tag = TAG) {
+            "Ringtones por cuenta aplicados para $username@$domain: " +
+                "in=${account.incomingRingtoneUri ?: "(global)"}, out=${account.outgoingRingtoneUri ?: "(global)"}"
+        }
     }
 
     // Métodos DTMF (delegados a CallManager)

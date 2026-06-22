@@ -1,6 +1,7 @@
 package com.eddyslarez.kmpsiprtc.services.conference
 
 import com.eddyslarez.kmpsiprtc.data.models.AudioDevice
+import com.eddyslarez.kmpsiprtc.data.models.IceServerInfo
 import com.eddyslarez.kmpsiprtc.data.models.SdpType
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
 import com.eddyslarez.kmpsiprtc.platform.log
@@ -78,6 +79,10 @@ actual class ConferenceLiveKitManager actual constructor() {
 
     private val isLinuxHost: Boolean =
         System.getProperty("os.name").lowercase().contains("linux")
+
+    private fun isLinuxScreenShareOptIn(): Boolean =
+        System.getenv("MCN_LINUX_SCREENSHARE") == "1" ||
+            System.getProperty("mcn.linux.screenshare") == "1"
 
     @OptIn(ExperimentalTime::class)
     private fun currentTimeMs(): Long = Clock.System.now().toEpochMilliseconds()
@@ -239,11 +244,16 @@ actual class ConferenceLiveKitManager actual constructor() {
             return
         }
 
-        if (enabled && isLinuxHost) {
+        if (enabled && isLinuxHost && !isLinuxScreenShareOptIn()) {
             // webrtc-java 0.10.0 crashes the process in DesktopCapturer.getDesktopSources()
             // on Linux instead of returning an error. Keep conferences usable until the
             // native Linux capturer is replaced or upgraded.
-            log.w(tag = TAG) { "Screen share local deshabilitado en Linux: capturer nativo inestable" }
+            // Opt-in experimental: MCN_LINUX_SCREENSHARE=1 (X11 suele funcionar;
+            // Wayland requiere el portal de PipeWire y puede seguir fallando).
+            log.w(tag = TAG) {
+                "Screen share local deshabilitado en Linux (capturer nativo inestable). " +
+                    "Exporta MCN_LINUX_SCREENSHARE=1 para probarlo bajo tu responsabilidad."
+            }
             _mediaState.value = _mediaState.value.copy(screenShareEnabled = false)
             rebuildParticipantList()
             return
@@ -636,13 +646,17 @@ actual class ConferenceLiveKitManager actual constructor() {
         // Sin TURN, los clientes detrás de NAT estricta / CGNAT / VPN nunca consiguen
         // establecer el peer connection — el SFU los expulsa como
         // PEER_CONNECTION_DISCONNECTED tras ~20s sin que ICE complete.
-        val iceServersTriples: List<Triple<List<String>, String?, String?>> =
+        val iceServersTriples: List<IceServerInfo> =
             joinResponse?.iceServers?.map { srv ->
-                Triple(srv.urls, srv.username.ifBlank { null }, srv.credential.ifBlank { null })
+                IceServerInfo(
+                    urls = srv.urls,
+                    username = srv.username.ifBlank { null },
+                    credential = srv.credential.ifBlank { null },
+                )
             } ?: emptyList()
         log.d(tag = TAG) {
             "ICE servers del JoinResponse: ${iceServersTriples.size} entries — " +
-            iceServersTriples.joinToString { it.first.joinToString(",") }
+            iceServersTriples.joinToString { it.urls.joinToString(",") }
         }
 
         // 1. Crear subscriber PRIMERO (el offer puede llegar durante setupPublisher)

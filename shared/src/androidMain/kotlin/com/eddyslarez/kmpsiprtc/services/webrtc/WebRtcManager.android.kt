@@ -35,6 +35,17 @@ class AndroidWebRtcManager : WebRtcManager {
     private val context: Context = getApplication()
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    // ICE servers recibidos antes de que el controller exista (se aplican al iniciar)
+    @Volatile
+    private var pendingIceServers: List<com.eddyslarez.kmpsiprtc.data.models.IceServerInfo>? = null
+
+    override fun setIceServers(servers: List<com.eddyslarez.kmpsiprtc.data.models.IceServerInfo>) {
+        pendingIceServers = servers
+        if (::peerConnectionController.isInitialized) {
+            peerConnectionController.setIceServers(servers)
+        }
+    }
+
     // Controllers
     private lateinit var peerConnectionController: PeerConnectionController
     private lateinit var audioController: AudioController
@@ -124,6 +135,8 @@ class AndroidWebRtcManager : WebRtcManager {
                 }
             )
             peerConnectionController.initialize()
+            // Aplicar ICE servers que llegaron antes de la inicialización
+            pendingIceServers?.let { peerConnectionController.setIceServers(it) }
 
             isFactoryInitialized = true  // ✅ MARCAR FACTORY COMO INICIALIZADA
             isInitialized = true

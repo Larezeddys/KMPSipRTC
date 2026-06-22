@@ -3,6 +3,7 @@ package com.eddyslarez.kmpsiprtc.services.webrtc
 import com.eddyslarez.kmpsiprtc.data.models.AudioDevice
 import com.eddyslarez.kmpsiprtc.data.models.AudioUnit
 import com.eddyslarez.kmpsiprtc.data.models.AudioUnitTypes
+import com.eddyslarez.kmpsiprtc.data.models.IceServerInfo
 import com.eddyslarez.kmpsiprtc.data.models.RecordingResult
 import com.eddyslarez.kmpsiprtc.data.models.SdpType
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
@@ -13,6 +14,15 @@ interface WebRtcManager {
      * Initialize the WebRTC subsystem
      */
     fun initialize()
+
+    /**
+     * Configura los servidores ICE (STUN/TURN) que usará el PRÓXIMO peer
+     * connection. Llamar antes de createOffer()/createAnswer(). Las llamadas
+     * Matrix obtienen estos valores de GET /voip/turnServer del homeserver;
+     * sin TURN, las llamadas fallan entre NATs simétricos (4G↔WiFi).
+     * Lista vacía → conservar los STUN por defecto.
+     */
+    fun setIceServers(servers: List<IceServerInfo>) { /* default no-op */ }
     fun closePeerConnection()
     /**
      * Clean up and release WebRTC resources

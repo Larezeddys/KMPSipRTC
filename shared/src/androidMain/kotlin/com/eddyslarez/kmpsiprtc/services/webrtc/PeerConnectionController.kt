@@ -86,10 +86,34 @@ class PeerConnectionController(
 //    private var localAudioRecorder: AudioTrackRecorder? = null
 //    private var remoteAudioRecorder: AudioTrackRecorder? = null
 
-    private val iceServers = listOf(
+    private val defaultIceServers = listOf(
         PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
         PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer()
     )
+
+    // Mutable: las llamadas Matrix inyectan los TURN del homeserver antes de
+    // crear el peer (sin TURN fallan los NATs simétricos 4G↔WiFi).
+    @Volatile
+    private var iceServers: List<PeerConnection.IceServer> = defaultIceServers
+
+    fun setIceServers(servers: List<com.eddyslarez.kmpsiprtc.data.models.IceServerInfo>) {
+        if (servers.isEmpty()) {
+            iceServers = defaultIceServers
+            return
+        }
+        iceServers = servers.mapNotNull { info ->
+            try {
+                val builder = PeerConnection.IceServer.builder(info.urls)
+                info.username?.takeIf { it.isNotEmpty() }?.let { builder.setUsername(it) }
+                info.credential?.takeIf { it.isNotEmpty() }?.let { builder.setPassword(it) }
+                builder.createIceServer()
+            } catch (e: Exception) {
+                log.w(TAG) { "IceServer inválido ${info.urls}: ${e.message}" }
+                null
+            }
+        }.ifEmpty { defaultIceServers }
+        log.d(TAG) { "ICE servers configurados: ${iceServers.size} (TURN incluido: ${servers.any { s -> s.urls.any { it.startsWith("turn") } }})" }
+    }
     suspend fun setMediaDirection(direction: RtpTransceiver.RtpTransceiverDirection): Boolean {
         return try {
             peerConnection?.transceivers?.forEach { transceiver ->

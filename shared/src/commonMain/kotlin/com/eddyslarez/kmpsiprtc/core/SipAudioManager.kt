@@ -220,9 +220,11 @@ class SipAudioManager(
      */
     fun saveIncomingRingtoneUri(uri: String, databaseManager: DatabaseManager?) {
         try {
+            // Aplicar al reproductor de inmediato: si esto fuera async, un
+            // playIncomingRingtone() inmediatamente posterior sonaría con el tono viejo.
+            audioManager.setIncomingRingtone(uri)
             scope.launch {
                 databaseManager?.updateIncomingRingtoneUri(uri)
-                audioManager.setIncomingRingtone(uri)
                 log.d(tag = TAG) { "Incoming ringtone URI saved to database: $uri" }
             }
         } catch (e: Exception) {
@@ -235,14 +237,27 @@ class SipAudioManager(
      */
     fun saveOutgoingRingtoneUri(uri: String, databaseManager: DatabaseManager?) {
         try {
+            audioManager.setOutgoingRingtone(uri)
             scope.launch {
                 databaseManager?.updateOutgoingRingtoneUri(uri)
-                audioManager.setOutgoingRingtone(uri)
                 log.d(tag = TAG) { "Outgoing ringtone URI saved to database: $uri" }
             }
         } catch (e: Exception) {
             log.e(tag = TAG) { "Error saving outgoing ringtone URI: ${e.message}" }
         }
+    }
+
+    /**
+     * Aplica un ringtone SOLO al reproductor, sin tocar la config global en BD.
+     * Usado para tonos por cuenta SIP: al llegar/iniciar una llamada se aplica el
+     * tono de esa cuenta sin sobrescribir el tono global del usuario.
+     */
+    fun applyIncomingRingtoneTransient(uri: String) {
+        audioManager.setIncomingRingtone(uri)
+    }
+
+    fun applyOutgoingRingtoneTransient(uri: String) {
+        audioManager.setOutgoingRingtone(uri)
     }
 
     /**

@@ -73,6 +73,7 @@ class MatrixRoomManager(
         return try {
             client.api.room.setReadMarkers(
                 roomId = RoomId(roomId),
+                fullyRead = EventId(eventId),
                 read = EventId(eventId),
             )
         } catch (e: Exception) {

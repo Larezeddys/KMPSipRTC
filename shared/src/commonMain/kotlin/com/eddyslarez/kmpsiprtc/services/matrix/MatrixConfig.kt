@@ -36,8 +36,12 @@ data class MatrixConfig(
     val syncTimeout: Long = 30000L,
     /** VoIP nativo Matrix (audio). Convive con LiveKit. */
     val enableVoip: Boolean = true,
-    /** Video nativo Matrix. Convive con LiveKit. */
-    val enableVideo: Boolean = true,
+    /**
+     * Video nativo Matrix 1:1: DESACTIVADO por decisión de producto — el stack
+     * WebRTC 1:1 es solo-audio; el video real va por conferencias LiveKit
+     * (la app redirige el botón de video a una conferencia).
+     */
+    val enableVideo: Boolean = false,
     val enableFileTransfer: Boolean = true,
     val maxFileUploadSize: Long = 100 * 1024 * 1024, // 100MB
     /** Si true, marca automáticamente como leído el último mensaje al recibirlo. */

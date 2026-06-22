@@ -37,14 +37,31 @@ import net.folivo.trixnity.core.model.events.m.RelatesTo
 import net.folivo.trixnity.core.model.events.m.room.RoomMessageEventContent
 import net.folivo.trixnity.core.model.events.m.room.RedactionEventContent
 import net.folivo.trixnity.core.model.events.m.room.Membership
+import net.folivo.trixnity.core.model.events.m.room.CreateEventContent
+import net.folivo.trixnity.core.model.events.m.space.ChildEventContent
 import net.folivo.trixnity.core.model.events.m.call.CallEventContent
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.utils.generateId
+import io.ktor.client.request.delete
+import io.ktor.client.request.get
+import io.ktor.client.request.header
+import io.ktor.client.request.put
+import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsText
 import io.ktor.http.Url
+import io.ktor.http.encodeURLParameter
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import net.folivo.trixnity.clientserverapi.client.SyncState
 import net.folivo.trixnity.clientserverapi.model.authentication.IdentifierType
 import net.folivo.trixnity.clientserverapi.model.media.Media
+import okio.FileSystem
+import okio.Path.Companion.toPath
+import okio.SYSTEM
 import kotlin.time.Duration.Companion.seconds
 
 
@@ -94,6 +111,13 @@ class MatrixManager(
 
     private val _rooms = MutableStateFlow<List<MatrixRoom>>(emptyList())
     val rooms: StateFlow<List<MatrixRoom>> = _rooms.asStateFlow()
+
+    // Hijos de cada Space (m.space.child): spaceId -> lista de roomIds hijos.
+    // Se combina en la emisión de _rooms para rellenar MatrixRoom.childRoomIds.
+    private val _spaceChildren = MutableStateFlow<Map<String, List<String>>>(emptyMap())
+    // Jobs por space para colectar getAllState(ChildEventContent); se cancelan
+    // cuando el space deja de existir.
+    private val spaceChildJobs = mutableMapOf<String, Job>()
 
     private val _activeCall = MutableStateFlow<MatrixCall?>(null)
     val activeCall: StateFlow<MatrixCall?> = _activeCall.asStateFlow()
@@ -156,6 +180,37 @@ class MatrixManager(
         }
     }
 
+    // ── Gestión del store local persistente (trixnity.db + media) ─────────────
+
+    private fun lastUserMarkerPath() = "${matrixStoragePath()}/last_user".toPath()
+
+    private fun readLastUser(): String? = runCatching {
+        FileSystem.SYSTEM.read(lastUserMarkerPath()) { readUtf8() }.trim().ifBlank { null }
+    }.getOrNull()
+
+    private fun writeLastUser(userIdFull: String) {
+        runCatching {
+            FileSystem.SYSTEM.write(lastUserMarkerPath()) { writeUtf8(userIdFull.lowercase()) }
+        }.onFailure { log.w(TAG) { "No se pudo guardar last_user: ${it.message}" } }
+    }
+
+    /**
+     * Borra TODO el store local de Matrix (BD de Trixnity, media cache y marcador
+     * de usuario). Se usa al hacer logout y antes de un login fresco para que la
+     * sesión nueva no vea datos de una cuenta anterior.
+     */
+    private fun clearLocalStore() {
+        runCatching {
+            val fs = FileSystem.SYSTEM
+            val base = matrixStoragePath().toPath()
+            fs.listOrNull(base)?.forEach { child ->
+                runCatching { fs.deleteRecursively(child) }
+                    .onFailure { log.w(TAG) { "No se pudo borrar $child: ${it.message}" } }
+            }
+            log.d(TAG) { "Store local de Matrix limpiado" }
+        }.onFailure { log.w(TAG) { "clearLocalStore fallo: ${it.message}" } }
+    }
+
     /**
      * Login con password. homeserverOverride permite cambiar el servidor sin
      * recrear el MatrixManager (util cuando el usuario escribe su propio homeserver).
@@ -167,9 +222,16 @@ class MatrixManager(
             _connectionState.value = MatrixConnectionState.Connecting
             log.d { "Estado de conexion: Connecting..." }
 
-            // Usar persistencia para media (Okio) — los archivos descargados sobreviven al
-            // restart de la app. Repositorios (sync state, rooms, events) siguen in-memory
-            // hasta que se active Room KMP de Trixnity en una iteración posterior.
+            // Un login con password SIEMPRE es una sesión nueva (deviceId nuevo).
+            // Si quedó un store de una sesión anterior (misma u otra cuenta), hay
+            // que limpiarlo: Trixnity no puede abrir un store de otra sesión y,
+            // peor, mostraría las salas/mensajes de la cuenta vieja.
+            if (readLastUser() != null) {
+                log.d { "Store previo detectado (${readLastUser()}); limpiando antes del login fresco" }
+                clearLocalStore()
+            }
+
+            // Persistencia real: Room KMP para state + Okio para media.
             val (reposModule, mediaModule) = MatrixModuleFactory.createPersistentModules(
                 matrixStoragePath()
             )
@@ -195,6 +257,7 @@ class MatrixManager(
             loginResult.onSuccess { client ->
                 matrixClient = client
                 storedUserId = client.userId.full
+                writeLastUser(client.userId.full)
                 log.d { "Login exitoso para $userId (resolved: ${storedUserId})" }
 
                 // Iniciar sincronizacion
@@ -230,6 +293,14 @@ class MatrixManager(
         return try {
             log.d { "Attempting login from store" }
 
+            // Sin marcador de sesión previa no hay nada que restaurar: evita
+            // abrir/crear la BD para nada en el primer arranque.
+            if (readLastUser() == null) {
+                log.d { "No stored session marker found" }
+                _connectionState.value = MatrixConnectionState.Disconnected
+                return Result.failure(Exception("No stored session"))
+            }
+
             _connectionState.value = MatrixConnectionState.Connecting
             val (reposModule, mediaModule) = MatrixModuleFactory.createPersistentModules(
                 matrixStoragePath()
@@ -247,13 +318,14 @@ class MatrixManager(
             clientResult.onSuccess { client ->
                 if (client != null) {
                     matrixClient = client
+                    storedUserId = client.userId.full
                     wantSync = true
                     client.startSync()
                     _connectionState.value = MatrixConnectionState.Connected
                     observeMatrixChanges()
                     setupWebRtcListener()
                     startSyncWatchdog()
-                    log.d { "Login from store successful" }
+                    log.d { "Login from store successful (${client.userId.full})" }
                 } else {
                     log.d { "No stored session found" }
                     _connectionState.value = MatrixConnectionState.Disconnected
@@ -295,6 +367,205 @@ class MatrixManager(
      */
     fun setAccessToken(token: String) {
         storedAccessToken = token
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // TURN servers del homeserver (GET /_matrix/client/v3/voip/turnServer).
+    // Trixnity 4.22.7 no tipa este endpoint, asi que se llama por HTTP directo
+    // (mismo patron que el media download URL). Cache segun el ttl del server.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    @kotlinx.serialization.Serializable
+    private data class TurnServerResponse(
+        val username: String? = null,
+        val password: String? = null,
+        val uris: List<String> = emptyList(),
+        val ttl: Long? = null,
+    )
+
+    private var cachedTurnServers: List<com.eddyslarez.kmpsiprtc.data.models.IceServerInfo> = emptyList()
+    @kotlin.concurrent.Volatile
+    private var turnCacheExpiresAtMs: Long = 0L
+
+    /**
+     * HttpClient ktor de Trixnity, YA autenticado (el auth provider añade el
+     * Bearer del access token a cada request). Es la vía correcta para los
+     * endpoints que Trixnity 4.22 no tipa (voip/turnServer, etc.) — antes se
+     * usaba un HttpClient propio con `storedAccessToken`, que nunca se asignaba
+     * tras el login, dejando estos endpoints muertos.
+     */
+    private fun authedHttpClient(): io.ktor.client.HttpClient? =
+        matrixClient?.api?.baseClient?.baseClient
+
+    private fun apiBaseUrl(): String =
+        matrixClient?.baseUrl?.toString()?.trimEnd('/') ?: config.homeserverUrl.trimEnd('/')
+
+    @OptIn(kotlin.time.ExperimentalTime::class)
+    suspend fun getTurnServers(): List<com.eddyslarez.kmpsiprtc.data.models.IceServerInfo> {
+        val now = kotlin.time.Clock.System.now().toEpochMilliseconds()
+        if (now < turnCacheExpiresAtMs && cachedTurnServers.isNotEmpty()) {
+            return cachedTurnServers
+        }
+        val client = authedHttpClient()
+        if (client == null) {
+            log.w(TAG) { "getTurnServers: sin sesion Matrix, usando solo STUN por defecto" }
+            return emptyList()
+        }
+        return try {
+            val response = client.get("${apiBaseUrl()}/_matrix/client/v3/voip/turnServer")
+            if (response.status != io.ktor.http.HttpStatusCode.OK) {
+                log.w(TAG) { "getTurnServers: HTTP ${response.status}" }
+                return emptyList()
+            }
+            val body = response.bodyAsText()
+            val parsed = json.decodeFromString<TurnServerResponse>(body)
+            val servers = if (parsed.uris.isEmpty()) emptyList() else listOf(
+                com.eddyslarez.kmpsiprtc.data.models.IceServerInfo(
+                    urls = parsed.uris,
+                    username = parsed.username,
+                    credential = parsed.password,
+                )
+            )
+            cachedTurnServers = servers
+            // Renovar algo antes del vencimiento real (10% de margen, min 60s)
+            val ttlMs = ((parsed.ttl ?: 3600L) * 1000L * 0.9).toLong().coerceAtLeast(60_000L)
+            turnCacheExpiresAtMs = now + ttlMs
+            log.d(TAG) { "TURN servers obtenidos: ${parsed.uris.size} uris, ttl=${parsed.ttl}s" }
+            servers
+        } catch (e: Exception) {
+            log.w(TAG) { "getTurnServers fallo (${e.message}), usando solo STUN por defecto" }
+            emptyList()
+        }
+    }
+
+    /**
+     * Obtiene los TURN del homeserver y los aplica al WebRtcManager antes de
+     * crear el peer connection. Si no hay TURN disponibles, deja los STUN
+     * por defecto (lista vacia = no tocar).
+     */
+    private suspend fun applyTurnServersToWebRtc() {
+        try {
+            val servers = getTurnServers()
+            if (servers.isNotEmpty()) {
+                webRtcManager.setIceServers(servers)
+            }
+        } catch (e: Exception) {
+            log.w(TAG) { "applyTurnServersToWebRtc fallo: ${e.message}" }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Silenciar salas (push rules de tipo room, como Element).
+    // PUT/DELETE /_matrix/client/v3/pushrules/global/room/{roomId}.
+    // Trixnity 4.22.7 no tipa pushrules, asi que va por HTTP directo.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private val _mutedRooms = MutableStateFlow<Set<String>>(emptySet())
+    /** Salas silenciadas (sincronizadas con las push rules del servidor). */
+    val mutedRooms: StateFlow<Set<String>> = _mutedRooms.asStateFlow()
+
+    /** Carga desde el servidor qué salas están silenciadas (rules room sin acciones). */
+    suspend fun refreshMutedRooms() {
+        val client = matrixClient ?: return
+        try {
+            val rules = client.api.push.getPushRules().getOrThrow()
+            val muted = rules.global.room.orEmpty().mapNotNull { rule ->
+                if (rule.enabled && rule.actions.isEmpty()) rule.roomId.full else null
+            }.toSet()
+            _mutedRooms.value = muted
+            log.d(TAG) { "Muted rooms sincronizadas: ${muted.size}" }
+        } catch (e: Exception) {
+            log.w(TAG) { "refreshMutedRooms fallo: ${e.message}" }
+        }
+    }
+
+    /** Silencia/des-silencia una sala (push rule room con actions=[], como Element). */
+    suspend fun setRoomMuted(roomId: String, muted: Boolean): Result<Unit> {
+        val client = matrixClient
+            ?: return Result.failure(IllegalStateException("Not logged in"))
+        return try {
+            if (muted) {
+                client.api.push.setPushRule(
+                    "global",
+                    net.folivo.trixnity.core.model.push.PushRuleKind.ROOM,
+                    roomId,
+                    net.folivo.trixnity.clientserverapi.model.push.SetPushRule.Request(
+                        actions = setOf(),
+                    ),
+                ).getOrThrow()
+            } else {
+                // 404 al borrar una regla inexistente = ya estaba sin mute
+                client.api.push.deletePushRule(
+                    "global",
+                    net.folivo.trixnity.core.model.push.PushRuleKind.ROOM,
+                    roomId,
+                ).onFailure { log.d(TAG) { "deletePushRule (ya sin mute): ${it.message}" } }
+            }
+            _mutedRooms.value = if (muted) _mutedRooms.value + roomId else _mutedRooms.value - roomId
+            Result.success(Unit)
+        } catch (e: Exception) {
+            log.w(TAG) { "setRoomMuted fallo: ${e.message}" }
+            Result.failure(e)
+        }
+    }
+
+    fun isRoomMuted(roomId: String): Boolean = roomId in _mutedRooms.value
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Favoritos (m.tag "m.favourite" por sala, como Element). API tipada.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private val _favoriteRooms = MutableStateFlow<Set<String>>(emptySet())
+    /** Salas marcadas como favoritas (tag m.favourite, sincronizado con el servidor). */
+    val favoriteRooms: StateFlow<Set<String>> = _favoriteRooms.asStateFlow()
+
+    /** Sincroniza desde el servidor qué salas tienen el tag m.favourite. */
+    suspend fun refreshFavoriteRooms() {
+        val client = matrixClient ?: return
+        try {
+            val ids = _rooms.value.map { it.id }
+            if (ids.isEmpty()) return
+            val favs = mutableSetOf<String>()
+            for (id in ids) {
+                val tags = client.api.room.getTags(client.userId, RoomId(id)).getOrNull() ?: continue
+                val isFav = tags.tags.keys.any {
+                    it is net.folivo.trixnity.core.model.events.m.TagEventContent.TagName.Favourite
+                }
+                if (isFav) favs += id
+            }
+            _favoriteRooms.value = favs
+            log.d(TAG) { "Favoritos sincronizados: ${favs.size}" }
+        } catch (e: Exception) {
+            log.w(TAG) { "refreshFavoriteRooms fallo: ${e.message}" }
+        }
+    }
+
+    /** Marca/desmarca una sala como favorita (tag m.favourite del servidor). */
+    suspend fun setRoomFavorite(roomId: String, favorite: Boolean): Result<Unit> {
+        val client = matrixClient
+            ?: return Result.failure(IllegalStateException("Not logged in"))
+        return try {
+            if (favorite) {
+                client.api.room.setTag(
+                    client.userId,
+                    RoomId(roomId),
+                    "m.favourite",
+                    net.folivo.trixnity.core.model.events.m.TagEventContent.Tag(0.5),
+                ).getOrThrow()
+            } else {
+                client.api.room.deleteTag(
+                    client.userId,
+                    RoomId(roomId),
+                    "m.favourite",
+                ).onFailure { log.d(TAG) { "deleteTag (ya sin favorito): ${it.message}" } }
+            }
+            _favoriteRooms.value =
+                if (favorite) _favoriteRooms.value + roomId else _favoriteRooms.value - roomId
+            Result.success(Unit)
+        } catch (e: Exception) {
+            log.w(TAG) { "setRoomFavorite fallo: ${e.message}" }
+            Result.failure(e)
+        }
     }
 
     /**
@@ -364,18 +635,30 @@ class MatrixManager(
             wantSync = false
             syncWatchdogJob?.cancel()
             syncWatchdogJob = null
-            matrixClient?.logout()
+            // Si el server rechaza el logout (token caducado, sin red), la
+            // limpieza local debe ocurrir igualmente.
+            runCatching { matrixClient?.logout() }
+                .onFailure { log.w(TAG) { "Server logout fallo (continuando limpieza local): ${it.message}" } }
             matrixClient = null
+            storedUserId = null
 
             _connectionState.value = MatrixConnectionState.Disconnected
             _rooms.value = emptyList()
             _activeCall.value = null
             _messages.value = emptyMap()
+            spaceChildJobs.values.forEach { it.cancel() }
+            spaceChildJobs.clear()
+            _spaceChildren.value = emptyMap()
             historicalLoaded.clear()
             oldestLoaded.clear()
             followJob?.cancel()
             followJob = null
             followedRoom = null
+
+            // Borrar el store local: claves olm, BD de salas/mensajes y media.
+            // Si algún archivo queda lockeado (Windows), el próximo login()
+            // detecta el marcador last_user y vuelve a intentar la limpieza.
+            clearLocalStore()
 
         } catch (e: Exception) {
             log.e(TAG, { "Logout error: $e" })
@@ -456,6 +739,17 @@ class MatrixManager(
     private fun observeMatrixChanges() {
         val client = matrixClient ?: return
 
+        // Sincronizar salas silenciadas (push rules) al iniciar sesión
+        scope.launch { refreshMutedRooms() }
+
+        // Sincronizar favoritos (m.tag) cuando la lista de salas esté poblada
+        scope.launch {
+            runCatching {
+                _rooms.first { it.isNotEmpty() }
+                refreshFavoriteRooms()
+            }
+        }
+
         // Observar rooms - collectLatest + combine para reaccionar reactivamente a cada room flow
         scope.launch {
             try {
@@ -467,19 +761,26 @@ class MatrixManager(
                     val myUserId = client.userId.full
                     val roomFlows: List<Flow<MatrixRoom?>> = roomsMap.entries.map { (roomId, roomFlow) ->
                         // Preview de la lista: combinamos cada sala con el cache compartido
-                        // `_messages` (un único StateFlow, ligero). Así el preview se
-                        // actualiza cuando llega/carga un mensaje, SIN crear un flow pesado
-                        // por sala (getLastTimelineEvent saturaba el dispatcher con +100 salas
-                        // y bloqueaba la recepción de mensajes nuevos).
-                        combine(roomFlow, _messages) { room, messagesMap ->
+                        // `_messages` (un único StateFlow, ligero) y con `_spaceChildren`
+                        // (jerarquía de grupos). Así el preview y los hijos de un grupo se
+                        // actualizan reactivamente SIN crear un flow pesado por sala.
+                        combine(roomFlow, _messages, _spaceChildren) { room, messagesMap, spaceChildren ->
                             room?.let {
+                                // ¿Es un Space (grupo) en lugar de una sala de chat?
+                                val isSpace = it.createEventContent?.type is CreateEventContent.RoomType.Space
+
                                 // Auto-join de invitaciones (UX tipo Element para DMs).
                                 if (it.membership == Membership.INVITE) {
                                     autoJoinInvitedRoom(roomId.full)
                                 }
-                                // Cargar historial persistido al estar joineado (idempotente).
+                                // Al estar joineado: los grupos cargan sus hijos; las salas
+                                // de chat cargan su historial (idempotente).
                                 if (it.membership == Membership.JOIN) {
-                                    loadHistoricalTimeline(roomId.full)
+                                    if (isSpace) {
+                                        observeSpaceChildren(roomId.full)
+                                    } else {
+                                        loadHistoricalTimeline(roomId.full)
+                                    }
                                 }
 
                                 val heroes: List<String> = try {
@@ -503,10 +804,14 @@ class MatrixManager(
                                     name = resolvedName,
                                     avatarUrl = avatarMxc,
                                     isDirect = it.isDirect,
-                                    isEncrypted = false,
-                                    unreadCount = 0,
+                                    // Estado real de cifrado de la sala (m.room.encryption)
+                                    isEncrypted = it.encrypted,
+                                    // Contador real de no leídos que mantiene Trixnity
+                                    unreadCount = it.unreadMessageCount.toInt(),
                                     lastMessage = cachedLast?.content,
                                     lastMessageTime = cachedLast?.timestamp,
+                                    isSpace = isSpace,
+                                    childRoomIds = if (isSpace) spaceChildren[roomId.full].orEmpty() else emptyList(),
                                 )
                             }
                         }
@@ -514,7 +819,10 @@ class MatrixManager(
                     combine(roomFlows) { rooms ->
                         rooms.filterNotNull()
                     }.collect { roomsList ->
-                        _rooms.value = roomsList
+                        // Orden tipo Element: actividad mas reciente primero.
+                        // Al llegar un mensaje, el combine con _messages re-emite la
+                        // sala con lastMessageTime nuevo y sube al principio.
+                        _rooms.value = roomsList.sortedByDescending { it.lastMessageTime ?: 0L }
                     }
                 }
             } catch (e: Exception) {
@@ -610,7 +918,20 @@ class MatrixManager(
         val roomId = timelineEvent.roomId.full
         val senderId = timelineEvent.event.sender.full
         val myUserId = matrixClient?.userId?.full ?: return
-        if (senderId == myUserId) return
+        if (senderId == myUserId) {
+            // Eventos de NUESTRA propia cuenta (esta u otra sesion/dispositivo):
+            // - Invite propio: somos el llamante en algun dispositivo -> no sonar aqui.
+            // - Answer/Hangup propio: la llamada se atendio/colgo en OTRO dispositivo
+            //   -> dejar de sonar localmente (comportamiento Element multi-device).
+            when (content) {
+                is CallEventContent.Answer -> stopLocalRingingIfHandledElsewhere(content.callId, "answered")
+                is CallEventContent.Hangup -> stopLocalRingingIfHandledElsewhere(content.callId, "hungup")
+                else -> log.d(TAG) {
+                    "CALL-EVT propio ignorado (${content::class.simpleName}) room=$roomId"
+                }
+            }
+            return
+        }
         val ts = timelineEvent.event.originTimestamp
         log.d(TAG) { "CALL-EVT ${content::class.simpleName} room=$roomId from=$senderId" }
         when (content) {
@@ -632,6 +953,24 @@ class MatrixManager(
     }
 
     /**
+     * La llamada que esta sonando AQUI fue atendida/colgada en otro dispositivo
+     * de la misma cuenta: parar el ring local y limpiar estado.
+     */
+    private fun stopLocalRingingIfHandledElsewhere(callId: String, how: String) {
+        try {
+            val call = _activeCall.value ?: return
+            if (call.callId != callId) return
+            if (call.state != MatrixCallState.RINGING) return
+            log.d(TAG) { "Call $callId $how on another device - stopping local ring" }
+            CallStateManager.callEnded(callId, sipReason = "handled_elsewhere")
+            sipCoreManager?.notifyCallStateChanged(CallState.ENDED)
+            _activeCall.value = null
+        } catch (e: Exception) {
+            log.e(TAG) { "Error stopping local ring: ${e.message}" }
+        }
+    }
+
+    /**
      * Maneja m.call.invite recibido
      */
     @OptIn(kotlin.time.ExperimentalTime::class)
@@ -648,6 +987,23 @@ class MatrixManager(
 
             val callId = content.callId
             val sdp = content.offer.sdp
+
+            // Glare (ambos lados llaman a la vez, regla Element/MSC2746): gana el
+            // callId lexicograficamente menor. Si perdemos, colgamos nuestra
+            // saliente y atendemos el invite entrante; si ganamos, lo ignoramos
+            // (el otro lado cedera al recibir nuestro invite).
+            val existing = _activeCall.value
+            if (existing != null && existing.roomId == roomId && existing.callId != callId &&
+                existing.state == MatrixCallState.INVITING
+            ) {
+                if (callId < existing.callId) {
+                    log.w(TAG) { "Glare: cediendo nuestra saliente ${existing.callId} ante $callId" }
+                    try { hangupCall(existing.callId) } catch (_: Exception) {}
+                } else {
+                    log.w(TAG) { "Glare: ignorando invite $callId, nuestra ${existing.callId} gana" }
+                    return
+                }
+            }
 
             val call = MatrixCall(
                 callId = callId,
@@ -859,8 +1215,12 @@ class MatrixManager(
             )
         } else {
             // Resolver el mxc:// real de la media (FileBased) para descarga/preview.
-            val mxc = (content as? RoomMessageEventContent.FileBased)?.url
-            val realName = (content as? RoomMessageEventContent.FileBased)?.fileName ?: content.body
+            // En salas CIFRADAS la media viaja como `file` (EncryptedFile) y `url`
+            // es null — exponemos el mxc del file para que la UI sepa que hay
+            // media; la descarga descifrada va por getMediaBytesForEvent().
+            val fileBased = content as? RoomMessageEventContent.FileBased
+            val mxc = fileBased?.url ?: fileBased?.file?.url
+            val realName = fileBased?.fileName ?: content.body
             upsertMediaMessage(
                 roomId = roomId,
                 eventId = eventId,
@@ -956,6 +1316,37 @@ class MatrixManager(
      *
      * Devuelve null si la URI no es válida o no tenemos token de acceso.
      */
+    /**
+     * Descarga los bytes de la media de un EVENTO concreto, manejando también
+     * salas cifradas: si el content trae `file` (EncryptedFile), descarga y
+     * DESCIFRA vía el MediaService de Trixnity; si trae `url`, descarga normal.
+     * Es el camino correcto para notas de voz/adjuntos que la descarga directa
+     * por mxc no cubre cuando hay E2EE.
+     */
+    suspend fun getMediaBytesForEvent(roomId: String, eventId: String, maxSize: Long? = null): ByteArray? {
+        val client = matrixClient ?: return null
+        return try {
+            val ev = withTimeoutOrNull(10_000L) {
+                client.room.getTimelineEvent(RoomId(roomId), EventId(eventId))
+                    .filterNotNull()
+                    .first { it.content != null }
+            } ?: run {
+                log.w(TAG) { "getMediaBytesForEvent: evento $eventId no disponible" }
+                return null
+            }
+            val content = ev.content?.getOrNull() as? RoomMessageEventContent.FileBased ?: return null
+            val encrypted = content.file
+            if (encrypted != null) {
+                client.media.getEncryptedMedia(encrypted).getOrThrow().toByteArray(maxSize = maxSize)
+            } else {
+                content.url?.let { fileManager.getMediaBytes(it, maxSize) }
+            }
+        } catch (e: Exception) {
+            log.w(TAG) { "getMediaBytesForEvent fallo ($eventId): ${e.message}" }
+            null
+        }
+    }
+
     private fun resolveMxcToHttpUrl(mxc: String): String? {
         if (!mxc.startsWith("mxc://")) return null
         val rest = mxc.removePrefix("mxc://")
@@ -1033,6 +1424,47 @@ class MatrixManager(
 
     // Cache de rooms cuyo timeline histórico ya cargamos en esta sesión, para
     // no relanzar la carga cada vez que el observer re-emite.
+    /**
+     * Colecta los hijos (m.space.child) de un Space y los publica en
+     * [_spaceChildren]. Idempotente por space. Un hijo se considera presente si
+     * su evento `m.space.child` tiene `via` no vacío (vacío = removido del grupo).
+     * Los hijos se ordenan por el campo `order` del evento (como Element).
+     */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private fun observeSpaceChildren(spaceId: String) {
+        val client = matrixClient ?: return
+        if (spaceChildJobs[spaceId]?.isActive == true) return
+        spaceChildJobs[spaceId] = scope.launch {
+            try {
+                client.room.getAllState(RoomId(spaceId), ChildEventContent::class)
+                    .flatMapLatest { byChild ->
+                        if (byChild.isEmpty()) {
+                            flowOf(emptyList<Pair<String, String?>>())
+                        } else {
+                            val flows = byChild.entries.map { (childRoomId, evFlow) ->
+                                evFlow.map { ev ->
+                                    val content = ev?.content
+                                    if (content is ChildEventContent && content.via.isNotEmpty()) {
+                                        childRoomId to content.order
+                                    } else null
+                                }
+                            }
+                            combine(flows) { arr -> arr.filterNotNull() }
+                        }
+                    }
+                    .collect { children ->
+                        val ordered = children
+                            .sortedWith(compareBy({ it.second ?: "￿" }, { it.first }))
+                            .map { it.first }
+                        _spaceChildren.value = _spaceChildren.value + (spaceId to ordered)
+                    }
+            } catch (e: Exception) {
+                log.w(TAG) { "observeSpaceChildren($spaceId) failed: ${e.message}" }
+                spaceChildJobs.remove(spaceId)
+            }
+        }
+    }
+
     private val historicalLoaded = mutableSetOf<String>()
 
     // Evento más antiguo cargado por sala, para paginar hacia atrás (scroll back).
@@ -1045,14 +1477,47 @@ class MatrixManager(
      * el usuario vea sus propios mensajes anteriores y los recibidos antes
      * de subscribirse al sync.
      */
+    /**
+     * Devuelve el evento ANTERIOR a [current], rellenando el hueco (gap) desde el
+     * servidor si hace falta. `getPreviousTimelineEvent` por sí solo NO rellena
+     * gaps de forma fiable en Trixnity 4.22 (devuelve null aunque haya historial
+     * en el servidor), por eso forzamos `fillTimelineGaps` cuando hay
+     * `previousEventId`/`hasGapBefore` pero el store local no tiene el anterior.
+     * Devuelve null solo cuando se llegó al inicio real de la sala.
+     */
+    private suspend fun previousEventFilling(
+        rid: RoomId,
+        current: net.folivo.trixnity.client.store.TimelineEvent,
+        batchSize: Long = 30L,
+    ): net.folivo.trixnity.client.store.TimelineEvent? {
+        val client = matrixClient ?: return null
+        // 1º intento (rápido, store local + fetch corto).
+        var prev = client.room.getPreviousTimelineEvent(current) { fetchTimeout = 5.seconds }?.firstOrNull()
+        if (prev != null) return prev
+        // Hay hueco: si el server conoce un anterior (previousEventId) o el evento
+        // marca gap-before, rellenar desde el servidor y reintentar.
+        val needsFill = current.previousEventId != null || current.gap?.hasGapBefore == true
+        if (!needsFill) return null // inicio real de la sala
+        runCatching { client.room.fillTimelineGaps(rid, current.eventId, batchSize) }
+            .onFailure { log.w(TAG) { "fillTimelineGaps(${rid.full}) fallo: ${it.message}" } }
+        prev = client.room.getPreviousTimelineEvent(current) { fetchTimeout = 10.seconds }?.firstOrNull()
+        return prev
+    }
+
     @OptIn(kotlin.time.ExperimentalTime::class)
-    private fun loadHistoricalTimeline(roomId: String, limit: Int = 50) {
+    private fun loadHistoricalTimeline(roomId: String, limit: Int = 80) {
         if (!historicalLoaded.add(roomId)) return
         val client = matrixClient ?: return
         scope.launch {
             try {
                 val rid = RoomId(roomId)
-                val last = client.room.getLastTimelineEvent(rid)
+                // CRÍTICO: pasar fetchTimeout/fetchSize → si el store local no tiene
+                // timeline (recién joineado / sync parcial), Trixnity lo trae del
+                // servidor. Sin esto la sala se quedaba vacía ("se sincroniza al abrir").
+                val last = client.room.getLastTimelineEvent(rid) {
+                    fetchTimeout = 10.seconds
+                    fetchSize = limit.toLong()
+                }
                     .firstOrNull()
                     ?.firstOrNull()
                 if (last == null) {
@@ -1065,9 +1530,7 @@ class MatrixManager(
                 val history = mutableListOf(last)
                 var current: net.folivo.trixnity.client.store.TimelineEvent? = last
                 while (history.size < limit) {
-                    val prevFlow = current?.let { client.room.getPreviousTimelineEvent(it) }
-                        ?: break
-                    val prev = prevFlow.firstOrNull() ?: break
+                    val prev = current?.let { previousEventFilling(rid, it) } ?: break
                     history.add(prev)
                     current = prev
                 }
@@ -1166,13 +1629,15 @@ class MatrixManager(
             start = oldestLoaded[roomId] ?: return 0
         }
         return try {
+            val rid = RoomId(roomId)
             var current = start
             var added = 0
-            while (added < count) {
-                val prevFlow = current?.let { ev ->
-                    client.room.getPreviousTimelineEvent(ev) { fetchTimeout = 10.seconds }
-                } ?: break
-                val prev = prevFlow.firstOrNull() ?: break
+            // Tope de saltos: cada 'prev' puede ser un evento de estado (no-mensaje);
+            // recorremos hasta 'count*4' eventos para juntar 'count' mensajes reales.
+            var hops = 0
+            while (added < count && hops < count * 4) {
+                hops++
+                val prev = current?.let { previousEventFilling(rid, it) } ?: break
                 current = prev
                 val content = prev.content?.getOrNull() as? RoomMessageEventContent
                 if (content != null) {
@@ -1267,6 +1732,27 @@ class MatrixManager(
                 // Permitir reintentar en una próxima emisión
                 autoJoinAttempted.remove(roomId)
             }
+        }
+    }
+
+    /**
+     * Une explícitamente al usuario a una sala (catálogo BackOffice CATALOG_ONLY,
+     * invitaciones, o salas públicas). Idempotente: si ya está joined, el server
+     * responde OK. Tras unirse, carga el historial para que la sala deje de verse
+     * vacía. Devuelve el resultado del join.
+     */
+    suspend fun joinRoom(roomId: String): Result<Unit> {
+        val client = matrixClient ?: return Result.failure(IllegalStateException("Not logged in"))
+        return try {
+            client.api.room.joinRoom(RoomId(roomId)).getOrThrow()
+            log.d(TAG) { "joinRoom OK: $roomId" }
+            // Permitir que el historial se (re)cargue ahora que somos miembros.
+            historicalLoaded.remove(roomId)
+            loadHistoricalTimeline(roomId)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            log.w(TAG) { "joinRoom failed for $roomId: ${e.message}" }
+            Result.failure(e)
         }
     }
 
@@ -1722,8 +2208,10 @@ class MatrixManager(
             val client = matrixClient ?: throw Exception("Not logged in to Matrix")
             val myUserId = client.userId.full
 
-            // Inicializar WebRTC y crear oferta
+            // Inicializar WebRTC y crear oferta. ICE primero: sin los TURN del
+            // homeserver, la llamada falla entre NATs simetricos (4G<->WiFi).
             webRtcManager.initialize()
+            applyTurnServersToWebRtc()
             webRtcManager.prepareAudioForCall()
             val offerSdp = webRtcManager.createOffer()
             val callId = generateCallId()
@@ -1879,8 +2367,10 @@ class MatrixManager(
 
             // Crear answer SDP basado en la oferta remota
             val remoteSdp = call.remoteSdp ?: throw Exception("No remote SDP for answer")
-            // Inicializar WebRTC antes de crear la respuesta (necesario para peer connection)
+            // Inicializar WebRTC antes de crear la respuesta (necesario para peer connection).
+            // ICE primero: sin los TURN del homeserver falla entre NATs simetricos.
             webRtcManager.initialize()
+            applyTurnServersToWebRtc()
             webRtcManager.prepareAudioForIncomingCall()
             val answerSdp = webRtcManager.createAnswer(remoteSdp)
 
