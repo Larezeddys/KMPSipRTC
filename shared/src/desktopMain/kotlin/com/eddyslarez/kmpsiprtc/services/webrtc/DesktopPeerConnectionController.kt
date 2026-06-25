@@ -143,10 +143,17 @@ class DesktopPeerConnectionController(
         log.d(TAG) { "Initializing PeerConnectionController..." }
 
         try {
-            audioDeviceModule = AudioDeviceModule(AudioLayer.kPlatformDefaultAudio)
+            // En Linux, kPlatformDefaultAudio resuelve a ALSA cruda (hw:), que NO mezcla
+            // aperturas concurrentes del dispositivo por defecto: si hay dos ADMs en el
+            // proceso (conferencia = publisher + subscriber), el segundo (playout del
+            // subscriber) no puede abrir el dispositivo y el audio entrante queda mudo.
+            // PulseAudio sí mezcla, igual que WASAPI/CoreAudio en Windows/Mac.
+            val isLinux = System.getProperty("os.name").orEmpty().lowercase().contains("linux")
+            val audioLayer = if (isLinux) AudioLayer.kLinuxPulseAudio else AudioLayer.kPlatformDefaultAudio
+            audioDeviceModule = AudioDeviceModule(audioLayer)
             peerConnectionFactory = PeerConnectionFactory(audioDeviceModule, null)
 
-            log.d(TAG) { "✅ PeerConnectionController initialized" }
+            log.d(TAG) { "✅ PeerConnectionController initialized (audioLayer=$audioLayer)" }
         } catch (e: Exception) {
             log.e(TAG) { "Error initializing: ${e.message}" }
             e.printStackTrace()
