@@ -432,12 +432,17 @@ class IosWebRtcManager : WebRtcManager {
                     setAudioEnabled(true)
                 }
             }
-            WebRtcConnectionState.DISCONNECTED,
-            WebRtcConnectionState.FAILED,
             WebRtcConnectionState.CLOSED -> {
                 if (::audioController.isInitialized) {
                     audioController.stop()
                 }
+            }
+            WebRtcConnectionState.DISCONNECTED,
+            WebRtcConnectionState.FAILED -> {
+                // Transitorio (flap de ICE consent / renegociacion): la llamada
+                // NO ha terminado. Desactivar la sesion aqui (setActive(false))
+                // mataria el audio del resto de la llamada. El release real ocurre
+                // en closePeerConnection()/dispose() al colgar.
             }
             else -> {}
         }

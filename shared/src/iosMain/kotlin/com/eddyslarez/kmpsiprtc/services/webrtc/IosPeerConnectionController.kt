@@ -111,15 +111,17 @@ class IosPeerConnectionController(
         return try {
             val audioSession = AVAudioSession.sharedInstance()
 
-            if (audioSession.category != AVAudioSessionCategoryPlayAndRecord) {
-                val success1 = audioSession.setCategory(
-                    AVAudioSessionCategoryPlayAndRecord,
-                    AVAudioSessionCategoryOptionAllowBluetooth or
-                            AVAudioSessionCategoryOptionDefaultToSpeaker,
-                    null
-                )
-                if (!success1) return false
-            }
+            // Reaplicar SIEMPRE la categoria con opciones VoIP. Si solo se hiciera
+            // cuando category != PlayAndRecord, una configuracion previa (p.ej. el
+            // AppDelegate fijando PlayAndRecord con .mixWithOthers al arranque)
+            // dejaria opciones erroneas bajo la unidad de audio -> audio muerto.
+            val success1 = audioSession.setCategory(
+                AVAudioSessionCategoryPlayAndRecord,
+                AVAudioSessionCategoryOptionAllowBluetooth or
+                        AVAudioSessionCategoryOptionDefaultToSpeaker,
+                null
+            )
+            if (!success1) return false
 
             val success2 = audioSession.setMode(AVAudioSessionModeVoiceChat, null)
             if (!success2) return false
