@@ -5,8 +5,6 @@ import com.eddyslarez.kmpsiprtc.data.models.AccountInfo
 import com.eddyslarez.kmpsiprtc.data.models.RegistrationState
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.utils.ConcurrentMap
-import com.eddyslarez.kmpsiprtc.utils.generateNewCallId
-import com.eddyslarez.kmpsiprtc.utils.generateNewFromTag
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -15,7 +13,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.launch
@@ -230,8 +227,7 @@ class RegistrationGuardianManager(
             }
 
             try {
-                // âœ… Limpiar completamente el diÃ¡logo SIP antiguo
-                cleanupAndResetSipDialog(accountInfo)
+                ensurePushToken(accountInfo)
 
                 // â±ï¸ Delay para asegurar que el servidor procese la limpieza
                 delay(500)
@@ -324,28 +320,8 @@ class RegistrationGuardianManager(
         }
     }
 
-    /**
-     * âœ… Limpia completamente el diÃ¡logo SIP antiguo
-     */
-    private suspend fun cleanupAndResetSipDialog(accountInfo: AccountInfo) {
+    private suspend fun ensurePushToken(accountInfo: AccountInfo) {
         try {
-            // 1. Marcar como no registrado
-            accountInfo.isRegistered.value = false
-
-            // 2. Generar nuevo Call-ID
-            accountInfo.callId.value = generateNewCallId()
-
-            // 3. Generar nuevo From-Tag
-            accountInfo.fromTag.value = generateNewFromTag()
-
-            // 4. Resetear CSeq a 1
-            accountInfo.resetCSeq()
-            accountInfo.toTag =  MutableStateFlow("")
-
-            // 5. Limpiar To-Tag
-            accountInfo.toTag = MutableStateFlow("")
-
-            // 6. Verificar que el token FCM estÃ© presente
             if (accountInfo.token.value.isEmpty()) {
                 log.w(tag = TAG) { "âš ï¸ FCM token is empty, attempting to reload from DB" }
                 try {
@@ -362,15 +338,8 @@ class RegistrationGuardianManager(
                 }
             }
 
-            log.d(tag = TAG) {
-                "ðŸ§¹ Reset SIP dialog for ${accountInfo.username}@${accountInfo.domain}: " +
-                        "new Call-ID=${accountInfo.callId.value?.take(8)}..., " +
-                        "new From-Tag=${accountInfo.fromTag.value?.take(8)}..., " +
-                        "CSeq=1, " +
-                        "has token=${accountInfo.token.value.isNotEmpty()}"
-            }
         } catch (e: Exception) {
-            log.e(tag = TAG) { "Error resetting SIP dialog: ${e.message}" }
+            log.e(tag = TAG) { "Error reloading push token: ${e.message}" }
             throw e
         }
     }
@@ -406,7 +375,7 @@ class RegistrationGuardianManager(
                     "ðŸ“ [${accountInfo.username}@${accountInfo.domain}] Sending REGISTER with new dialog..."
                 }
 
-                val success = sipCoreManager.sharedWebSocketManager.registerAccount(
+                val success = sipCoreManager.sharedWebSocketManager.registerAccountWithNewDialog(
                     accountInfo,
                     sipCoreManager.isAppInBackground
                 )

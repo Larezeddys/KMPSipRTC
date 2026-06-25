@@ -7,6 +7,9 @@ import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.services.sip.SipMessageHandler
 import com.eddyslarez.kmpsiprtc.services.webSocket.MultiplatformWebSocket
 import com.eddyslarez.kmpsiprtc.services.webSocket.createWebSocket
+import com.eddyslarez.kmpsiprtc.utils.generateNewCallId
+import com.eddyslarez.kmpsiprtc.utils.generateNewFromTag
+import com.eddyslarez.kmpsiprtc.utils.ConcurrentMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
@@ -60,6 +63,13 @@ class SharedWebSocketManager(
     private var reconnectAttempts = 0
     private var reconnectJob: Job? = null
     private val connectionMutex = Mutex()
+    private val registrationMutex = Mutex()
+    private data class RegistrationTransaction(
+        val accountInfo: AccountInfo,
+        val usesPush: Boolean,
+    )
+
+    private val registrationTransactions = ConcurrentMap<String, RegistrationTransaction>()
     private var lastError: Exception? = null
     private var disconnectedSince = 0L  // Timestamp cuando se perdio conexion
     private var lastErrorTimestamp = 0L // Para debounce de onError()
@@ -176,6 +186,38 @@ class SharedWebSocketManager(
      * "phantom registrations" que nunca expiran.
      */
     suspend fun registerAccount(
+        accountInfo: AccountInfo,
+        isBackground: Boolean = false,
+        skipUnregister: Boolean = false
+    ): Boolean = registrationMutex.withLock {
+        registerAccountLocked(accountInfo, isBackground, skipUnregister)
+    }
+
+    /**
+     * Reinicia el dialogo de registro y envia el REGISTER como una sola operacion.
+     * Evita mezclar Call-ID/From-Tag antiguos con un CSeq reiniciado cuando el
+     * lifecycle y el guardian intentan registrar la misma cuenta a la vez.
+     */
+    suspend fun registerAccountWithNewDialog(
+        accountInfo: AccountInfo,
+        isBackground: Boolean
+    ): Boolean = registrationMutex.withLock {
+        accountInfo.isRegistered.value = false
+        accountInfo.callId.value = generateNewCallId()
+        accountInfo.fromTag.value = generateNewFromTag()
+        accountInfo.resetCSeq()
+        accountInfo.toTag.value = null
+
+        log.d(tag = TAG) {
+            "New registration dialog for ${accountInfo.username}@${accountInfo.domain}: " +
+                "Call-ID=${accountInfo.callId.value?.take(8)}..., " +
+                "From-Tag=${accountInfo.fromTag.value?.take(8)}..., CSeq=1"
+        }
+
+        registerAccountLocked(accountInfo, isBackground, skipUnregister = true)
+    }
+
+    private suspend fun registerAccountLocked(
         accountInfo: AccountInfo,
         isBackground: Boolean = false,
         skipUnregister: Boolean = false
@@ -372,11 +414,13 @@ class SharedWebSocketManager(
 
                     if (accountInfo != null) {
                         messageHandler.handleSipMessage(message, accountInfo)
+                        completeRegistrationTransaction(message)
                     } else {
                         log.w(tag = TAG) { "Could not determine account for message" }
                         // Procesar con primera cuenta disponible como fallback
                         sipCoreManager.activeAccounts.values.firstOrNull()?.let { account ->
                             messageHandler.handleSipMessage(message, account)
+                            completeRegistrationTransaction(message)
                         }
                     }
                 }
@@ -517,10 +561,49 @@ class SharedWebSocketManager(
     }
 
 
+    /** Registra cada REGISTER por Call-ID y CSeq para resolver su respuesta exacta. */
+    suspend fun trackRegistrationTransaction(message: String, accountInfo: AccountInfo) {
+        registrationTransactionKey(message)?.let { key ->
+            registrationTransactions.put(
+                key,
+                RegistrationTransaction(
+                    accountInfo = accountInfo,
+                    usesPush = message.contains(";pn-prid=", ignoreCase = true),
+                )
+            )
+        }
+    }
+
+    private suspend fun completeRegistrationTransaction(message: String) {
+        if (!message.startsWith("SIP/2.0")) return
+        registrationTransactionKey(message)?.let { key ->
+            registrationTransactions.remove(key)
+        }
+    }
+
+    private fun registrationTransactionKey(message: String): String? {
+        val lines = message.split("\r\n")
+        val cseq = lines.firstOrNull { it.startsWith("CSeq:", ignoreCase = true) }
+            ?.substringAfter(":")?.trim()?.split(Regex("\\s+"))
+            ?: return null
+        if (cseq.size < 2 || !cseq[1].equals("REGISTER", ignoreCase = true)) return null
+        val callId = lines.firstOrNull { it.startsWith("Call-ID:", ignoreCase = true) }
+            ?.substringAfter(":")?.trim()?.takeIf { it.isNotEmpty() }
+            ?: return null
+        return "$callId:${cseq[0]}"
+    }
+
     /**
      * Determinar a que cuenta pertenece un mensaje SIP
      */
-    private fun determineAccountFromMessage(message: String): AccountInfo? {
+    private suspend fun determineAccountFromMessage(message: String): AccountInfo? {
+        registrationTransactionKey(message)?.let { key ->
+            registrationTransactions.get(key)?.let { transaction ->
+                transaction.accountInfo.registrationUsesPush.value = transaction.usesPush
+                log.d(TAG) { "REGISTER transaction resolved by Call-ID and CSeq: $key" }
+                return transaction.accountInfo
+            }
+        }
         return try {
             log.d(TAG) { "Determining account from SIP message:\n$message" }
 

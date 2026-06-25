@@ -236,6 +236,12 @@ class AccountInfo(
     val method = MutableStateFlow<String?>(null)
 
     /**
+     * Conserva el modo del REGISTER durante todo el desafio de autenticacion.
+     * El estado global de la app puede cambiar entre el envio inicial y el 401/407.
+     */
+    val registrationUsesPush = MutableStateFlow(false)
+
+    /**
      * Tipo de challenge recibido del servidor (401 o 407).
      * Determina si el header de respuesta debe ser Authorization o Proxy-Authorization.
      * Se actualiza en cada challenge de autenticacion.

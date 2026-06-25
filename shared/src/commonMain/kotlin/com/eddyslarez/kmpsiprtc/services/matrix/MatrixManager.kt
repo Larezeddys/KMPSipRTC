@@ -347,6 +347,127 @@ class MatrixManager(
     }
 
     /**
+     * Login con un access token ya emitido (sin password). Replica el flujo de la
+     * versión web: el backoffice intercambia la sesión de cookies por credenciales
+     * de Matrix (POST /api/protected/v1/auth → {accessToken, refreshToken, userId})
+     * y aquí solo levantamos el cliente con ese token, sin pedir contraseña.
+     *
+     * [userId] admite localpart ("eddys") o mxid completo ("@eddys:m.mcn.hu").
+     * [homeserverUrl] es el baseUrl del homeserver — normalmente el ORIGEN del
+     * backoffice, que hace de proxy de `/_matrix/...` (igual que la web). El
+     * deviceId real del token se resuelve con `/_matrix/client/v3/account/whoami`.
+     */
+    suspend fun loginWithToken(
+        userId: String,
+        accessToken: String,
+        refreshToken: String? = null,
+        homeserverUrl: String? = null,
+    ): Result<Unit> {
+        return try {
+            if (accessToken.isBlank()) {
+                return Result.failure(IllegalArgumentException("accessToken vacío"))
+            }
+            log.d(TAG) { "Login Matrix con token para: $userId" }
+            _connectionState.value = MatrixConnectionState.Connecting
+
+            // La web usa el baseUrl explícito (sin .well-known): el backoffice
+            // proxya `/_matrix/`. Respetamos lo mismo para evitar sorpresas.
+            val base = (homeserverUrl?.takeIf { it.isNotBlank() } ?: config.homeserverUrl).trimEnd('/')
+            val baseUrl = Url(base)
+
+            // whoami: confirma el mxid real y obtiene el deviceId asociado al token.
+            val who = whoAmIWithToken(base, accessToken)
+                ?: return Result.failure(
+                    IllegalStateException("Matrix whoami falló (token inválido o sin acceso al homeserver)")
+                )
+            val resolvedUserId = who.first
+            val resolvedDeviceId = who.second?.takeIf { it.isNotBlank() } ?: "MCN_${generateId()}"
+
+            // Si el store local es de OTRA cuenta, limpiarlo antes de levantar.
+            val prev = readLastUser()
+            if (prev != null && prev != resolvedUserId.lowercase()) {
+                log.d(TAG) { "Store previo de otra cuenta ($prev); limpiando antes del login con token" }
+                clearLocalStore()
+            }
+
+            val (reposModule, mediaModule) = MatrixModuleFactory.createPersistentModules(
+                matrixStoragePath()
+            )
+
+            val loginResult = MatrixClient.loginWith(
+                baseUrl = baseUrl,
+                repositoriesModuleFactory = { reposModule },
+                mediaStoreModuleFactory = { mediaModule },
+                getLoginInfo = { _ ->
+                    Result.success(
+                        MatrixClient.LoginInfo(
+                            userId = UserId(resolvedUserId),
+                            deviceId = resolvedDeviceId,
+                            accessToken = accessToken,
+                            refreshToken = refreshToken,
+                        )
+                    )
+                },
+                configuration = {
+                    syncLoopTimeout = config.syncTimeout.seconds
+                },
+            )
+
+            loginResult.onSuccess { client ->
+                matrixClient = client
+                storedAccessToken = accessToken
+                storedUserId = client.userId.full
+                writeLastUser(client.userId.full)
+                log.d(TAG) { "Login con token OK (${storedUserId}, device=$resolvedDeviceId)" }
+                wantSync = true
+                client.startSync()
+                _connectionState.value = MatrixConnectionState.Connected
+                observeMatrixChanges()
+                setupWebRtcListener()
+                startSyncWatchdog()
+            }.onFailure { error ->
+                log.e(TAG) { "Login con token fallido: $error" }
+                _connectionState.value = MatrixConnectionState.Error(error.message ?: "Unknown error")
+                return Result.failure(error)
+            }
+
+            Result.success(Unit)
+        } catch (e: Exception) {
+            log.e(TAG) { "Login con token excepción: $e" }
+            _connectionState.value = MatrixConnectionState.Error(e.message ?: "Unknown error")
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * `GET /_matrix/client/v3/account/whoami` con Bearer token. Devuelve
+     * `(userId, deviceId?)` o null si falla. Valida el token y obtiene el
+     * deviceId real antes de crear el MatrixClient (no hay sesión todavía, así
+     * que no se puede usar [authedHttpClient]).
+     */
+    private suspend fun whoAmIWithToken(baseUrl: String, accessToken: String): Pair<String, String?>? {
+        val client = io.ktor.client.HttpClient()
+        return try {
+            val response = client.get("${baseUrl.trimEnd('/')}/_matrix/client/v3/account/whoami") {
+                header("Authorization", "Bearer $accessToken")
+            }
+            if (response.status.value != 200) {
+                log.w(TAG) { "whoami HTTP ${response.status}" }
+                return null
+            }
+            val obj = json.parseToJsonElement(response.bodyAsText()).jsonObject
+            val uid = obj["user_id"]?.jsonPrimitive?.contentOrNull ?: return null
+            val dev = obj["device_id"]?.jsonPrimitive?.contentOrNull
+            uid to dev
+        } catch (e: Exception) {
+            log.w(TAG) { "whoami fallo: ${e.message}" }
+            null
+        } finally {
+            runCatching { client.close() }
+        }
+    }
+
+    /**
      * Verifica si esta logueado en Matrix
      */
     fun isLoggedIn(): Boolean = matrixClient != null &&

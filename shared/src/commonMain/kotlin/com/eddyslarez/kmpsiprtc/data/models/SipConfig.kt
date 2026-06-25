@@ -30,6 +30,11 @@ data class SipConfig(
      */
     val pushProduction: Boolean = true,
     /**
+     * Identificador APNs requerido por RFC 8599: TeamID.BundleID.voip.
+     * Solo se agrega al Contact cuando el proveedor de la cuenta es "apns".
+     */
+    val apnsPushParam: String? = null,
+    /**
      * Activa/desactiva la funcion "call waiting" (llamada en espera).
      *
      *   - true  (por defecto): comportamiento clasico. Una segunda llamada entrante

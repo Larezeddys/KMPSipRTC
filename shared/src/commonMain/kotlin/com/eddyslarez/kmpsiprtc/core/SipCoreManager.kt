@@ -161,6 +161,9 @@ class SipCoreManager private constructor(
      */
     val pushProduction: Boolean get() = config.pushProduction
 
+    /** Identificador APNs TeamID.BundleID.voip enviado como pn-param. */
+    val apnsPushParam: String? get() = config.apnsPushParam
+
     fun getDefaultDomain(): String? = currentAccountInfo?.domain
 
     private fun getFirstRegisteredAccount(): AccountInfo? {
@@ -2008,6 +2011,10 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
                 throw e
             }
 
+            // Actualizar siempre el estado real de la app, aunque el REGISTER se difiera.
+            // Al terminar la llamada, PushModeManager usara este valor para elegir PUSH o FOREGROUND.
+            isAppInBackground = isBackground
+
             // Si hay llamada activa o push pendiente, NO refrescar.
             // La race condition de CallKit en iOS (línea ~1980 historial) sigue cubierta aquí.
             if (isIncomingPushCallPending || CallStateManager.getCurrentState().isActive()) {
@@ -2044,7 +2051,6 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
                 return@launch
             }
 
-            isAppInBackground = isBackground
             lifecycleCallback?.invoke(if (isBackground) "APP_BACKGROUNDED" else "APP_FOREGROUNDED")
 
             log.d(tag = TAG) { "[LIFECYCLE] Triggering registration refresh (isBackground=$isBackground)" }

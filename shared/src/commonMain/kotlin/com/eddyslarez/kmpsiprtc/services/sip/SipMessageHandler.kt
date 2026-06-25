@@ -162,7 +162,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                         val retryCount = accountInfo.authRetryCount.value
                         if (retryCount < MAX_AUTH_RETRIES) {
                             accountInfo.authRetryCount.value = retryCount + 1
-                            sendRegister(accountInfo, sipCoreManager.isAppInBackground)
+                            sendRegister(accountInfo, accountInfo.registrationUsesPush.value)
                         } else {
                             log.e(tag = TAG) { "423 retry limit reached for $accountKey" }
                             accountInfo.authRetryCount.value = 0
@@ -1082,8 +1082,13 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 "REGISTER" -> {
                     val authenticatedRegister = SipMessageBuilder.buildAuthenticatedRegisterMessage(
                         accountInfo = accountInfo,
-                        isAppInBackground = sipCoreManager.isAppInBackground,
+                        isAppInBackground = accountInfo.registrationUsesPush.value,
                         pushProduction = sipCoreManager.pushProduction,
+                        apnsPushParam = sipCoreManager.apnsPushParam,
+                    )
+                    sipCoreManager.sharedWebSocketManager.trackRegistrationTransaction(
+                        authenticatedRegister,
+                        accountInfo
                     )
                     sendViaSharedWebSocket(authenticatedRegister)
                 }
@@ -1230,6 +1235,10 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
      */
     suspend fun sendRegister(accountInfo: AccountInfo, isAppInBackground: Boolean) {
         try {
+            // El 401/407 puede llegar cuando el ciclo de vida global ya cambio.
+            // Guardar el modo de esta transaccion evita perder los parametros push.
+            accountInfo.registrationUsesPush.value = isAppInBackground
+
             val callId = accountInfo.callId.value ?: generateId()
             val fromTag = accountInfo.fromTag.value ?: generateId()
 
@@ -1242,8 +1251,13 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 fromTag = fromTag,
                 isAppInBackground = isAppInBackground,
                 pushProduction = sipCoreManager.pushProduction,
+                apnsPushParam = sipCoreManager.apnsPushParam,
             )
 
+            sipCoreManager.sharedWebSocketManager.trackRegistrationTransaction(
+                registerMessage,
+                accountInfo
+            )
             sendViaSharedWebSocket(registerMessage)
             log.d(tag = TAG) { "REGISTER sent for ${accountInfo.username}@${accountInfo.domain}" }
 

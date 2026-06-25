@@ -324,6 +324,7 @@ class KmpSipRtc private constructor() {
                             incomingRingtoneUri = config.incomingRingtoneUri,
                             outgoingRingtoneUri = config.outgoingRingtoneUri,
                             pushProduction = config.pushProduction,
+                            apnsPushParam = config.apnsPushParam,
                             callWaitingEnabled = config.callWaitingEnabled
                         )
                     )
@@ -617,7 +618,11 @@ class KmpSipRtc private constructor() {
 
                 override fun onCallEndedForAccount(accountKey: String) {
                     log.d(tag = TAG) { "Internal callback: onCallEndedForAccount - $accountKey" }
-                    pushModeManager?.onCallEndedForAccount(accountKey, setOf(accountKey))
+                    pushModeManager?.onCallEndedForAccount(
+                        accountKey = accountKey,
+                        allRegisteredAccounts = setOf(accountKey),
+                        isAppInBackground = manager.isAppInBackground,
+                    )
 
                 }
             })
@@ -1134,6 +1139,9 @@ class KmpSipRtc private constructor() {
         notifyIncomingCall(callInfo)
     }
 
+    fun isIncomingCallFromPushPending(): Boolean =
+        sipCoreManager?.isIncomingPushCallPending == true
+
     /**
      * Marca que hay una llamada entrante de push pendiente.
      * Llamar desde la app cuando llega un push VoIP, ANTES de que el SIP INVITE llegue.
@@ -1143,11 +1151,8 @@ class KmpSipRtc private constructor() {
     fun setIncomingCallFromPush(isPending: Boolean) {
         log.d(tag = TAG) { "setIncomingCallFromPush: $isPending" }
         sipCoreManager?.isIncomingPushCallPending = isPending
-        if (isPending) {
-            // Marcar llamada activa en PushModeManager inmediatamente
-            // (antes de que llegue el SIP INVITE)
-            pushModeManager?.setCallActive(true)
-        }
+        // Mantener ambos estados sincronizados tambien al limpiar una llamada fallida.
+        pushModeManager?.setCallActive(isPending)
     }
 
     /**
@@ -3458,6 +3463,52 @@ class KmpSipRtc private constructor() {
                 }
             }
             onComplete?.invoke(result)
+        }
+    }
+
+    /**
+     * Login a Matrix con un access token ya emitido (sin password). Pensado para
+     * el flujo SSO/backoffice: la app intercambia su sesión de cookies por
+     * credenciales de Matrix (POST /api/protected/v1/auth → accessToken/refreshToken/userId)
+     * y aquí solo se levanta el cliente con ese token. [homeserverUrl] suele ser
+     * el origen del backoffice, que proxya `/_matrix/...`.
+     */
+    fun loginMatrixWithToken(
+        userId: String,
+        accessToken: String,
+        refreshToken: String? = null,
+        homeserverUrl: String? = null,
+        onComplete: ((Result<Unit>) -> Unit)? = null
+    ) {
+        checkInitialized()
+        val matrix = matrixManager ?: run {
+            onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized")))
+            return
+        }
+
+        internalScope.launch {
+            val result = matrix.loginWithToken(userId, accessToken, refreshToken, homeserverUrl)
+            if (result.isSuccess) {
+                val token = matrix.getAccessToken()
+                if (token != null) {
+                    livekitCallManager?.setMatrixAccessToken(token)
+                }
+            }
+            onComplete?.invoke(result)
+        }
+    }
+
+    /**
+     * Variante suspendida de [loginMatrixWithToken].
+     */
+    suspend fun loginMatrixWithTokenSuspend(
+        userId: String,
+        accessToken: String,
+        refreshToken: String? = null,
+        homeserverUrl: String? = null,
+    ): Result<Unit> = suspendCancellableCoroutine { cont ->
+        loginMatrixWithToken(userId, accessToken, refreshToken, homeserverUrl) { result ->
+            cont.resume(result) {}
         }
     }
 

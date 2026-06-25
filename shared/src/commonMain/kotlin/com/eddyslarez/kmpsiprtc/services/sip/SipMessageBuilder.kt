@@ -39,6 +39,7 @@ object SipMessageBuilder {
         isAppInBackground: Boolean,
         isAuthenticated: Boolean = false,
         pushProduction: Boolean = true,
+        apnsPushParam: String? = null,
     ): String {
         val uri = "sip:${accountInfo.domain}"
         val builder = StringBuilder()
@@ -72,6 +73,16 @@ object SipMessageBuilder {
             log.d(tag = TAG) { "Adding push notification parameters to Contact header (pushProduction=$pushProduction)" }
             // pn-prid y pn-provider son obligatorios para push (RFC 8599)
             builder.append(";pn-prid=${accountInfo.token.value};pn-provider=${accountInfo.provider.value}")
+
+            // Para APNs, RFC 8599 exige TeamID.Topic en pn-param. Sin este dato,
+            // el servidor no puede seleccionar de forma fiable el topic VoIP
+            // correcto cuando existen varias marcas bajo distintos equipos Apple.
+            if (accountInfo.provider.value.equals("apns", ignoreCase = true)) {
+                require(!apnsPushParam.isNullOrBlank()) {
+                    "apnsPushParam is required when pn-provider=apns"
+                }
+                builder.append(";pn-param=$apnsPushParam")
+            }
 
             // ESTRICTO: Solo enviar pn-production=false en DEBUG.
             // En RELEASE (pushProduction=true) NO enviar el parametro.
@@ -133,6 +144,7 @@ object SipMessageBuilder {
         accountInfo: AccountInfo,
         isAppInBackground: Boolean,
         pushProduction: Boolean = true,
+        apnsPushParam: String? = null,
     ): String {
         return buildRegisterMessage(
             accountInfo = accountInfo,
@@ -141,6 +153,7 @@ object SipMessageBuilder {
             isAppInBackground = isAppInBackground,
             isAuthenticated = true,
             pushProduction = pushProduction,
+            apnsPushParam = apnsPushParam,
         )
     }
 
