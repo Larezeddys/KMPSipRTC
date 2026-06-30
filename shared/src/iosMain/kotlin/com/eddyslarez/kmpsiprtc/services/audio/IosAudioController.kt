@@ -197,12 +197,20 @@ class IosAudioController(
                     log.d(TAG) { "✅ Switched to EARPIECE" }
                 }
                 AudioUnitTypes.BLUETOOTH -> {
-                    // En iOS, Bluetooth se selecciona automáticamente
                     audioSession.overrideOutputAudioPort(
                         AVAudioSessionPortOverrideNone,
                         null
                     )
-                    log.d(TAG) { "✅ Switched to BLUETOOTH" }
+                    // Forzar la entrada al puerto HFP del Bluetooth. Sin setPreferredInput,
+                    // iOS puede dejar la ruta en el micro/altavoz interno aunque el BT este
+                    // disponible, y seleccionar "Bluetooth" en el picker no movia el audio.
+                    val hfpInput = audioSession.availableInputs
+                        ?.mapNotNull { it as? AVAudioSessionPortDescription }
+                        ?.firstOrNull { it.portType == AVAudioSessionPortBluetoothHFP }
+                    if (hfpInput != null) {
+                        audioSession.setPreferredInput(hfpInput, null)
+                    }
+                    log.d(TAG) { "✅ Switched to BLUETOOTH (preferredInput=${hfpInput?.portName ?: "auto"})" }
                 }
                 AudioUnitTypes.HEADSET, AudioUnitTypes.HEADPHONES -> {
                     audioSession.overrideOutputAudioPort(
