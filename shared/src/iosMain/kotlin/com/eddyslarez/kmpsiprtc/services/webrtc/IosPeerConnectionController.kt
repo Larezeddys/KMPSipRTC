@@ -298,6 +298,24 @@ class IosPeerConnectionController(
             peerConnection ?: throw IllegalStateException("PeerConnection initialization failed")
         }
 
+        // Paridad con createOffer: garantizar sesion de audio + track de microfono
+        // ANTES de generar el answer. En llamadas ENTRANTES, sin esto el track local
+        // puede no estar listo (se crea async tras el permiso de microfono) y el answer
+        // sale sin audio saliente -> el otro lado no escucha. No lanzamos excepcion: si
+        // el micro no esta disponible, la llamada continua (posible recepcion-solo).
+        if (!audioSessionConfigured) {
+            configureAudioSession()
+        }
+        if (localAudioTrack == null) {
+            addLocalAudioTrack()
+            var attempts = 0
+            while (localAudioTrack == null && attempts < 10) {
+                delay(200)
+                attempts++
+            }
+        }
+        localAudioTrack?.enabled = true
+
         val remoteOffer = SessionDescription(
             type = SessionDescriptionType.Offer,
             sdp = offerSdp
