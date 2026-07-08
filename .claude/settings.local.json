@@ -123,7 +123,16 @@
       "Bash(schtasks /run /tn \"MCNBuildExe\")",
       "Bash(MSYS_NO_PATHCONV=1 schtasks /create /tn \"MCNBuildExe\" /tr \"\\\\\"C:\\\\Users\\\\Eddys Larez\\\\Downloads\\\\MCNSoftphone\\\\build-exe.cmd\\\\\"\" /sc once /st 23:59 /f)",
       "Bash(MSYS_NO_PATHCONV=1 schtasks /run /tn \"MCNBuildExe\")",
-      "Bash(rm -rf \"C:/Users/Eddys Larez/Downloads/MCNSoftphone/MCNSoftphone/composeApp/build/compose\" && echo limpio && MSYS_NO_PATHCONV=1 schtasks /run /tn \"MCNBuildExe\" 2>&1)"
+      "Bash(rm -rf \"C:/Users/Eddys Larez/Downloads/MCNSoftphone/MCNSoftphone/composeApp/build/compose\" && echo limpio && MSYS_NO_PATHCONV=1 schtasks /run /tn \"MCNBuildExe\" 2>&1)",
+      "Bash(cd \"C:\\\\Users\\\\Eddys Larez\\\\Downloads\\\\MCNSoftphone\\\\MCNSoftphone\" && cat settings.gradle.kts | head -50 && echo \"---KT COUNT---\" && find . -name \"*.kt\" -not -path \"*/build/*\" | wc -l)",
+      "Bash(xargs wc -l)",
+      "Bash(ls sip *)",
+      "Bash(ls composeApp/src)",
+      "Bash(xargs -0 wc -l)",
+      "Bash(xargs grep -l \"ConferenceLiveKitManager\")",
+      "Bash(xargs grep -l \"NetworkChanged\\\\|forceReregisterAll\\\\|enableAutoReconnect\")",
+      "Bash(find . -iname \"*proguard*\" -not -path \"*/build/*\")",
+      "Bash(find . -iname \"*consumer*\" -not -path \"*/build/*\")"
     ]
   }
 }

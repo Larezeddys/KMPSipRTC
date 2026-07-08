@@ -1024,7 +1024,16 @@ class DesktopPeerConnectionController(
             val sources = capturer.getDesktopSources()
             val screen = sources.firstOrNull { it.id.toString() == sourceId } ?: sources.firstOrNull()
             if (screen == null) {
-                log.w(TAG) { "No hay pantallas disponibles para compartir" }
+                if (isMacHost()) {
+                    log.e(TAG) {
+                        "macOS: sin pantallas para compartir. Concede 'Grabación de pantalla' a " +
+                            "la app (o al JDK) en Ajustes del Sistema > Privacidad y seguridad. Si ya " +
+                            "está concedido y sigue vacío, el capturer nativo webrtc-java 0.10.0/macOS " +
+                            "no soporta captura de escritorio (requiere upgrade nativo o ScreenCaptureKit)."
+                    }
+                } else {
+                    log.w(TAG) { "No hay pantallas disponibles para compartir" }
+                }
                 return null
             }
 
@@ -1043,8 +1052,11 @@ class DesktopPeerConnectionController(
 
             log.d(TAG) { "✅ Screen share track added (${screen.title})" }
             track
-        } catch (e: Exception) {
-            log.e(TAG) { "Error adding screen share track: ${e.message}" }
+        } catch (e: Throwable) {
+            log.e(TAG) {
+                "Error adding screen share track (os=${System.getProperty("os.name")}): " +
+                    "${e::class.simpleName}: ${e.message}"
+            }
             e.printStackTrace()
             removeLocalScreenShareTrack()
             null
@@ -1080,6 +1092,9 @@ class DesktopPeerConnectionController(
 
     private fun isLinuxHost(): Boolean =
         System.getProperty("os.name").lowercase().contains("linux")
+
+    private fun isMacHost(): Boolean =
+        System.getProperty("os.name").lowercase().let { it.contains("mac") || it.contains("darwin") }
 
     fun closePeerConnection() {
         log.d(TAG) { "Closing PeerConnection" }

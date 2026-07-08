@@ -160,11 +160,27 @@ class DesktopWebRtcManager : WebRtcManager {
         var capturer: ScreenCapturer? = null
         return try {
             capturer = ScreenCapturer()
-            capturer.getDesktopSources().mapIndexed { index, source ->
+            val sources = capturer.getDesktopSources().mapIndexed { index, source ->
                 source.id.toString() to (source.title?.takeIf { it.isNotBlank() } ?: "Screen ${index + 1}")
             }
-        } catch (e: Exception) {
-            log.w(TAG) { "Error enumerando pantallas: ${e.message}" }
+            if (sources.isEmpty() && isMacHost()) {
+                // En macOS getDesktopSources() suele devolver vacío cuando la app NO tiene
+                // permiso de "Grabación de pantalla" (System Settings > Privacy & Security >
+                // Screen Recording). También puede fallar si el native de webrtc-java (0.10.0)
+                // no implementa el desktop capturer de macOS. Log explícito para diagnóstico.
+                log.w(TAG) {
+                    "macOS: getDesktopSources() devolvió 0 pantallas. Revisa el permiso de " +
+                        "'Grabación de pantalla' para la app (o el JDK) en Ajustes del Sistema. " +
+                        "Si el permiso está concedido y sigue vacío, el capturer nativo de " +
+                        "webrtc-java 0.10.0/macOS no soporta captura de escritorio."
+                }
+            }
+            sources
+        } catch (e: Throwable) {
+            log.e(TAG) {
+                "Error enumerando pantallas (os=${System.getProperty("os.name")}): " +
+                    "${e::class.simpleName}: ${e.message}"
+            }
             emptyList()
         } finally {
             try {
@@ -172,6 +188,9 @@ class DesktopWebRtcManager : WebRtcManager {
             } catch (_: Throwable) {}
         }
     }
+
+    private fun isMacHost(): Boolean =
+        System.getProperty("os.name").lowercase().let { it.contains("mac") || it.contains("darwin") }
 
     fun addLocalScreenShareTrack(sourceId: String? = null): VideoTrack? {
         if (isLinuxHost()) {

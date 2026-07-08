@@ -121,12 +121,22 @@ actual class ConferenceLiveKitManager actual constructor() {
             // Cargar participantes que ya estaban en la sala
             joinResponse?.otherParticipants?.forEach { info ->
                 if (info.state != 3) { // no DISCONNECTED
+                    val handFromState = handRaisedFromParticipant(info)
+                    if (handFromState == true) {
+                        raisedHands[info.identity] = raisedHands[info.identity] ?: currentTimeMs()
+                    } else if (handFromState == false) {
+                        raisedHands.remove(info.identity)
+                    }
+                    val remoteScreenSharing = info.tracks.any {
+                        it.source == LiveKitTrackSource.SCREEN_SHARE.value
+                    }
                     remoteParticipants[info.identity] = LkParticipant(
                         identity = info.identity,
                         name = info.name.ifEmpty { info.identity },
                         sid = info.sid,
                         isLocal = false,
                         isAudioEnabled = true,
+                        isScreenSharing = remoteScreenSharing,
                         isHandRaised = raisedHands.containsKey(info.identity),
                         handRaisedAt = raisedHands[info.identity],
                     )
@@ -572,17 +582,32 @@ actual class ConferenceLiveKitManager actual constructor() {
                         raisedHands.remove(info.identity)
                         log.d(tag = TAG) { "Participant left: ${info.name} (${info.identity})" }
                     } else {
-                        // JOINING/JOINED/ACTIVE — agregar/actualizar
+                        // JOINING/JOINED/ACTIVE — agregar/actualizar.
+                        // Mano por atributos/metadata (estado "pegajoso" del participante):
+                        // complementa el mensaje por data channel, que es transitorio y se
+                        // pierde si el desktop entró tarde a la sala.
+                        val handFromState = handRaisedFromParticipant(info)
+                        if (handFromState != null) {
+                            if (handFromState) {
+                                raisedHands[info.identity] = raisedHands[info.identity] ?: currentTimeMs()
+                            } else {
+                                raisedHands.remove(info.identity)
+                            }
+                        }
+                        val remoteScreenSharing = info.tracks.any {
+                            it.source == LiveKitTrackSource.SCREEN_SHARE.value
+                        }
                         remoteParticipants[info.identity] = LkParticipant(
                             identity = info.identity,
                             name = info.name.ifEmpty { info.identity },
                             sid = info.sid,
                             isLocal = false,
                             isAudioEnabled = true, // asumimos activo hasta tener track info
+                            isScreenSharing = remoteScreenSharing,
                             isHandRaised = raisedHands.containsKey(info.identity),
                             handRaisedAt = raisedHands[info.identity],
                         )
-                        log.d(tag = TAG) { "Participant updated: ${info.name} (${info.identity}, state=${info.state})" }
+                        log.d(tag = TAG) { "Participant updated: ${info.name} (${info.identity}, state=${info.state}, screen=$remoteScreenSharing)" }
                         publishLocalHandState()
                     }
                 }
@@ -831,7 +856,9 @@ actual class ConferenceLiveKitManager actual constructor() {
 
     actual suspend fun sendChatMessage(text: String) {
         val json = """{"author":"${localName.replace("\"", "\\\"")}", "message":"${text.replace("\"", "\\\"")}"}"""
-        val bytes = json.encodeToByteArray()
+        // El SFU de LiveKit exige un livekit.DataPacket protobuf en el data channel;
+        // enviar JSON crudo hace que el SFU lo descarte y nadie lo reciba.
+        val bytes = LiveKitProto.encodeUserDataPacket(json.encodeToByteArray())
 
         // Enviar via publisher data channel
         val pub = publisherWebRtc
@@ -856,24 +883,39 @@ actual class ConferenceLiveKitManager actual constructor() {
     }
 
     private fun handleDataChannelMessage(bytes: ByteArray) {
-        try {
-            val text = bytes.decodeToString()
-            log.d(tag = TAG) { "Data channel recibido: $text" }
+        // Los peers reales (web / Android / iOS con el SDK oficial) envían un
+        // livekit.DataPacket protobuf, no JSON crudo. Desenvolvemos el UserPacket para
+        // obtener el payload y la identity del remitente (que el SFU añade al sobre).
+        val packet = LiveKitProto.decodeUserDataPacket(bytes)
+        val senderIdentity: String
+        val text: String
+        if (packet != null) {
+            senderIdentity = packet.senderIdentity
+            text = packet.payload.decodeToString()
+        } else {
+            // Fallback: peer legacy que envía JSON crudo (versión desktop antigua).
+            senderIdentity = ""
+            text = bytes.decodeToString()
+        }
 
-            // LiveKit web client envia: {"author":"nombre", "message":"texto"}
+        try {
+            log.d(tag = TAG) { "Data channel recibido (sender=$senderIdentity): $text" }
+
             val jsonObj = jsonParser.parseToJsonElement(text).jsonObject
             val type = jsonObj["type"]?.jsonPrimitive?.content
             if (type == "hand/raise" || type == "hand/lower" || type == "hand/sync/request" || type == "hand/sync/state") {
-                handleHandDataMessage(jsonObj)
+                handleHandDataMessage(jsonObj, senderIdentity)
                 return
             }
 
-            val author = jsonObj["author"]?.jsonPrimitive?.content ?: "Unknown"
-            val message = jsonObj["message"]?.jsonPrimitive?.content ?: text
+            // Chat: {"author":"nombre", "message":"texto"} (mismo formato que web/Android)
+            val author = jsonObj["author"]?.jsonPrimitive?.content
+                ?: senderIdentity.ifEmpty { "Unknown" }
+            val message = jsonObj["message"]?.jsonPrimitive?.content ?: return
 
             val msg = LkChatMessage(
                 id = "remote-${currentTimeMs()}",
-                senderIdentity = author,
+                senderIdentity = senderIdentity.ifEmpty { author },
                 senderName = author,
                 text = message,
                 timestamp = currentTimeMs(),
@@ -882,21 +924,12 @@ actual class ConferenceLiveKitManager actual constructor() {
             _chatMessages.value = _chatMessages.value + msg
         } catch (e: Exception) {
             log.e(tag = TAG) { "Error parseando data channel message: ${e.message}" }
-            // Fallback: tratar como texto plano
-            val msg = LkChatMessage(
-                id = "remote-${currentTimeMs()}",
-                senderIdentity = "unknown",
-                senderName = "Participant",
-                text = bytes.decodeToString(),
-                timestamp = currentTimeMs(),
-                isLocal = false,
-            )
-            _chatMessages.value = _chatMessages.value + msg
         }
     }
 
     private fun publishHandData(payload: String) {
-        val bytes = payload.encodeToByteArray()
+        // Igual que el chat: hay que envolver en livekit.DataPacket/UserPacket.
+        val bytes = LiveKitProto.encodeUserDataPacket(payload.encodeToByteArray())
         val sent = publisherWebRtc?.sendDataChannelMessage(bytes) ?: false
         if (!sent) {
             val fallbackSent = subscriberWebRtc?.sendDataChannelMessage(bytes) ?: false
@@ -919,14 +952,40 @@ actual class ConferenceLiveKitManager actual constructor() {
         publishHandData("""{"type":"hand/sync/state","raised":$localHandRaised,"at":$at,"participantIdentity":"$localIdentity","author":"$safeName"}""")
     }
 
-    private fun handleHandDataMessage(jsonObj: JsonObject) {
+    /**
+     * Deriva el estado de mano de un participante a partir de sus attributes ("handRaised")
+     * o su metadata JSON ({"handRaised":true,..}), igual que hace el cliente web/Android.
+     * Devuelve null si el participante no expone ese estado.
+     */
+    private fun handRaisedFromParticipant(info: LiveKitParticipantInfo): Boolean? {
+        info.attributes["handRaised"]?.let { v ->
+            return v.equals("true", ignoreCase = true) || v == "1"
+        }
+        if (info.metadata.isNotBlank()) {
+            try {
+                val obj = jsonParser.parseToJsonElement(info.metadata).jsonObject
+                obj["handRaised"]?.jsonPrimitive?.content?.let { v ->
+                    return v.equals("true", ignoreCase = true) || v == "1"
+                }
+            } catch (_: Exception) {
+                // metadata no-JSON — ignorar
+            }
+        }
+        return null
+    }
+
+    private fun handleHandDataMessage(jsonObj: JsonObject, envelopeIdentity: String) {
         val type = jsonObj["type"]?.jsonPrimitive?.content ?: return
         val at = jsonObj["at"]?.jsonPrimitive?.content?.toLongOrNull() ?: currentTimeMs()
         val target = jsonObj["target"]?.jsonPrimitive?.content
-        val sender = jsonObj["participantIdentity"]?.jsonPrimitive?.content
-            ?: jsonObj["author"]?.jsonPrimitive?.content
-            ?: target
-            ?: return
+        // La identity del remitente viene del sobre DataPacket (la añade el SFU y es la
+        // fuente autoritativa). Los mensajes de mano del SDK oficial (Android/iOS/web) NO
+        // incluyen participantIdentity en el JSON, así que sin el sobre se ignorarían.
+        val sender = envelopeIdentity.ifEmpty {
+            jsonObj["participantIdentity"]?.jsonPrimitive?.content
+                ?: jsonObj["author"]?.jsonPrimitive?.content
+                ?: target
+        } ?: return
 
         when (type) {
             "hand/raise" -> {

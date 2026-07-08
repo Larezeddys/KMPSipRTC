@@ -92,6 +92,8 @@ class MatrixManager(
     // sesión. El watchdog reinicia el sync si Trixnity lo deja en STOPPED.
     private var wantSync: Boolean = false
     private var syncWatchdogJob: Job? = null
+    // Refleja el estado REAL del sync loop en _connectionState (ver observeSyncStateForConnection).
+    private var syncConnectionJob: Job? = null
 
     // Referencia a SipCoreManager para notificar cambios de estado
     private var sipCoreManager: com.eddyslarez.kmpsiprtc.core.SipCoreManager? = null
@@ -263,8 +265,9 @@ class MatrixManager(
                 // Iniciar sincronizacion
                 wantSync = true
                 client.startSync()
-                _connectionState.value = MatrixConnectionState.Connected
-                log.d { "Sincronizacion iniciada, estado: Connected" }
+                // NO marcar Connected aquí: el estado se liga al syncState real (RUNNING).
+                observeSyncStateForConnection()
+                log.d { "Sincronizacion iniciada; estado ligado a syncState real" }
 
                 observeMatrixChanges()
                 setupWebRtcListener()
@@ -321,7 +324,7 @@ class MatrixManager(
                     storedUserId = client.userId.full
                     wantSync = true
                     client.startSync()
-                    _connectionState.value = MatrixConnectionState.Connected
+                    observeSyncStateForConnection()
                     observeMatrixChanges()
                     setupWebRtcListener()
                     startSyncWatchdog()
@@ -421,7 +424,7 @@ class MatrixManager(
                 log.d(TAG) { "Login con token OK (${storedUserId}, device=$resolvedDeviceId)" }
                 wantSync = true
                 client.startSync()
-                _connectionState.value = MatrixConnectionState.Connected
+                observeSyncStateForConnection()
                 observeMatrixChanges()
                 setupWebRtcListener()
                 startSyncWatchdog()
@@ -725,6 +728,43 @@ class MatrixManager(
      * lo reinicia con un pequeño backoff. Garantiza reconexión automática en
      * Desktop (red caída, errores) y en Android mientras el proceso siga vivo.
      */
+    /**
+     * Refleja el estado REAL del sync loop de Trixnity en [_connectionState].
+     *
+     * ANTES: los tres flujos de login marcaban `Connected` justo después de llamar a
+     * `startSync()`, que solo LANZA el loop — no confirma que autentique ni llegue a
+     * RUNNING. Si el `/sync` falla (token SSO inválido, homeserver/proxy que no reenvía
+     * `/sync`, sala cifrada sin claves), la app mostraba "Connected" pero no enviaba ni
+     * recibía nada, de forma totalmente invisible. Ahora el estado sigue al syncState real
+     * y CADA transición queda logueada, así el log revela la causa (401/404/timeout de /sync).
+     */
+    private fun observeSyncStateForConnection() {
+        val client = matrixClient ?: return
+        syncConnectionJob?.cancel()
+        syncConnectionJob = scope.launch {
+            client.syncState.collect { state ->
+                log.d(TAG) { "Matrix syncState = $state (wantSync=$wantSync)" }
+                when (state) {
+                    SyncState.RUNNING, SyncState.STARTED ->
+                        _connectionState.value = MatrixConnectionState.Connected
+                    SyncState.STOPPED ->
+                        _connectionState.value =
+                            if (wantSync) MatrixConnectionState.Connecting
+                            else MatrixConnectionState.Disconnected
+                    else -> {
+                        // INITIAL_SYNC / ERROR / TIMEOUT / reconexión: si aún no llegamos a
+                        // Connected, mostramos Connecting (el sync todavía no está vivo). Si ya
+                        // estábamos Connected, mantenemos (el loop reintenta solo). El log de
+                        // arriba deja constancia del estado real para diagnóstico.
+                        if (_connectionState.value != MatrixConnectionState.Connected) {
+                            _connectionState.value = MatrixConnectionState.Connecting
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private fun startSyncWatchdog() {
         syncWatchdogJob?.cancel()
         val client = matrixClient ?: return
@@ -756,6 +796,8 @@ class MatrixManager(
             wantSync = false
             syncWatchdogJob?.cancel()
             syncWatchdogJob = null
+            syncConnectionJob?.cancel()
+            syncConnectionJob = null
             // Si el server rechaza el logout (token caducado, sin red), la
             // limpieza local debe ocurrir igualmente.
             runCatching { matrixClient?.logout() }
@@ -1008,7 +1050,20 @@ class MatrixManager(
                             is RedactionEventContent -> {
                                 removeMessage(eventRoomId, content.redacts.full)
                             }
-                            else -> { /* Ignorar otros tipos de eventos */ }
+                            else -> {
+                                // content == null suele ser un evento CIFRADO que no se pudo
+                                // descifrar (sin claves de sala / megolm) o que llegó sin
+                                // descifrar. Antes se descartaba en silencio y la sala parecía
+                                // vacía (MX2). Lo logueamos para que el problema sea visible.
+                                if (content == null) {
+                                    val decryptError = timelineEvent.content?.exceptionOrNull()
+                                    log.w(TAG) {
+                                        "Evento sin contenido utilizable en room=$eventRoomId " +
+                                            "sender=$senderId (¿cifrado/indescifrable?): " +
+                                            (decryptError?.message ?: "content=null")
+                                    }
+                                }
+                            }
                         }
                     } catch (e: Exception) {
                         log.w(TAG) { "Error processing timeline event: ${e.message}" }

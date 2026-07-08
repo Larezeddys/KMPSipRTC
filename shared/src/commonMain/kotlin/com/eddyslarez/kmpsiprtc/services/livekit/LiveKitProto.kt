@@ -59,11 +59,15 @@ object LiveKitProto {
             // field 2: name (string)
             writeTag(2, 2)
             writeString(name)
-            // field 3: type (enum/varint)
+            // field 3: type (enum/varint) — livekit.TrackType (AUDIO=0, VIDEO=1)
             writeTag(3, 0)
             writeVarint(trackType.toLong())
-            // field 5: source (enum/varint)
-            writeTag(5, 0)
+            // field 8: source (enum/varint) — livekit.TrackSource (SCREEN_SHARE=3).
+            // BUG HISTORICO: se escribia en field 5, que en AddTrackRequest es `height`,
+            // dejando source=UNKNOWN(0). El SDK Android filtra el screen share por
+            // source==SCREEN_SHARE y por eso no renderizaba el track (aunque web sí,
+            // porque web pinta cualquier video). El campo correcto es 8.
+            writeTag(8, 0)
             writeVarint(source.toLong())
         }
         return encodeSignalRequest(fieldNumber = 4, value = addTrack)
@@ -115,6 +119,100 @@ object LiveKitProto {
             }
         }
         return encodeSignalRequest(fieldNumber = 13, value = pingReq)
+    }
+
+    // ======================= DATA CHANNEL (DataPacket / UserPacket) =======================
+
+    /**
+     * Envuelve datos de usuario en un `livekit.DataPacket` con un `UserPacket` anidado,
+     * que es EXACTAMENTE lo que el SFU de LiveKit espera recibir por el data channel
+     * (`_reliable` / `_lossy`). Enviar JSON crudo hace que el SFU no pueda parsear el
+     * paquete y lo descarte silenciosamente (nadie lo recibe).
+     *
+     * Wire format:
+     *   DataPacket { kind = 1 (varint: RELIABLE=0, LOSSY=1), user = 2 (UserPacket) }
+     *   UserPacket { payload = 2 (bytes), topic = 4 (string, opcional) }
+     *
+     * kind=RELIABLE(0) es el default de proto3, así que se omite salvo LOSSY.
+     */
+    fun encodeUserDataPacket(payload: ByteArray, topic: String? = null, reliable: Boolean = true): ByteArray {
+        val userPacket = buildByteArray {
+            // field 2: payload (bytes)
+            writeTag(2, 2)
+            writeBytes(payload)
+            // field 4: topic (string, opcional)
+            if (topic != null) {
+                writeTag(4, 2)
+                writeString(topic)
+            }
+        }
+        return buildByteArray {
+            // field 1: kind (varint) — solo si LOSSY (RELIABLE=0 es default)
+            if (!reliable) {
+                writeTag(1, 0)
+                writeVarint(1L)
+            }
+            // field 2: user (UserPacket message)
+            writeTag(2, 2)
+            writeBytes(userPacket)
+        }
+    }
+
+    /**
+     * Decodifica un `livekit.DataPacket` recibido por el data channel. Solo nos interesa
+     * el `UserPacket` (los demás oneof — speaker, sip_dtmf, transcription, streams... — se
+     * ignoran). Devuelve null si el paquete no contiene un UserPacket con payload.
+     *
+     * Extrae la identity del remitente del sobre: DataPacket.participant_identity (field 4)
+     * y, como fallback, UserPacket.participant_identity (field 5). Esto es CLAVE porque los
+     * mensajes de mano que envía el SDK oficial (Android/iOS/web) no llevan la identity en
+     * el JSON del payload — hay que tomarla del sobre.
+     */
+    fun decodeUserDataPacket(bytes: ByteArray): LiveKitDataPacket? {
+        val reader = ProtoReader(bytes)
+        var dpIdentity = ""
+        var userBytes: ByteArray? = null
+
+        while (reader.hasMore()) {
+            val tag = reader.readTag()
+            val fieldNumber = tag shr 3
+            val wireType = tag and 0x07
+            when (fieldNumber) {
+                // field 2: user (UserPacket)
+                2 -> if (wireType == 2) userBytes = reader.readBytes() else reader.skip(wireType)
+                // field 4: participant_identity (string)
+                4 -> if (wireType == 2) dpIdentity = reader.readString() else reader.skip(wireType)
+                else -> reader.skip(wireType)
+            }
+        }
+
+        val ub = userBytes ?: return null
+        val ur = ProtoReader(ub)
+        var payload: ByteArray? = null
+        var topic: String? = null
+        var upIdentity = ""
+
+        while (ur.hasMore()) {
+            val tag = ur.readTag()
+            val fieldNumber = tag shr 3
+            val wireType = tag and 0x07
+            when (fieldNumber) {
+                // field 2: payload (bytes)
+                2 -> if (wireType == 2) payload = ur.readBytes() else ur.skip(wireType)
+                // field 4: topic (string)
+                4 -> if (wireType == 2) topic = ur.readString() else ur.skip(wireType)
+                // field 5: participant_identity (string)
+                5 -> if (wireType == 2) upIdentity = ur.readString() else ur.skip(wireType)
+                else -> ur.skip(wireType)
+            }
+        }
+
+        val p = payload ?: return null
+        return LiveKitDataPacket(
+            senderIdentity = dpIdentity.ifEmpty { upIdentity },
+            payload = p,
+            topic = topic,
+        )
     }
 
     // ======================= DECODING =======================
@@ -452,7 +550,14 @@ object LiveKitProto {
 
     /**
      * Decodifica ParticipantInfo del protocolo LiveKit.
-     * Proto fields: 1=sid, 2=identity, 3=state, 4=tracks, 5=metadata, 6=joined_at, 7=name, 9=permission, 10=region, 11=is_publisher
+     * Proto fields (livekit_models.proto, estables entre versiones):
+     *   1=sid, 2=identity, 3=state, 4=tracks(repeated TrackInfo), 5=metadata,
+     *   6=joined_at, 9=name, 10=version, 11=permission, 12=region,
+     *   13=is_publisher, 14=kind, 15=attributes(map<string,string>)
+     *
+     * BUG HISTORICO: leía name en field 7 (inexistente → siempre vacío) e is_publisher
+     * en field 11 (que es `permission`, un mensaje). Además ignoraba metadata/attributes/
+     * tracks, por lo que nunca detectaba mano levantada por atributos ni screen share remoto.
      */
     private fun decodeParticipantInfo(data: ByteArray): LiveKitParticipantInfo {
         val reader = ProtoReader(data)
@@ -461,6 +566,9 @@ object LiveKitProto {
         var name = ""
         var state = 0
         var isPublisher = false
+        var metadata = ""
+        val attributes = mutableMapOf<String, String>()
+        val tracks = mutableListOf<LiveKitTrackInfo>()
 
         while (reader.hasMore()) {
             val tag = reader.readTag()
@@ -470,8 +578,19 @@ object LiveKitProto {
                 1 -> if (wireType == 2) sid = reader.readString() else reader.skip(wireType)
                 2 -> if (wireType == 2) identity = reader.readString() else reader.skip(wireType)
                 3 -> if (wireType == 0) state = reader.readVarint().toInt() else reader.skip(wireType)
-                7 -> if (wireType == 2) name = reader.readString() else reader.skip(wireType)
-                11 -> if (wireType == 0) isPublisher = reader.readVarint() != 0L else reader.skip(wireType)
+                // field 4: tracks (repeated TrackInfo)
+                4 -> if (wireType == 2) tracks.add(decodeTrackInfo(reader.readBytes())) else reader.skip(wireType)
+                // field 5: metadata (string)
+                5 -> if (wireType == 2) metadata = reader.readString() else reader.skip(wireType)
+                // field 9: name (string)
+                9 -> if (wireType == 2) name = reader.readString() else reader.skip(wireType)
+                // field 13: is_publisher (bool)
+                13 -> if (wireType == 0) isPublisher = reader.readVarint() != 0L else reader.skip(wireType)
+                // field 15: attributes (map<string,string>)
+                15 -> if (wireType == 2) {
+                    val (k, v) = decodeStringMapEntry(reader.readBytes())
+                    if (k.isNotEmpty()) attributes[k] = v
+                } else reader.skip(wireType)
                 else -> reader.skip(wireType)
             }
         }
@@ -482,7 +601,50 @@ object LiveKitProto {
             name = name.ifEmpty { identity },
             state = state,
             isPublisher = isPublisher,
+            metadata = metadata,
+            attributes = attributes,
+            tracks = tracks,
         )
+    }
+
+    /** Decodifica un livekit.TrackInfo. Campos: sid=1, type=2, name=3, source=9. */
+    private fun decodeTrackInfo(data: ByteArray): LiveKitTrackInfo {
+        val reader = ProtoReader(data)
+        var sid = ""
+        var type = 0
+        var name = ""
+        var source = 0
+        while (reader.hasMore()) {
+            val tag = reader.readTag()
+            val fieldNumber = tag shr 3
+            val wireType = tag and 0x07
+            when (fieldNumber) {
+                1 -> if (wireType == 2) sid = reader.readString() else reader.skip(wireType)
+                2 -> if (wireType == 0) type = reader.readVarint().toInt() else reader.skip(wireType)
+                3 -> if (wireType == 2) name = reader.readString() else reader.skip(wireType)
+                9 -> if (wireType == 0) source = reader.readVarint().toInt() else reader.skip(wireType)
+                else -> reader.skip(wireType)
+            }
+        }
+        return LiveKitTrackInfo(sid = sid, type = type, name = name, source = source)
+    }
+
+    /** Decodifica una entrada de un map<string,string> de protobuf (key=1, value=2). */
+    private fun decodeStringMapEntry(data: ByteArray): Pair<String, String> {
+        val reader = ProtoReader(data)
+        var key = ""
+        var value = ""
+        while (reader.hasMore()) {
+            val tag = reader.readTag()
+            val fieldNumber = tag shr 3
+            val wireType = tag and 0x07
+            when (fieldNumber) {
+                1 -> if (wireType == 2) key = reader.readString() else reader.skip(wireType)
+                2 -> if (wireType == 2) value = reader.readString() else reader.skip(wireType)
+                else -> reader.skip(wireType)
+            }
+        }
+        return key to value
     }
 
     /**

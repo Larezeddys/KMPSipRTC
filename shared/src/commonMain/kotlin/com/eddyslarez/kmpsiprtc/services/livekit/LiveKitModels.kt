@@ -42,6 +42,33 @@ data class LiveKitParticipantInfo(
     val name: String = "",
     val state: Int = 0, // 0=JOINING, 1=JOINED, 2=ACTIVE, 3=DISCONNECTED
     val isPublisher: Boolean = false,
+    /** metadata (ParticipantInfo field 5) — puede contener {"handRaised":..} como Element/web */
+    val metadata: String = "",
+    /** attributes (ParticipantInfo field 15, map<string,string>) — p.ej. handRaised="true" */
+    val attributes: Map<String, String> = emptyMap(),
+    /** tracks publicados (ParticipantInfo field 4) — se usa para detectar screen share remoto */
+    val tracks: List<LiveKitTrackInfo> = emptyList(),
+)
+
+/**
+ * Informacion de un track publicado (livekit.TrackInfo).
+ * Campos relevantes: sid=1, type=2, name=3, source=9.
+ */
+data class LiveKitTrackInfo(
+    val sid: String = "",
+    val type: Int = 0,      // livekit.TrackType: 0=AUDIO, 1=VIDEO, 2=DATA
+    val name: String = "",
+    val source: Int = 0,    // livekit.TrackSource: 1=CAMERA, 2=MIC, 3=SCREEN_SHARE, 4=SCREEN_SHARE_AUDIO
+)
+
+/**
+ * Paquete de datos de usuario decodificado del data channel (livekit.DataPacket + UserPacket).
+ * El SFU rellena [senderIdentity] con la identity del participante que lo envió.
+ */
+data class LiveKitDataPacket(
+    val senderIdentity: String = "",
+    val payload: ByteArray = ByteArray(0),
+    val topic: String? = null,
 )
 
 /** Update de participantes (join/leave/update) */
@@ -70,11 +97,16 @@ enum class LiveKitSignalTarget(val value: Int) {
     SUBSCRIBER(1)
 }
 
+/**
+ * Valores del enum livekit.TrackType (livekit_models.proto).
+ * IMPORTANTE: deben coincidir EXACTAMENTE con el proto oficial, no hay UNKNOWN:
+ *   AUDIO = 0, VIDEO = 1, DATA = 2
+ * (Antes estaba corrido en +1 — VIDEO=2 — lo que rompía el AddTrackRequest.type.)
+ */
 enum class LiveKitTrackType(val value: Int) {
-    UNKNOWN(0),
-    AUDIO(1),
-    VIDEO(2),
-    DATA(3)
+    AUDIO(0),
+    VIDEO(1),
+    DATA(2)
 }
 
 enum class LiveKitTrackSource(val value: Int) {
