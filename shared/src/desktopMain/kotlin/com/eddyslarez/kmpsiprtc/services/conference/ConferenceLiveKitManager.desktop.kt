@@ -862,11 +862,18 @@ actual class ConferenceLiveKitManager actual constructor() {
 
         // Enviar via publisher data channel
         val pub = publisherWebRtc
-        val sent = pub?.sendDataChannelMessage(bytes) ?: false
+        var sent = pub?.sendDataChannelMessage(bytes) ?: false
         if (!sent) {
             // Fallback: intentar via subscriber data channel
             val sub = subscriberWebRtc
-            sub?.sendDataChannelMessage(bytes)
+            sent = sub?.sendDataChannelMessage(bytes) ?: false
+        }
+        if (!sent) {
+            // Ninguno de los dos canales estaba disponible: si igual
+            // agregábamos el mensaje al historial local abajo, se veía como
+            // "enviado" aunque nadie más lo recibiera.
+            log.e(tag = TAG) { "No hay data channel disponible para enviar chat" }
+            throw IllegalStateException("No hay canal de datos disponible para enviar el mensaje")
         }
 
         // Agregar localmente

@@ -188,16 +188,20 @@ actual class ConferenceLiveKitManager actual constructor() {
 
         val type = if (raised) "hand/raise" else "hand/lower"
         val payload = """{"type":"$type","at":$now,"participantIdentity":"$identity","author":"$name"}""".encodeToByteArray()
-        try {
-            lp.publishData(
-                data = payload,
-                reliability = DataPublishReliability.RELIABLE
-            )
-        } catch (e: Exception) {
-            log.e(tag = TAG) { "Error enviando estado de mano: ${e.message}" }
+        // getOrThrow(): publishData() devuelve Result<Unit> y NO lanza si el canal de
+        // datos del publisher no está abierto (p.ej. mic/cámara nunca activados, o la
+        // negociación del publisher aún no terminó) — sin esto el fallo quedaba
+        // invisible: el estado local se actualizaba igual y parecía "enviado" aunque
+        // el resto de participantes nunca recibiera nada.
+        val publishResult = runCatching {
+            lp.publishData(data = payload, reliability = DataPublishReliability.RELIABLE).getOrThrow()
         }
+        publishResult.onFailure { e -> log.e(tag = TAG) { "Error enviando estado de mano: ${e.message}" } }
 
+        // El estado local (badge propio) se refleja igual — ya se actualizó arriba —
+        // pero propagamos el fallo para que la UI pueda avisar que no se envió.
         updateParticipants()
+        publishResult.getOrThrow()
     }
 
     actual suspend fun loadDevices(): LkDevices {
@@ -271,10 +275,14 @@ actual class ConferenceLiveKitManager actual constructor() {
         val bytes = json.encodeToByteArray()
 
         try {
+            // getOrThrow(): publishData() devuelve Result<Unit> y no lanza por sí solo
+            // si el canal de datos del publisher no está abierto todavía. Sin esto el
+            // mensaje se agregaba abajo al historial local como "enviado" aunque el
+            // otro lado nunca lo recibiera.
             lkRoom.localParticipant.publishData(
                 data = bytes,
                 reliability = DataPublishReliability.RELIABLE
-            )
+            ).getOrThrow()
 
             // Agregar mensaje local al historial
             val msg = LkChatMessage(
@@ -290,6 +298,7 @@ actual class ConferenceLiveKitManager actual constructor() {
             log.d(tag = TAG) { "Chat enviado: $text" }
         } catch (e: Exception) {
             log.e(tag = TAG) { "Error enviando chat: ${e.message}" }
+            throw e
         }
     }
 
@@ -453,10 +462,15 @@ actual class ConferenceLiveKitManager actual constructor() {
     }
 
     private suspend fun publishHandData(payload: String) {
-        room?.localParticipant?.publishData(
-            data = payload.encodeToByteArray(),
-            reliability = DataPublishReliability.RELIABLE
-        )
+        // Best-effort: se usa para sincronizar al conectar; no debe tumbar el
+        // flujo de connect() si el canal de datos aún no está listo, pero sí
+        // queremos verlo en el log en vez de perderlo en silencio.
+        runCatching {
+            room?.localParticipant?.publishData(
+                data = payload.encodeToByteArray(),
+                reliability = DataPublishReliability.RELIABLE
+            )?.getOrThrow()
+        }.onFailure { e -> log.w(tag = TAG) { "publishHandData falló: ${e.message}" } }
     }
 
     private fun applyParticipantHandAttributes(participant: Participant) {
