@@ -765,24 +765,93 @@ class MatrixManager(
         }
     }
 
+    // Reintentos consecutivos del watchdog desde el último STOPPED (se resetea
+    // en cuanto el sync vuelve a RUNNING/STARTED).
+    private var watchdogRetryCount: Int = 0
+
     private fun startSyncWatchdog() {
         syncWatchdogJob?.cancel()
+        watchdogRetryCount = 0
         val client = matrixClient ?: return
         syncWatchdogJob = scope.launch {
             client.syncState.collect { state ->
-                if (state == SyncState.STOPPED && wantSync && matrixClient != null) {
-                    log.w(TAG) { "Sync STOPPED de forma inesperada — reiniciando…" }
-                    delay(2000)
-                    if (wantSync) {
-                        try {
-                            matrixClient?.startSync()
-                            log.d(TAG) { "Sync reiniciado por watchdog" }
-                        } catch (e: Exception) {
-                            log.w(TAG) { "Watchdog restart failed: ${e.message}" }
-                        }
-                    }
+                when (state) {
+                    SyncState.RUNNING, SyncState.STARTED -> watchdogRetryCount = 0
+                    SyncState.STOPPED -> if (wantSync) handleSyncStopped()
+                    else -> {}
                 }
             }
+        }
+    }
+
+    /**
+     * Reintenta reiniciar el sync con backoff mientras `wantSync` siga activo.
+     *
+     * OJO: `MatrixClient.startSync()` (Trixnity) hace
+     * `checkNotNull(accountStore.getAccount()?.filterId)` — ese filterId solo
+     * se registra una vez, en la construcción del MatrixClient (login/fromStore).
+     * Si el sync quedó STOPPED con el filterId en un estado inconsistente, un
+     * simple `startSync()` vuelve a fallar SIEMPRE con
+     * "Required value was null.", y como `syncState` es un StateFlow que no
+     * re-emite el mismo valor, el `collect` de arriba nunca vuelve a disparar
+     * — el chat quedaba muerto hasta reiniciar la app. Por eso este método
+     * hace su PROPIO bucle de reintentos (no depende de nuevas emisiones) y,
+     * tras varios fallos, recrea el cliente completo vía [hardReconnect] en
+     * vez de insistir con `startSync()` sobre un cliente que no se recupera.
+     */
+    private suspend fun handleSyncStopped() {
+        while (wantSync && matrixClient != null) {
+            watchdogRetryCount++
+            val backoffMs = (2000L shl (watchdogRetryCount - 1).coerceAtMost(4)).coerceAtMost(30_000L)
+            log.w(TAG) { "Sync STOPPED de forma inesperada — reintento #$watchdogRetryCount en ${backoffMs}ms" }
+            delay(backoffMs)
+            if (!wantSync) return
+
+            if (watchdogRetryCount > 3) {
+                log.w(TAG) { "startSync() no se recupera tras $watchdogRetryCount intentos — recreando cliente Matrix desde el store" }
+                if (hardReconnect()) return
+                continue
+            }
+
+            try {
+                matrixClient?.startSync()
+                log.d(TAG) { "Sync reiniciado por watchdog (intento #$watchdogRetryCount)" }
+                // startSync() solo lanza el loop; confirmamos que de verdad llegó
+                // a correr antes de dar el watchdog por satisfecho.
+                delay(3000)
+                val state = matrixClient?.syncState?.value
+                if (state == SyncState.RUNNING || state == SyncState.STARTED) {
+                    watchdogRetryCount = 0
+                    return
+                }
+            } catch (e: Exception) {
+                log.w(TAG) { "Watchdog restart failed (intento #$watchdogRetryCount): ${e.message}" }
+            }
+        }
+    }
+
+    /**
+     * Cierra el MatrixClient actual (puede haber quedado en un estado interno
+     * inconsistente tras el STOPPED) y lo recrea desde el store local
+     * persistido — mismo camino que el login automático al abrir la app, que
+     * SÍ vuelve a registrar el filtro de sync si hace falta. No toca la
+     * sesión del servidor ni borra datos locales (a diferencia de [logout]).
+     */
+    private suspend fun hardReconnect(): Boolean {
+        return try {
+            runCatching { matrixClient?.close() }
+            matrixClient = null
+            syncConnectionJob?.cancel()
+            syncConnectionJob = null
+            val result = loginFromStore()
+            result.onFailure { error ->
+                log.e(TAG) { "hardReconnect: loginFromStore falló: ${error.message}" }
+            }
+            result.isSuccess
+        } catch (e: Exception) {
+            log.e(TAG) { "hardReconnect fallo: ${e.message}" }
+            _connectionState.value = MatrixConnectionState.Error(e.message ?: "Reconnect failed")
+            false
         }
     }
 
