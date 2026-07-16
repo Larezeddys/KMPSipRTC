@@ -36,6 +36,28 @@ enum class LkConnectionState {
 }
 
 /**
+ * Motivo de la ultima desconexion de la sala LiveKit. El SFU siempre envia
+ * este motivo (protobuf DisconnectReason via RoomEvent.Disconnected en
+ * Android, o LeaveRequest.reason en el signaling manual de Desktop), pero
+ * antes de este modelo se descartaba en ambas plataformas y la UI solo veia
+ * "DISCONNECTED" sin poder explicarle al usuario por que salio de la sala.
+ */
+enum class LkDisconnectReason {
+    UNKNOWN,
+    CLIENT_INITIATED,
+    DUPLICATE_IDENTITY,
+    SERVER_SHUTDOWN,
+    PARTICIPANT_REMOVED,
+    ROOM_DELETED,
+    ROOM_CLOSED,
+    STATE_MISMATCH,
+    JOIN_FAILURE,
+    SIGNAL_CLOSE,
+    CONNECTION_TIMEOUT,
+    MEDIA_FAILURE,
+}
+
+/**
  * Estado de los medios locales (mic, camera, screen share).
  */
 data class LkMediaState(

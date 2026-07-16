@@ -3,6 +3,7 @@ package com.eddyslarez.kmpsiprtc.services.conference
 import android.app.Application
 import com.eddyslarez.kmpsiprtc.platform.log
 import io.livekit.android.LiveKit
+import io.livekit.android.events.DisconnectReason
 import io.livekit.android.events.RoomEvent
 import io.livekit.android.events.collect
 import io.livekit.android.room.Room
@@ -32,6 +33,9 @@ actual class ConferenceLiveKitManager actual constructor() {
 
     private val _connectionState = MutableStateFlow(LkConnectionState.IDLE)
     actual val connectionState: StateFlow<LkConnectionState> = _connectionState.asStateFlow()
+
+    private val _lastDisconnectReason = MutableStateFlow<LkDisconnectReason?>(null)
+    actual val lastDisconnectReason: StateFlow<LkDisconnectReason?> = _lastDisconnectReason.asStateFlow()
 
     private val _mediaState = MutableStateFlow(LkMediaState())
     actual val mediaState: StateFlow<LkMediaState> = _mediaState.asStateFlow()
@@ -304,6 +308,21 @@ actual class ConferenceLiveKitManager actual constructor() {
 
     // ==================== INTERNAL ====================
 
+    private fun DisconnectReason.toLkDisconnectReason(): LkDisconnectReason = when (this) {
+        DisconnectReason.CLIENT_INITIATED -> LkDisconnectReason.CLIENT_INITIATED
+        DisconnectReason.DUPLICATE_IDENTITY -> LkDisconnectReason.DUPLICATE_IDENTITY
+        DisconnectReason.SERVER_SHUTDOWN -> LkDisconnectReason.SERVER_SHUTDOWN
+        DisconnectReason.PARTICIPANT_REMOVED -> LkDisconnectReason.PARTICIPANT_REMOVED
+        DisconnectReason.ROOM_DELETED -> LkDisconnectReason.ROOM_DELETED
+        DisconnectReason.ROOM_CLOSED -> LkDisconnectReason.ROOM_CLOSED
+        DisconnectReason.STATE_MISMATCH -> LkDisconnectReason.STATE_MISMATCH
+        DisconnectReason.JOIN_FAILURE -> LkDisconnectReason.JOIN_FAILURE
+        DisconnectReason.SIGNAL_CLOSE -> LkDisconnectReason.SIGNAL_CLOSE
+        DisconnectReason.CONNECTION_TIMEOUT -> LkDisconnectReason.CONNECTION_TIMEOUT
+        DisconnectReason.MEDIA_FAILURE -> LkDisconnectReason.MEDIA_FAILURE
+        else -> LkDisconnectReason.UNKNOWN
+    }
+
     private fun collectRoomEvents(lkRoom: Room) {
         scope.launch {
             lkRoom.events.collect { event ->
@@ -361,6 +380,8 @@ actual class ConferenceLiveKitManager actual constructor() {
                         handleDataReceived(event.data, event.participant)
                     }
                     is RoomEvent.Disconnected -> {
+                        log.w(tag = TAG) { "Room disconnected: reason=${event.reason} error=${event.error?.message}" }
+                        _lastDisconnectReason.value = event.reason.toLkDisconnectReason()
                         _connectionState.value = LkConnectionState.DISCONNECTED
                         _participants.value = emptyList()
                         _videoTracks.value = emptyList()

@@ -74,6 +74,12 @@ actual class ConferenceLiveKitManager actual constructor() {
     private val _connectionState = MutableStateFlow(LkConnectionState.IDLE)
     actual val connectionState: StateFlow<LkConnectionState> = _connectionState.asStateFlow()
 
+    // El wrapper CocoaPod LiveKitClient no expone el DisconnectReason
+    // estructurado del protocolo (solo NSError), asi que aqui unicamente
+    // distinguimos "hubo un error" de "sin motivo conocido".
+    private val _lastDisconnectReason = MutableStateFlow<LkDisconnectReason?>(null)
+    actual val lastDisconnectReason: StateFlow<LkDisconnectReason?> = _lastDisconnectReason.asStateFlow()
+
     private val _mediaState = MutableStateFlow(LkMediaState())
     actual val mediaState: StateFlow<LkMediaState> = _mediaState.asStateFlow()
 
@@ -303,6 +309,7 @@ actual class ConferenceLiveKitManager actual constructor() {
             if (error != null) {
                 log.w(tag = tag) { "LiveKit iOS desconectado: ${error.localizedDescription}" }
             }
+            _lastDisconnectReason.value = if (error != null) LkDisconnectReason.UNKNOWN else LkDisconnectReason.CLIENT_INITIATED
             stopStateRefreshLoop()
             _connectionState.value = LkConnectionState.DISCONNECTED
             _participants.value = emptyList()

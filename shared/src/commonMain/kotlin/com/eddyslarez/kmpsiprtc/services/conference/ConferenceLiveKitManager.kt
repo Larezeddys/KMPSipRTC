@@ -31,6 +31,14 @@ expect class ConferenceLiveKitManager() {
     /** Mensajes de chat recibidos via Data Channel */
     val chatMessages: StateFlow<List<LkChatMessage>>
 
+    /**
+     * Motivo de la ultima desconexion reportada por el SFU (null mientras no
+     * ha habido ninguna desconexion todavia en esta instancia). Se actualiza
+     * ANTES de que connectionState pase a DISCONNECTED, para que el
+     * consumidor pueda leerlo en la misma reaccion al cambio de estado.
+     */
+    val lastDisconnectReason: StateFlow<LkDisconnectReason?>
+
     // --- Conexion ---
 
     /**

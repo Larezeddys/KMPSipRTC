@@ -62,6 +62,7 @@ import net.folivo.trixnity.clientserverapi.model.media.Media
 import okio.FileSystem
 import okio.Path.Companion.toPath
 import okio.SYSTEM
+import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
 
@@ -826,7 +827,41 @@ class MatrixManager(
                 }
             } catch (e: Exception) {
                 log.w(TAG) { "Watchdog restart failed (intento #$watchdogRetryCount): ${e.message}" }
+                // "Required value was null." es el checkNotNull(filterId) de
+                // Trixnity: el account store fue limpiado (logout interno tras
+                // un 401/M_UNKNOWN_TOKEN — típico cuando la web hace login con
+                // la misma cuenta y el server revoca el token del device). En
+                // ese estado NINGÚN startSync() sobre este cliente volverá a
+                // funcionar; los 3 reintentos con backoff solo alargaban el
+                // corte visible (~30s de banner). Escalamos ya: recrear cliente
+                // y, si tampoco hay sesión persistida, Error inmediato para que
+                // la app relance el login vía backoffice sin más espera.
+                if (e.message?.contains("Required value was null") == true) {
+                    log.w(TAG) { "filterId perdido (sesión invalidada por el server) — escalando a hardReconnect sin más reintentos" }
+                    if (hardReconnect()) return
+                    if (wantSync) {
+                        _connectionState.value =
+                            MatrixConnectionState.Error("Matrix session invalidated by server")
+                    }
+                    return
+                }
             }
+        }
+        // Si salimos del while sin recuperar el sync y TODAVÍA queríamos estar
+        // conectados (wantSync=true), es porque hardReconnect() falló de forma
+        // definitiva (p.ej. "No stored session") y dejó matrixClient=null —
+        // eso hace que la condición del while ya no se cumpla y el bucle
+        // termine en silencio. Sin esta línea, _connectionState se quedaba
+        // clavado en el valor que loginFromStore() le puso de camino
+        // (Disconnected — el MISMO que usa un logout intencional del
+        // usuario), así que la app nunca se enteraba de que debía reintentar
+        // el login: el chat quedaba "Нет соединения" para siempre aunque el
+        // usuario nunca cerró sesión. Marcar Error (en vez de reusar
+        // Disconnected) es lo que le permite a MatrixVM distinguirlo de un
+        // logout real y disparar su propio reintento.
+        if (wantSync) {
+            _connectionState.value =
+                MatrixConnectionState.Error("Sync recovery failed: no se pudo recrear la sesión de Matrix")
         }
     }
 
@@ -1737,7 +1772,8 @@ class MatrixManager(
     ): net.folivo.trixnity.client.store.TimelineEvent? {
         val client = matrixClient ?: return null
         // 1º intento (rápido, store local + fetch corto).
-        var prev = client.room.getPreviousTimelineEvent(current) { fetchTimeout = 5.seconds }?.firstOrNull()
+        var prev = client.room.getPreviousTimelineEvent(current) { fetchTimeout = 5.seconds }
+            ?.let { awaitDecryptedTimelineEvent(it) }
         if (prev != null) return prev
         // Hay hueco: si el server conoce un anterior (previousEventId) o el evento
         // marca gap-before, rellenar desde el servidor y reintentar.
@@ -1745,8 +1781,46 @@ class MatrixManager(
         if (!needsFill) return null // inicio real de la sala
         runCatching { client.room.fillTimelineGaps(rid, current.eventId, batchSize) }
             .onFailure { log.w(TAG) { "fillTimelineGaps(${rid.full}) fallo: ${it.message}" } }
-        prev = client.room.getPreviousTimelineEvent(current) { fetchTimeout = 10.seconds }?.firstOrNull()
+        // CRÍTICO: fillTimelineGaps actualiza el TimelineEvent EN EL STORE —
+        // al evento que era el más antiguo le asigna su nuevo previousEventId.
+        // Pero `current` es una copia inmutable tomada ANTES del fill, con
+        // previousEventId=null, y getPreviousTimelineEvent(event) lee el
+        // previousEventId DEL OBJETO QUE LE PASAS (no del store). Con la copia
+        // vieja devolvía null aunque el fill sí hubiera traído más historial:
+        // la paginación moría en los ~10 eventos del sync inicial y las salas
+        // con historial real se veían vacías ("no se ven los mensajes viejos").
+        val refreshed = withTimeoutOrNull(5_000L) {
+            client.room.getTimelineEvent(rid, current.eventId).firstOrNull()
+        } ?: current
+        prev = client.room.getPreviousTimelineEvent(refreshed) { fetchTimeout = 10.seconds }
+            ?.let { awaitDecryptedTimelineEvent(it) }
         return prev
+    }
+
+    /**
+     * Espera a que un TimelineEvent quede resuelto (contenido no nulo) antes de
+     * usarlo. Trixnity emite primero el evento crudo (content=null si está
+     * cifrado) y, tras descifrar en segundo plano, una segunda emisión con el
+     * contenido ya resuelto (éxito o fallo de descifrado) — un simple
+     * `.firstOrNull()` cancela el flow apenas llega la primera emisión, ANTES
+     * de que el descifrado interno de Trixnity siquiera empiece a correr. Eso
+     * dejaba el mensaje "invisible" para siempre en `_messages` aunque el
+     * servidor sí lo tuviera: la sala mostraba el contador de no-leídos real
+     * pero el historial aparecía vacío. Con este helper esperamos la segunda
+     * emisión (con límite de tiempo) en vez de cortar en la primera.
+     */
+    private suspend fun awaitDecryptedTimelineEvent(
+        flow: Flow<net.folivo.trixnity.client.store.TimelineEvent?>,
+        timeout: Duration = 8.seconds,
+    ): net.folivo.trixnity.client.store.TimelineEvent? {
+        var latest: net.folivo.trixnity.client.store.TimelineEvent? = null
+        withTimeoutOrNull(timeout) {
+            flow.firstOrNull { tev ->
+                latest = tev
+                tev == null || tev.content != null
+            }
+        }
+        return latest
     }
 
     @OptIn(kotlin.time.ExperimentalTime::class)
@@ -1764,7 +1838,7 @@ class MatrixManager(
                     fetchSize = limit.toLong()
                 }
                     .firstOrNull()
-                    ?.firstOrNull()
+                    ?.let { awaitDecryptedTimelineEvent(it) }
                 if (last == null) {
                     // El timeline aún no está disponible (sync en curso). Liberar el
                     // gate para reintentar la próxima vez que se abra la sala.
@@ -1811,6 +1885,19 @@ class MatrixManager(
     fun requestRoomHistory(roomId: String) {
         loadHistoricalTimeline(roomId)
         followRoom(roomId)
+        // La ventana inicial del sync (~10 eventos por sala) puede contener
+        // solo eventos de estado (altas/bajas de los N miembros) y ni un solo
+        // mensaje de texto — la sala se veía "vacía" pese al contador de no
+        // leídos. Al abrirla, si el cache sigue sin mensajes reales, paginamos
+        // hacia atrás automáticamente buscando mensajes de verdad, sin esperar
+        // a que el usuario pulse "cargar anteriores".
+        scope.launch {
+            delay(1_500) // margen para que la carga inicial termine primero
+            if (_messages.value[roomId].isNullOrEmpty()) {
+                val added = loadOlderMessages(roomId, count = 20)
+                log.d(TAG) { "requestRoomHistory($roomId): auto-seek mensajes antiguos → +$added" }
+            }
+        }
     }
 
     // Seguimiento EN VIVO de la sala abierta. El observador global

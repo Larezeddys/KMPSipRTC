@@ -61,6 +61,9 @@ actual class ConferenceLiveKitManager actual constructor() {
     private val _connectionState = MutableStateFlow(LkConnectionState.IDLE)
     actual val connectionState: StateFlow<LkConnectionState> = _connectionState.asStateFlow()
 
+    private val _lastDisconnectReason = MutableStateFlow<LkDisconnectReason?>(null)
+    actual val lastDisconnectReason: StateFlow<LkDisconnectReason?> = _lastDisconnectReason.asStateFlow()
+
     private val _mediaState = MutableStateFlow(LkMediaState())
     actual val mediaState: StateFlow<LkMediaState> = _mediaState.asStateFlow()
 
@@ -86,6 +89,26 @@ actual class ConferenceLiveKitManager actual constructor() {
 
     @OptIn(ExperimentalTime::class)
     private fun currentTimeMs(): Long = Clock.System.now().toEpochMilliseconds()
+
+    /**
+     * Mapea el valor numerico crudo del campo protobuf
+     * `livekit.DisconnectReason` (leido tal cual del varint del wire, sin
+     * generar clases protobuf completas) al enum compartido de dominio.
+     */
+    private fun Int.toLkDisconnectReason(): LkDisconnectReason = when (this) {
+        1 -> LkDisconnectReason.CLIENT_INITIATED
+        2 -> LkDisconnectReason.DUPLICATE_IDENTITY
+        3 -> LkDisconnectReason.SERVER_SHUTDOWN
+        4 -> LkDisconnectReason.PARTICIPANT_REMOVED
+        5 -> LkDisconnectReason.ROOM_DELETED
+        6 -> LkDisconnectReason.STATE_MISMATCH
+        7 -> LkDisconnectReason.JOIN_FAILURE
+        9 -> LkDisconnectReason.SIGNAL_CLOSE
+        10 -> LkDisconnectReason.ROOM_CLOSED
+        14 -> LkDisconnectReason.CONNECTION_TIMEOUT
+        15 -> LkDisconnectReason.MEDIA_FAILURE
+        else -> LkDisconnectReason.UNKNOWN
+    }
 
     actual suspend fun connect(url: String, token: String, participantName: String) {
         if (_connectionState.value == LkConnectionState.CONNECTED) {
@@ -628,7 +651,9 @@ actual class ConferenceLiveKitManager actual constructor() {
             }
 
             override fun onLeave(canReconnect: Boolean, reason: Int) {
-                log.d(tag = TAG) { "Leave recibido: canReconnect=$canReconnect" }
+                val mappedReason = reason.toLkDisconnectReason()
+                log.w(tag = TAG) { "Leave recibido: canReconnect=$canReconnect, reason=$reason ($mappedReason)" }
+                _lastDisconnectReason.value = mappedReason
                 scope.launch {
                     cleanup()
                     _connectionState.value = LkConnectionState.DISCONNECTED
@@ -646,6 +671,7 @@ actual class ConferenceLiveKitManager actual constructor() {
                 val current = _connectionState.value
                 if (current == LkConnectionState.CONNECTED ||
                     current == LkConnectionState.CONNECTING) {
+                    _lastDisconnectReason.value = LkDisconnectReason.SIGNAL_CLOSE
                     scope.launch {
                         cleanup()
                         _connectionState.value = LkConnectionState.DISCONNECTED
