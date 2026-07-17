@@ -4,6 +4,7 @@ import cocoapods.LiveKitClient.ConnectionStateConnected
 import cocoapods.LiveKitClient.ConnectionStateConnecting
 import cocoapods.LiveKitClient.ConnectionStateDisconnected
 import cocoapods.LiveKitClient.ConnectionStateReconnecting
+import cocoapods.LiveKitClient.DataPublishOptions
 import cocoapods.LiveKitClient.LocalParticipant
 import cocoapods.LiveKitClient.LocalTrackPublication
 import cocoapods.LiveKitClient.LocalVideoTrack
@@ -336,7 +337,13 @@ actual class ConferenceLiveKitManager actual constructor() {
         awaitNSError { completion ->
             lp.publishWithData(
                 data = data,
-                options = null,
+                // CRÍTICO: sin esto, el SDK usa su reliability por defecto para el
+                // canal de datos, que puede ser "lossy" (UDP-like, sin reintentos).
+                // Android fuerza explícitamente DataPublishReliability.RELIABLE en
+                // publishData() (ver ConferenceLiveKitManager.android.kt) — sin el
+                // equivalente aquí, los mensajes de chat/mano-alzada de iOS podían
+                // perderse con cualquier pérdida de paquetes en la red.
+                options = DataPublishOptions(reliable = true),
                 completionHandler = completion,
             )
         }
@@ -454,6 +461,12 @@ actual class ConferenceLiveKitManager actual constructor() {
             }
 
             val senderIdentity = participant?.identity()?.stringValue() ?: ""
+            if (participant == null) {
+                // Diagnóstico: si el SDK entrega el data packet sin participant (payload
+                // "broadcast" del servidor), senderIdentity queda "" — no debería
+                // filtrarse como eco propio salvo que localIdentity también esté vacío.
+                log.w(tag = tag) { "onDataReceived: participant=null, payload=$text" }
+            }
             val localIdentity = room?.localParticipant()?.identity()?.stringValue() ?: ""
             if (senderIdentity == localIdentity) return
 
