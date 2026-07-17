@@ -336,6 +336,23 @@ actual class ConferenceLiveKitManager actual constructor() {
         awaitNSError { completion ->
             lp.publishWithData(
                 data = data,
+                // PENDIENTE (no arreglado aún): Android fuerza explícitamente
+                // DataPublishReliability.RELIABLE en publishData() — aquí en iOS
+                // el SDK 2.0.18 de LiveKitClient expone `DataPublishOptions.reliable`
+                // (default false, "Whether to send this as reliable or lossy"),
+                // pero su init NO está expuesto a Objective-C/Kotlin
+                // (`SWIFT_UNAVAILABLE` en LiveKitClient-Swift.h generado — se
+                // confirmó leyendo Pods/LiveKitClient/Sources/LiveKit/Types/Options/
+                // DataPublishOptions.swift). `DataPublishOptions(reliable = true)`
+                // NO compila desde Kotlin/Native por esta razón — no es un typo de
+                // nombre de parámetro. El arreglo real requiere un puente Swift/ObjC
+                // propio (ej. una función @objc en un pod nuevo o en MCNAudioBridge
+                // que haga `DataPublishOptions(reliable: true)` desde Swift y la
+                // devuelva ya construida) para que Kotlin pueda usarla sin pasar por
+                // el init no bridgeable. Mientras tanto se mantiene el default del
+                // SDK (`options = null`) — mismo comportamiento que antes de este
+                // commit, sin regresión, pero el chat de conferencia en iOS sigue
+                // sin la garantía de entrega que sí tiene Android.
                 options = null,
                 completionHandler = completion,
             )
@@ -454,6 +471,12 @@ actual class ConferenceLiveKitManager actual constructor() {
             }
 
             val senderIdentity = participant?.identity()?.stringValue() ?: ""
+            if (participant == null) {
+                // Diagnóstico: si el SDK entrega el data packet sin participant (payload
+                // "broadcast" del servidor), senderIdentity queda "" — no debería
+                // filtrarse como eco propio salvo que localIdentity también esté vacío.
+                log.w(tag = tag) { "onDataReceived: participant=null, payload=$text" }
+            }
             val localIdentity = room?.localParticipant()?.identity()?.stringValue() ?: ""
             if (senderIdentity == localIdentity) return
 
