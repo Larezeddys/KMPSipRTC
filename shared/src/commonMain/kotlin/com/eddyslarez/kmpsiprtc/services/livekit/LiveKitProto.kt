@@ -83,9 +83,17 @@ object LiveKitProto {
     }
 
     /**
-     * Codifica SignalRequest con Ping (field 11, protocol < 8) — KEEPALIVE.
+     * Codifica SignalRequest con Ping (field 14, protocol < 8) — KEEPALIVE.
      * LiveKit espera que el cliente envíe Ping cada ~10s. Sin esto el SFU
      * cierra el WebSocket por inactividad tras ~30s.
+     *
+     * Antes este código usaba field 11, que en el proto real de LiveKit es
+     * SubscriptionPermission (verificado contra el SDK oficial io.livekit:
+     * livekit-android:2.24.1 — SignalRequest.PING_FIELD_NUMBER = 14). Enviar
+     * el "ping" con el tag de otro mensaje hacía que el servidor interpretara
+     * el keepalive como una petición inválida y cerrara el WebSocket poco
+     * después del primer ping (~10s tras conectar) — la causa real de los
+     * "se perdió la conexión" en las conferencias de escritorio.
      *
      * Estructura Ping:
      *  - field 1: timestamp (int64, varint) — millis desde epoch del cliente
@@ -102,12 +110,14 @@ object LiveKitProto {
                 writeVarint(rttMs)
             }
         }
-        return encodeSignalRequest(fieldNumber = 11, value = ping)
+        return encodeSignalRequest(fieldNumber = 14, value = ping)
     }
 
     /**
-     * Codifica SignalRequest con PingReq (field 13, protocol >= 8). Es la
-     * versión nueva del keepalive: el server responde con PongResp (field 21).
+     * Codifica SignalRequest con PingReq (field 16, protocol >= 8). Es la
+     * versión nueva del keepalive: el server responde con PongResp (field 20).
+     * (Antes field 13, que en el proto real es Simulate — mismo bug que
+     * encodePing, ver comentario ahí.)
      */
     fun encodePingReq(timestampMs: Long, rttMs: Long = 0L): ByteArray {
         val pingReq = buildByteArray {
@@ -118,7 +128,7 @@ object LiveKitProto {
                 writeVarint(rttMs)
             }
         }
-        return encodeSignalRequest(fieldNumber = 13, value = pingReq)
+        return encodeSignalRequest(fieldNumber = 16, value = pingReq)
     }
 
     // ======================= DATA CHANNEL (DataPacket / UserPacket) =======================
@@ -278,8 +288,10 @@ object LiveKitProto {
                     reader.readBytes() // ignoramos el payload — solo importa que llegue
                     return LiveKitSignalMessage.Pong
                 }
-                // field 21: PongResp (respuesta al PingReq del cliente, protocol >= 8)
-                21 -> {
+                // field 20: PongResp (respuesta al PingReq del cliente, protocol >= 8).
+                // Antes field 21, que en el proto real es SubscriptionResponse — verificado
+                // contra el SDK oficial (SignalResponse.PONG_RESP_FIELD_NUMBER = 20).
+                20 -> {
                     // PongResp es int32 — wireType 0 (varint)
                     if (wireType == 0) {
                         reader.readVarint() // descarta el valor

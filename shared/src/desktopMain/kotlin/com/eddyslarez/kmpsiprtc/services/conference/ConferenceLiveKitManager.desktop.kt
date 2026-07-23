@@ -58,6 +58,16 @@ actual class ConferenceLiveKitManager actual constructor() {
     private var selectedMicrophoneId: String? = null
     private var selectedSpeakerId: String? = null
 
+    // Reconexión automática ante caídas inesperadas de la señalización (ver
+    // onDisconnected). El servidor a veces cierra el WebSocket sin que haya un
+    // error visible del lado del cliente; en vez de expulsar al usuario al
+    // catálogo, reintentamos unas pocas veces con el mismo url/token antes de
+    // rendirnos.
+    private var lastConnectUrl: String? = null
+    private var lastConnectToken: String? = null
+    private var reconnectAttempts = 0
+    private val maxReconnectAttempts = 3
+
     // Estado interno
     private val _participants = MutableStateFlow<List<LkParticipant>>(emptyList())
     actual val participants: StateFlow<List<LkParticipant>> = _participants.asStateFlow()
@@ -113,6 +123,8 @@ actual class ConferenceLiveKitManager actual constructor() {
             return
         }
 
+        lastConnectUrl = url
+        lastConnectToken = token
         _connectionState.value = LkConnectionState.CONNECTING
         localName = participantName
         log.d(tag = TAG) { "Conectando a LiveKit Desktop: $url" }
@@ -176,13 +188,24 @@ actual class ConferenceLiveKitManager actual constructor() {
 
     actual suspend fun disconnect() {
         log.d(tag = TAG) { "Desconectando de conferencia Desktop" }
+        // IMPORTANTE: el estado se marca DISCONNECTED *antes* de cerrar el WebSocket.
+        // signalingClient.disconnect() dispara el mismo callback onDisconnected() que
+        // usamos para detectar una caída de red inesperada; ese handler decide si fue
+        // un corte accidental mirando si _connectionState seguía en CONNECTED/CONNECTING.
+        // Si lo dejamos para después (como estaba antes), un simple "colgar" del usuario
+        // se confundía con una pérdida de conexión real y lo devolvía al catálogo con
+        // un error "se perdió la conexión" que no correspondía.
+        _connectionState.value = LkConnectionState.DISCONNECTED
+        // Salida intencional: no debe disparar un reintento automático de reconexión.
+        reconnectAttempts = 0
+        lastConnectUrl = null
+        lastConnectToken = null
         try {
             signalingClient.disconnect()
         } catch (e: Exception) {
             log.w(tag = TAG) { "Error en disconnect signaling: ${e.message}" }
         }
         cleanup()
-        _connectionState.value = LkConnectionState.DISCONNECTED
         _participants.value = emptyList()
         _videoTracks.value = emptyList()
         _chatMessages.value = emptyList()
@@ -638,6 +661,7 @@ actual class ConferenceLiveKitManager actual constructor() {
                 // signaling) está estable. Lo usamos como señal definitiva de CONNECTED.
                 if (_connectionState.value != LkConnectionState.CONNECTED) {
                     _connectionState.value = LkConnectionState.CONNECTED
+                    reconnectAttempts = 0
                     log.d(tag = TAG) { "Marcando CONNECTED por TrackPublished (fallback)" }
                     requestHandStateSync()
                 }
@@ -659,18 +683,40 @@ actual class ConferenceLiveKitManager actual constructor() {
                 // Si estábamos en sesión activa, el WebSocket murió por su cuenta
                 // (no fue un disconnect intencional desde la app, ya que disconnect()
                 // pone el estado a DISCONNECTED ANTES de cerrar el socket).
-                // En ese caso, propagamos el estado a la UI para que vuelva al catálogo
-                // y el usuario pueda reintentar.
                 val current = _connectionState.value
                 if (current == LkConnectionState.CONNECTED ||
                     current == LkConnectionState.CONNECTING) {
-                    _lastDisconnectReason.value = LkDisconnectReason.SIGNAL_CLOSE
-                    scope.launch {
-                        cleanup()
-                        _connectionState.value = LkConnectionState.DISCONNECTED
-                        _participants.value = emptyList()
-                        _videoTracks.value = emptyList()
-                        _mediaState.value = LkMediaState()
+                    val url = lastConnectUrl
+                    val token = lastConnectToken
+                    val name = localName
+                    if (url != null && token != null && reconnectAttempts < maxReconnectAttempts) {
+                        reconnectAttempts++
+                        val attempt = reconnectAttempts
+                        log.w(tag = TAG) { "Reconexión automática $attempt/$maxReconnectAttempts tras caída de señalización…" }
+                        scope.launch {
+                            cleanup()
+                            _connectionState.value = LkConnectionState.CONNECTING
+                            _participants.value = emptyList()
+                            _videoTracks.value = emptyList()
+                            delay(1000L * attempt) // backoff simple: 1s, 2s, 3s
+                            try {
+                                connect(url, token, name)
+                            } catch (e: Exception) {
+                                log.e(tag = TAG) { "Reconexión automática falló: ${e.message}" }
+                            }
+                        }
+                    } else {
+                        // Se agotaron los reintentos automáticos: ahora sí propagamos el
+                        // estado a la UI para que vuelva al catálogo y el usuario reintente
+                        // manualmente.
+                        _lastDisconnectReason.value = LkDisconnectReason.SIGNAL_CLOSE
+                        scope.launch {
+                            cleanup()
+                            _connectionState.value = LkConnectionState.DISCONNECTED
+                            _participants.value = emptyList()
+                            _videoTracks.value = emptyList()
+                            _mediaState.value = LkMediaState()
+                        }
                     }
                 }
             }
@@ -782,6 +828,7 @@ actual class ConferenceLiveKitManager actual constructor() {
                     WebRtcConnectionState.CONNECTED -> {
                         if (_connectionState.value != LkConnectionState.CONNECTED) {
                             _connectionState.value = LkConnectionState.CONNECTED
+                            reconnectAttempts = 0
                             log.d(tag = TAG) { "Publisher RTC CONNECTED — sala lista" }
                             requestHandStateSync()
                         }

@@ -270,8 +270,8 @@ class LiveKitSignalingClient {
                     if (wsSession == null) break
                     val ts = currentTimeMs()
                     lastPingSentAtMs = ts
-                    // Enviamos ambos: Ping (field 11, protocol antiguo) y PingReq
-                    // (field 13, protocol >= 8). El SFU acepta lo que reconozca.
+                    // Enviamos ambos: Ping (field 14, protocol antiguo) y PingReq
+                    // (field 16, protocol >= 8). El SFU acepta lo que reconozca.
                     sendBinary(LiveKitProto.encodePing(ts, lastRttMs))
                     sendBinary(LiveKitProto.encodePingReq(ts, lastRttMs))
                     log.d(tag = TAG) { "Ping enviado (lastRtt=${lastRttMs}ms)" }

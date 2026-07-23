@@ -77,7 +77,7 @@ class MatrixRoomManager(
                 read = EventId(eventId),
             )
         } catch (e: Exception) {
-            log.w(TAG) { "markRead failed: ${e.message}" }
+            log.e(TAG) { "markRead failed for room=$roomId event=$eventId: ${e.message}" }
             Result.failure(e)
         }
     }
