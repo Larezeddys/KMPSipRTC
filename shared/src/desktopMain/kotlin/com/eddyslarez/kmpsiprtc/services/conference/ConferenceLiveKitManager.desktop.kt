@@ -5,6 +5,10 @@ import com.eddyslarez.kmpsiprtc.data.models.IceServerInfo
 import com.eddyslarez.kmpsiprtc.data.models.SdpType
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
 import com.eddyslarez.kmpsiprtc.platform.log
+import com.eddyslarez.kmpsiprtc.services.screencapture.DesktopScreenCaptureSupport
+import com.eddyslarez.kmpsiprtc.services.screencapture.PortalScreenCastSession
+import com.eddyslarez.kmpsiprtc.services.screencapture.ScreenShareUnavailableException
+import com.eddyslarez.kmpsiprtc.services.webrtc.PORTAL_SOURCE_ID
 import com.eddyslarez.kmpsiprtc.services.livekit.*
 import com.eddyslarez.kmpsiprtc.services.webrtc.DesktopWebRtcManager
 import com.eddyslarez.kmpsiprtc.services.webrtc.WebRtcEventListener
@@ -79,13 +83,6 @@ actual class ConferenceLiveKitManager actual constructor() {
     private val remoteParticipants = mutableMapOf<String, LkParticipant>()
     private val raisedHands = mutableMapOf<String, Long>()
     private var localHandRaised = false
-
-    private val isLinuxHost: Boolean =
-        System.getProperty("os.name").lowercase().contains("linux")
-
-    private fun isLinuxScreenShareOptIn(): Boolean =
-        System.getenv("MCN_LINUX_SCREENSHARE") == "1" ||
-            System.getProperty("mcn.linux.screenshare") == "1"
 
     @OptIn(ExperimentalTime::class)
     private fun currentTimeMs(): Long = Clock.System.now().toEpochMilliseconds()
@@ -277,21 +274,6 @@ actual class ConferenceLiveKitManager actual constructor() {
             return
         }
 
-        if (enabled && isLinuxHost && !isLinuxScreenShareOptIn()) {
-            // webrtc-java 0.10.0 crashes the process in DesktopCapturer.getDesktopSources()
-            // on Linux instead of returning an error. Keep conferences usable until the
-            // native Linux capturer is replaced or upgraded.
-            // Opt-in experimental: MCN_LINUX_SCREENSHARE=1 (X11 suele funcionar;
-            // Wayland requiere el portal de PipeWire y puede seguir fallando).
-            log.w(tag = TAG) {
-                "Screen share local deshabilitado en Linux (capturer nativo inestable). " +
-                    "Exporta MCN_LINUX_SCREENSHARE=1 para probarlo bajo tu responsabilidad."
-            }
-            _mediaState.value = _mediaState.value.copy(screenShareEnabled = false)
-            rebuildParticipantList()
-            return
-        }
-
         if (enabled) {
             // Si no hay fuente persistida, intentar usar la primera disponible.
             val sourceId = selectedScreenShareSourceId ?: run {
@@ -305,12 +287,22 @@ actual class ConferenceLiveKitManager actual constructor() {
             }
             log.d(tag = TAG) { "Activando screen share: source=${sourceId ?: "(default)"}" }
 
-            val screenTrack = pub.getLocalScreenShareTrack() ?: pub.addLocalScreenShareTrack(sourceId)
-            if (screenTrack == null) {
-                log.w(tag = TAG) { "No se pudo activar screen share Desktop (addLocalScreenShareTrack devolvió null)" }
+            // Cualquier fallo tiene que propagarse: si esto retorna en silencio, el
+            // usuario aprieta el botón y no pasa nada ni ve un motivo.
+            val screenTrack = try {
+                pub.getLocalScreenShareTrack() ?: pub.addLocalScreenShareTrack(sourceId)
+            } catch (e: Throwable) {
                 _mediaState.value = _mediaState.value.copy(screenShareEnabled = false)
                 rebuildParticipantList()
-                return
+                throw e
+            }
+            if (screenTrack == null) {
+                _mediaState.value = _mediaState.value.copy(screenShareEnabled = false)
+                rebuildParticipantList()
+                throw ScreenShareUnavailableException(
+                    DesktopScreenCaptureSupport.unavailableReason()
+                        ?: "No se pudo iniciar la captura de pantalla"
+                )
             }
 
             val cid = "screen-${currentTimeMs()}"
@@ -426,16 +418,12 @@ actual class ConferenceLiveKitManager actual constructor() {
             cameras.add(LkDevice("none", "Sin cámara"))
         }
 
-        if (!isLinuxHost) {
-            try {
-                webRtc.enumerateScreenShareSources().forEach { (id, name) ->
-                    screenShareSources.add(LkDevice(id, name))
-                }
-            } catch (e: Exception) {
-                log.w(tag = TAG) { "Error enumerando pantallas: ${e.message}" }
+        try {
+            webRtc.enumerateScreenShareSources().forEach { (id, name) ->
+                screenShareSources.add(LkDevice(id, name))
             }
-        } else {
-            log.w(tag = TAG) { "Fuentes de pantalla omitidas en Linux: capturer nativo inestable" }
+        } catch (e: Exception) {
+            log.w(tag = TAG) { "Error enumerando pantallas: ${e.message}" }
         }
 
         return LkDevices(
@@ -502,6 +490,11 @@ actual class ConferenceLiveKitManager actual constructor() {
     }
 
     actual suspend fun selectScreenShareSource(deviceId: String) {
+        // Con el portal no hay lista propia: volver a elegir significa descartar el
+        // token guardado para que el escritorio muestre de nuevo su selector.
+        if (deviceId == PORTAL_SOURCE_ID) {
+            PortalScreenCastSession.clearRestoreToken()
+        }
         log.d(tag = TAG) { "selectScreenShareSource: $deviceId" }
         selectedScreenShareSourceId = deviceId
         if (_mediaState.value.screenShareEnabled) {

@@ -8,6 +8,7 @@ import com.eddyslarez.kmpsiprtc.data.models.RecordingResult
 import com.eddyslarez.kmpsiprtc.data.models.SdpType
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
 import com.eddyslarez.kmpsiprtc.platform.log
+import com.eddyslarez.kmpsiprtc.services.screencapture.DesktopScreenCaptureSupport
 import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 import com.eddyslarez.kmpsiprtc.services.audio.DesktopAudioController
 import dev.onvoid.webrtc.*
@@ -152,9 +153,17 @@ class DesktopWebRtcManager : WebRtcManager {
     }
 
     fun enumerateScreenShareSources(): List<Pair<String, String>> {
-        if (isLinuxHost()) {
-            log.w(TAG) { "Fuentes de pantalla omitidas en Linux: capturer nativo inestable" }
-            return emptyList()
+        when (DesktopScreenCaptureSupport.backend()) {
+            // Con el portal es el propio escritorio el que muestra el selector, así
+            // que se expone una única fuente sintética; la UI, al ver una sola,
+            // abre el diálogo del sistema directamente.
+            DesktopScreenCaptureSupport.Backend.PORTAL ->
+                return listOf(PORTAL_SOURCE_ID to PORTAL_SOURCE_ID)
+            DesktopScreenCaptureSupport.Backend.NONE -> {
+                log.w(TAG) { "Sin captura de pantalla: ${DesktopScreenCaptureSupport.unavailableReason()}" }
+                return emptyList()
+            }
+            DesktopScreenCaptureSupport.Backend.WEBRTC_DESKTOP -> Unit
         }
 
         var capturer: ScreenCapturer? = null
@@ -193,11 +202,6 @@ class DesktopWebRtcManager : WebRtcManager {
         System.getProperty("os.name").lowercase().let { it.contains("mac") || it.contains("darwin") }
 
     fun addLocalScreenShareTrack(sourceId: String? = null): VideoTrack? {
-        if (isLinuxHost()) {
-            log.w(TAG) { "Screen share local deshabilitado en Linux: capturer nativo inestable" }
-            return null
-        }
-
         ensureInitialized()
         if (!peerConnectionController.hasPeerConnection()) {
             peerConnectionController.createNewPeerConnection()
@@ -213,8 +217,6 @@ class DesktopWebRtcManager : WebRtcManager {
         return peerConnectionController.getLocalScreenShareTrack()
     }
 
-    private fun isLinuxHost(): Boolean =
-        System.getProperty("os.name").lowercase().contains("linux")
 
     fun setOnRemoteVideoTrack(listener: ((VideoTrack) -> Unit)?) {
         peerConnectionController.onRemoteVideoTrack = listener

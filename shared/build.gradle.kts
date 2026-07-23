@@ -22,6 +22,9 @@ version = "1.0.4"
 // Versión de Trixnity
 val trixnityVersion = "4.22.7" // Última versión disponible
 
+// API y nativo de webrtc-java deben ir siempre en la misma versión.
+val webrtcJavaVersion = "0.14.0"
+
 kotlin {
     androidTarget {
         publishLibraryVariants("release", "debug")
@@ -168,25 +171,34 @@ kotlin {
         val desktopMain by getting {
             dependencies {
                 implementation(compose.desktop.currentOs)
-                implementation("dev.onvoid.webrtc:webrtc-java:0.14.0")
+                implementation("dev.onvoid.webrtc:webrtc-java:$webrtcJavaVersion")
                 implementation("io.ktor:ktor-client-okhttp:3.3.1")
                 implementation("org.jetbrains.kotlinx:kotlinx-datetime:0.7.1")
                 implementation("com.googlecode.soundlibs:mp3spi:1.9.5.4")
                 implementation("com.googlecode.soundlibs:jlayer:1.0.1.4")
                 implementation("com.googlecode.soundlibs:tritonus-share:0.3.7.4")
 
+                // Captura de pantalla en Linux/Wayland: xdg-desktop-portal (DBus) + PipeWire (GStreamer).
+                // Java puro: solo cargan librerías nativas al invocarlas, así que no afectan
+                // el empaquetado de Windows/macOS.
+                implementation("com.github.hypfvieh:dbus-java-core:5.2.0")
+                runtimeOnly("com.github.hypfvieh:dbus-java-transport-native-unixsocket:5.2.0")
+                implementation("org.freedesktop.gstreamer:gst1-java-core:1.4.0")
+
+                // El nativo debe ir en la MISMA versión que la API: declarar una distinta
+                // no la baja (Gradle resuelve al mayor), solo despista.
                 val osName = System.getProperty("os.name").lowercase()
                 val osArch = System.getProperty("os.arch").lowercase()
-                when {
-                    osName.contains("mac") -> {
-                        if (osArch.contains("x86_64") || osArch.contains("arm")) {
-                            runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.10.0:macos-x86_64")
-                        } else {
-                            runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.10.0:macos-aarch64")
-                        }
-                    }
-                    osName.contains("win") -> runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.10.0:windows-x86_64")
-                    osName.contains("linux") -> runtimeOnly("dev.onvoid.webrtc:webrtc-java:0.10.0:linux-x86_64")
+                val webrtcClassifier = when {
+                    osName.contains("mac") ->
+                        if (osArch.contains("aarch64") || osArch.contains("arm")) "macos-aarch64"
+                        else "macos-x86_64"
+                    osName.contains("win") -> "windows-x86_64"
+                    osName.contains("linux") -> "linux-x86_64"
+                    else -> null
+                }
+                webrtcClassifier?.let {
+                    runtimeOnly("dev.onvoid.webrtc:webrtc-java:$webrtcJavaVersion:$it")
                 }
 
                 // Motor Ktor para Desktop

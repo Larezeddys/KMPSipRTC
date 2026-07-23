@@ -15,6 +15,10 @@ import dev.onvoid.webrtc.media.*
 import dev.onvoid.webrtc.media.audio.*
 import dev.onvoid.webrtc.media.video.*
 import dev.onvoid.webrtc.media.video.desktop.ScreenCapturer
+import com.eddyslarez.kmpsiprtc.services.screencapture.DesktopScreenCaptureSupport
+import com.eddyslarez.kmpsiprtc.services.screencapture.PipeWireVideoCapture
+import com.eddyslarez.kmpsiprtc.services.screencapture.PortalScreenCastSession
+import com.eddyslarez.kmpsiprtc.services.screencapture.ScreenShareUnavailableException
 import kotlinx.coroutines.*
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
@@ -23,6 +27,9 @@ import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
+
+/** Id sintético de la fuente "elegir con el selector del sistema" (Wayland). */
+const val PORTAL_SOURCE_ID = "portal"
 
 class DesktopPeerConnectionController(
     private val onIceCandidate: (String, String, Int) -> Unit,
@@ -56,6 +63,11 @@ class DesktopPeerConnectionController(
     private var localVideoTrack: VideoTrack? = null
     private var videoSender: RTCRtpSender? = null
     private var screenVideoSource: VideoDesktopSource? = null
+
+    // Camino de captura por xdg-desktop-portal (Linux/Wayland).
+    private var portalSession: PortalScreenCastSession? = null
+    private var pipeWireCapture: PipeWireVideoCapture? = null
+    private var screenCustomSource: CustomVideoSource? = null
     private var localScreenTrack: VideoTrack? = null
     private var screenSender: RTCRtpSender? = null
     // Callback para cuando llega un video track remoto
@@ -993,29 +1005,25 @@ class DesktopPeerConnectionController(
     fun getLocalVideoTrack(): VideoTrack? = localVideoTrack
 
     fun addLocalScreenShareTrack(sourceId: String? = null): VideoTrack? {
-        // Linux: el native capturer de webrtc-java puede crashear (SIGSEGV) en
-        // ciertos compositors (especialmente Wayland). En X11 con XDamage suele
-        // funcionar. Antes desactivábamos por completo; ahora lo permitimos
-        // pero con telemetry para reportar fácil si pasa el crash. El usuario
-        // puede desactivarlo via JVM flag -Dmcn.conference.disableLinuxScreenShare=true
-        if (isLinuxHost()) {
-            val opt = System.getProperty("mcn.conference.disableLinuxScreenShare", "false")
-            if (opt.equals("true", ignoreCase = true)) {
-                log.w(TAG) { "Screen share Linux deshabilitado por flag -Dmcn.conference.disableLinuxScreenShare" }
-                return null
-            }
-            log.w(TAG) {
-                "Linux detectado — intentando screen share. Si crashea (SIGSEGV), " +
-                "ejecuta la app con -Dmcn.conference.disableLinuxScreenShare=true. " +
-                "Causa raíz: webrtc-java native capturer no estable en Wayland."
-            }
-        }
-
         val factory = peerConnectionFactory ?: return null
         val pc = peerConnection ?: return null
 
         if (localScreenTrack != null) {
             return localScreenTrack
+        }
+
+        // En Linux el capturador nativo de webrtc-java está compilado sin PipeWire:
+        // solo captura por X11 y bajo Wayland eso devuelve pantalla en negro. Ahí se
+        // usa xdg-desktop-portal y se inyectan los frames con CustomVideoSource,
+        // conservando el mismo camino de publicación.
+        if (DesktopScreenCaptureSupport.backend() == DesktopScreenCaptureSupport.Backend.PORTAL) {
+            return addPortalScreenShareTrack(factory, pc, sourceId)
+        }
+        if (DesktopScreenCaptureSupport.backend() == DesktopScreenCaptureSupport.Backend.NONE) {
+            throw ScreenShareUnavailableException(
+                DesktopScreenCaptureSupport.unavailableReason()
+                    ?: "La captura de pantalla no está disponible"
+            )
         }
 
         var capturer: ScreenCapturer? = null
@@ -1067,7 +1075,67 @@ class DesktopPeerConnectionController(
         }
     }
 
+    /**
+     * Captura vía xdg-desktop-portal + PipeWire (Linux/Wayland).
+     *
+     * Solo cambia de dónde salen los frames: la creación del track y el
+     * `pc.addTrack` son idénticos al camino nativo, así que la señalización y la
+     * renegociación SDP quedan intactas.
+     */
+    private fun addPortalScreenShareTrack(
+        factory: PeerConnectionFactory,
+        pc: RTCPeerConnection,
+        sourceId: String?,
+    ): VideoTrack? {
+        var session: PortalScreenCastSession? = null
+        var capture: PipeWireVideoCapture? = null
+        var source: CustomVideoSource? = null
+        return try {
+            // "portal" como sourceId significa "quiero volver a elegir qué comparto".
+            session = PortalScreenCastSession.open(forcePicker = sourceId == PORTAL_SOURCE_ID)
+            portalSession = session
+
+            source = CustomVideoSource()
+            screenCustomSource = source
+            capture = PipeWireVideoCapture.start(session.nodeId, source)
+            pipeWireCapture = capture
+
+            val track = factory.createVideoTrack("screen0", source)
+            localScreenTrack = track
+            screenSender = pc.addTrack(track, listOf("stream0"))
+
+            log.d(TAG) { "✅ Screen share por portal iniciado (node ${session.nodeId})" }
+            track
+        } catch (e: Throwable) {
+            runCatching { capture?.stop() }
+            runCatching { session?.close() }
+            runCatching { source?.dispose() }
+            portalSession = null
+            pipeWireCapture = null
+            screenCustomSource = null
+            // Se propaga para que la UI muestre el motivo en vez de fallar en silencio.
+            throw e
+        }
+    }
+
     fun removeLocalScreenShareTrack() {
+        // Orden importante: cortar el pipeline y el hilo de frames ANTES de soltar
+        // la fuente, o se libera memoria nativa mientras se está empujando un frame.
+        try {
+            pipeWireCapture?.stop()
+        } catch (_: Throwable) {}
+        pipeWireCapture = null
+
+        try {
+            portalSession?.close()
+        } catch (_: Throwable) {}
+        portalSession = null
+
+        try {
+            screenCustomSource?.dispose()
+        } catch (_: Throwable) {}
+        screenCustomSource = null
+
         try {
             screenVideoSource?.stop()
             screenVideoSource?.dispose()
@@ -1090,8 +1158,6 @@ class DesktopPeerConnectionController(
 
     fun getLocalScreenShareTrack(): VideoTrack? = localScreenTrack
 
-    private fun isLinuxHost(): Boolean =
-        System.getProperty("os.name").lowercase().contains("linux")
 
     private fun isMacHost(): Boolean =
         System.getProperty("os.name").lowercase().let { it.contains("mac") || it.contains("darwin") }
@@ -1225,4 +1291,5 @@ class DesktopPeerConnectionController(
         }
     }
 }
+
 
