@@ -50,8 +50,7 @@ class IosAudioTrackCapture(
             // Configurar para captura de audio de comunicación
             audioSession.setCategory(
                 AVAudioSessionCategoryPlayAndRecord,
-                AVAudioSessionCategoryOptionAllowBluetooth or
-                        AVAudioSessionCategoryOptionDefaultToSpeaker,
+                AVAudioSessionCategoryOptionAllowBluetooth,
                 null
             )
             audioSession.setActive(true, null)

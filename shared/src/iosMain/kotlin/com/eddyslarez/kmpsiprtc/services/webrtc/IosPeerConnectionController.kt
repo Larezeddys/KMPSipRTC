@@ -117,8 +117,7 @@ class IosPeerConnectionController(
             // dejaria opciones erroneas bajo la unidad de audio -> audio muerto.
             val success1 = audioSession.setCategory(
                 AVAudioSessionCategoryPlayAndRecord,
-                AVAudioSessionCategoryOptionAllowBluetooth or
-                        AVAudioSessionCategoryOptionDefaultToSpeaker,
+                AVAudioSessionCategoryOptionAllowBluetooth,
                 null
             )
             if (!success1) return false

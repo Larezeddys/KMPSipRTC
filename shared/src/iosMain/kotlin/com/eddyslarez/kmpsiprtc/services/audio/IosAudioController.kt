@@ -141,8 +141,7 @@ class IosAudioController(
             // Configurar categoría para llamadas de voz
             val success1 = audioSession.setCategory(
                 AVAudioSessionCategoryPlayAndRecord,
-                AVAudioSessionCategoryOptionAllowBluetooth or
-                        AVAudioSessionCategoryOptionDefaultToSpeaker,
+                AVAudioSessionCategoryOptionAllowBluetooth,
                 null
             )
             if (!success1) {
