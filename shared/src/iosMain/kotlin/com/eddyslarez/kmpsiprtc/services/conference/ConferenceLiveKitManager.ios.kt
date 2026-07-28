@@ -5,6 +5,7 @@ import cocoapods.LiveKitClient.ConnectionStateConnecting
 import cocoapods.LiveKitClient.ConnectionStateDisconnected
 import cocoapods.LiveKitClient.ConnectionStateReconnecting
 import cocoapods.LiveKitClient.LocalParticipant
+import cocoapods.MCNLiveKitDataBridge.LKDataPublisher
 import cocoapods.LiveKitClient.LocalTrackPublication
 import cocoapods.LiveKitClient.LocalVideoTrack
 import cocoapods.LiveKitClient.Participant
@@ -331,30 +332,27 @@ actual class ConferenceLiveKitManager actual constructor() {
     }
 
     private suspend fun publishData(text: String) {
-        val lp = room?.localParticipant() ?: return
+        val lkRoom = room ?: return
         val data = (NSString.create(string = text) as NSString).dataUsingEncoding(NSUTF8StringEncoding) ?: return
+        // DataPublishOptions(reliable = true) no es construible desde
+        // Kotlin/Native (su init no esta @objc). Se publica via el puente
+        // Swift MCNLiveKitDataBridge, que si puede construirla y llama al SDK
+        // — mismo comportamiento que Android, que fuerza DataPublishReliability.RELIABLE.
+        //
+        // El cast a objcnames.classes.Room es necesario: MCNLiveKitDataBridge
+        // y LiveKitClient se cinterop-ean por separado, asi que el header
+        // ObjC generado del bridge solo tiene un forward-declare de `Room`
+        // (no lo importa), y Kotlin/Native no unifica ese tipo con el
+        // cocoapods.LiveKitClient.Room ya conocido — lo ve como un tipo
+        // opaco propio. Ambos representan la misma clase ObjC en runtime,
+        // asi que el cast es seguro (patron documentado de Kotlin/Native
+        // para tipos de otro framework no expuestos en este cinterop).
         awaitNSError { completion ->
-            lp.publishWithData(
+            LKDataPublisher.publishReliableWithRoom(
+                room = lkRoom as objcnames.classes.Room,
                 data = data,
-                // PENDIENTE (no arreglado aún): Android fuerza explícitamente
-                // DataPublishReliability.RELIABLE en publishData() — aquí en iOS
-                // el SDK 2.0.18 de LiveKitClient expone `DataPublishOptions.reliable`
-                // (default false, "Whether to send this as reliable or lossy"),
-                // pero su init NO está expuesto a Objective-C/Kotlin
-                // (`SWIFT_UNAVAILABLE` en LiveKitClient-Swift.h generado — se
-                // confirmó leyendo Pods/LiveKitClient/Sources/LiveKit/Types/Options/
-                // DataPublishOptions.swift). `DataPublishOptions(reliable = true)`
-                // NO compila desde Kotlin/Native por esta razón — no es un typo de
-                // nombre de parámetro. El arreglo real requiere un puente Swift/ObjC
-                // propio (ej. una función @objc en un pod nuevo o en MCNAudioBridge
-                // que haga `DataPublishOptions(reliable: true)` desde Swift y la
-                // devuelva ya construida) para que Kotlin pueda usarla sin pasar por
-                // el init no bridgeable. Mientras tanto se mantiene el default del
-                // SDK (`options = null`) — mismo comportamiento que antes de este
-                // commit, sin regresión, pero el chat de conferencia en iOS sigue
-                // sin la garantía de entrega que sí tiene Android.
-                options = null,
-                completionHandler = completion,
+                topic = null,
+                completion = completion,
             )
         }
     }

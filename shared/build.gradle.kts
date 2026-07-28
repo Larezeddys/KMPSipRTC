@@ -96,6 +96,13 @@ kotlin {
             version = "2.0.18"
             moduleName = "LiveKitClient"
         }
+        // Puente Swift local para publicar datos de conferencia por el canal
+        // reliable de LiveKit (DataPublishOptions(reliable: true) no es
+        // construible desde Kotlin/Native, ver MCNLiveKitDataBridge/Classes).
+        pod("MCNLiveKitDataBridge") {
+            source = path(project.file("MCNLiveKitDataBridge"))
+            moduleName = "MCNLiveKitDataBridge"
+        }
     }
 
     sourceSets {

@@ -329,10 +329,18 @@ class IosPeerConnectionController(
         )
 
         val sessionDescription = peerConn.createAnswer(options)
-        peerConn.setLocalDescription(sessionDescription)
+        // Paridad con createOffer (Bug 2): forzar a=sendrecv en el answer. Sin esto el
+        // answer podía salir con sendonly/recvonly/inactive y producir silencio en uno
+        // o ambos sentidos tras contestar una entrante.
+        val modifiedSdp = ensureSendRecvInSdp(sessionDescription.sdp)
+        val correctedDescription = SessionDescription(
+            type = SessionDescriptionType.Answer,
+            sdp = modifiedSdp
+        )
+        peerConn.setLocalDescription(correctedDescription)
 
         log.d(TAG) { "✅ Created answer SDP" }
-        return sessionDescription.sdp
+        return correctedDescription.sdp
     }
 
     suspend fun setRemoteDescription(sdp: String, type: SdpType) {
