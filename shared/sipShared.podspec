@@ -10,6 +10,7 @@ Pod::Spec.new do |spec|
     spec.libraries                = 'c++'
     spec.ios.deployment_target    = '16.0'
     spec.dependency 'LiveKitClient', '2.0.18'
+    spec.dependency 'MCNLiveKitDataBridge'
     spec.dependency 'WebRTC-SDK', '125.6422.05'
                 
     if !Dir.exist?('build/cocoapods/framework/shared.framework') || Dir.empty?('build/cocoapods/framework/shared.framework')
