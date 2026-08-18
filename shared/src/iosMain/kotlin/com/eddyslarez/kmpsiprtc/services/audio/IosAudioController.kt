@@ -21,6 +21,15 @@ import kotlin.concurrent.Volatile
 class IosAudioController(
     private val onDeviceChanged: (AudioDevice?) -> Unit
 ) {
+    private companion object {
+        /** Intentos de enganche del puerto HFP tras pedir ruta Bluetooth. */
+        const val BLUETOOTH_HFP_RETRIES = 6
+        const val BLUETOOTH_HFP_RETRY_DELAY_MS = 300L
+
+        /** Ventana en la que se ignoran cambios de ruta provocados por una re-aplicacion. */
+        const val REAPPLY_COOLDOWN_MS = 600L
+    }
+
     private val TAG = "IosAudioController"
     private val coroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
@@ -41,6 +50,25 @@ class IosAudioController(
 
     // Job de debounce para el observer de cambio de ruta
     private var routeChangeJob: Job? = null
+
+    /**
+     * Ruta que el usuario (o la prioridad por defecto) pidio para esta llamada.
+     *
+     * iOS renegocia la ruta por su cuenta varias veces al empezar una llamada: al activar
+     * la sesion, cuando CallKit la reactiva en didActivateAudioSession, y cuando unos
+     * AirPods pasan de A2DP a HFP. Cada renegociacion descartaba la seleccion y el audio
+     * acababa en el camino interno aunque la UI siguiera marcando el Bluetooth. Guardarla
+     * permite re-asentarla en el observer de cambios de ruta.
+     */
+    @Volatile
+    private var desiredRoute: AudioUnitTypes? = null
+
+    /** Evita que re-aplicar la ruta dispare otra re-aplicacion en bucle. */
+    @Volatile
+    private var isReapplyingRoute = false
+
+    /** Reintentos de enganche del puerto HFP (los AirPods tardan en exponerlo). */
+    private var bluetoothRetryJob: Job? = null
 
     // ==================== INITIALIZATION ====================
 
@@ -68,6 +96,10 @@ class IosAudioController(
             routeChangeJob = coroutineScope.launch {
                 delay(300)
                 scanDevices()
+                // Re-asentar la ruta pedida: iOS acaba de renegociar (activacion de la
+                // sesion, CallKit, o AirPods saltando de A2DP a HFP) y sin esto la
+                // seleccion del usuario se perdia en silencio.
+                reapplyDesiredRouteIfNeeded()
                 onDeviceChanged(getCurrentOutputDevice())
             }
         }
@@ -119,6 +151,11 @@ class IosAudioController(
 
         isStarted = false
         audioSessionConfigured = false
+        // La ruta pedida es por llamada: no debe sobrevivir a la siguiente.
+        desiredRoute = null
+        isReapplyingRoute = false
+        bluetoothRetryJob?.cancel()
+        bluetoothRetryJob = null
         log.d(TAG) { "✅ Audio stopped" }
     }
 
@@ -138,10 +175,16 @@ class IosAudioController(
         return try {
             val audioSession = AVAudioSession.sharedInstance()
 
-            // Configurar categoría para llamadas de voz
+            // Configurar categoría para llamadas de voz.
+            // Las opciones DEBEN coincidir con las que aplica la app en el callback
+            // didActivateAudioSession de CallKit (AllowBluetooth + AllowBluetoothA2DP).
+            // Cuando diferian, la ultima configuracion en ejecutarse ganaba y el
+            // comportamiento con AirPods dependia del timing: unas veces enrutaba y
+            // otras no.
             val success1 = audioSession.setCategory(
                 AVAudioSessionCategoryPlayAndRecord,
-                AVAudioSessionCategoryOptionAllowBluetooth,
+                AVAudioSessionCategoryOptionAllowBluetooth or
+                        AVAudioSessionCategoryOptionAllowBluetoothA2DP,
                 null
             )
             if (!success1) {
@@ -174,11 +217,23 @@ class IosAudioController(
 
     // ==================== DEVICE MANAGEMENT ====================
 
-    fun setActiveRoute(audioUnitType: AudioUnitTypes): Boolean {
+    fun setActiveRoute(audioUnitType: AudioUnitTypes): Boolean =
+        setActiveRoute(audioUnitType, remember = true)
+
+    /**
+     * @param remember guarda la ruta como "la que el usuario quiere", para re-asentarla
+     *   cuando iOS renegocie. Las re-aplicaciones internas pasan false para no
+     *   reescribir la intencion original.
+     */
+    private fun setActiveRoute(audioUnitType: AudioUnitTypes, remember: Boolean): Boolean {
         val audioSession = AVAudioSession.sharedInstance()
 
         return try {
-            log.d(TAG) { "Setting active route to: $audioUnitType" }
+            log.d(TAG) { "Setting active route to: $audioUnitType (remember=$remember)" }
+            if (remember) {
+                desiredRoute = audioUnitType
+                bluetoothRetryJob?.cancel()
+            }
 
             when (audioUnitType) {
                 AudioUnitTypes.SPEAKER -> {
@@ -208,8 +263,17 @@ class IosAudioController(
                         ?.firstOrNull { it.portType == AVAudioSessionPortBluetoothHFP }
                     if (hfpInput != null) {
                         audioSession.setPreferredInput(hfpInput, null)
+                        log.d(TAG) { "✅ Switched to BLUETOOTH (preferredInput=${hfpInput.portName})" }
+                    } else {
+                        // Sin puerto HFP todavia. Es lo normal con AirPods: al empezar la
+                        // llamada siguen en A2DP (perfil de media, sin microfono) y solo
+                        // exponen el HFP cuando la sesion PlayAndRecord ya esta activa.
+                        // Antes se salia en silencio y la ruta se quedaba en el camino
+                        // interno: ni se oia ni entraba el micro, con la UI marcando
+                        // Bluetooth. Ahora se reintenta hasta que el puerto aparece.
+                        log.w(TAG) { "BLUETOOTH sin puerto HFP aun; reintentando enganche" }
+                        scheduleBluetoothInputRetry()
                     }
-                    log.d(TAG) { "✅ Switched to BLUETOOTH (preferredInput=${hfpInput?.portName ?: "auto"})" }
                 }
                 AudioUnitTypes.HEADSET, AudioUnitTypes.HEADPHONES -> {
                     audioSession.overrideOutputAudioPort(
@@ -357,6 +421,61 @@ class IosAudioController(
     }
 
     // ==================== PRIVATE HELPERS ====================
+
+    /**
+     * Reintenta enganchar el microfono del Bluetooth hasta que iOS expone el puerto HFP.
+     *
+     * Los AirPods entran en la llamada en A2DP y tardan unos cientos de ms en ofrecer el
+     * perfil HFP. Un unico intento en [setActiveRoute] llegaba siempre demasiado pronto.
+     */
+    private fun scheduleBluetoothInputRetry() {
+        bluetoothRetryJob?.cancel()
+        bluetoothRetryJob = coroutineScope.launch {
+            repeat(BLUETOOTH_HFP_RETRIES) { attempt ->
+                delay(BLUETOOTH_HFP_RETRY_DELAY_MS)
+
+                // El usuario pudo cambiar de ruta mientras esperabamos.
+                if (desiredRoute != AudioUnitTypes.BLUETOOTH) return@launch
+
+                val session = AVAudioSession.sharedInstance()
+                val hfp = session.availableInputs
+                    ?.mapNotNull { it as? AVAudioSessionPortDescription }
+                    ?.firstOrNull { it.portType == AVAudioSessionPortBluetoothHFP }
+
+                if (hfp != null) {
+                    session.overrideOutputAudioPort(AVAudioSessionPortOverrideNone, null)
+                    session.setPreferredInput(hfp, null)
+                    log.d(TAG) { "✅ HFP enganchado en intento ${attempt + 1} (${hfp.portName})" }
+                    scanDevices()
+                    onDeviceChanged(getCurrentOutputDevice())
+                    return@launch
+                }
+            }
+            log.w(TAG) { "No se pudo enganchar el HFP tras $BLUETOOTH_HFP_RETRIES intentos" }
+        }
+    }
+
+    /**
+     * Vuelve a aplicar [desiredRoute] si iOS movio la ruta por su cuenta.
+     *
+     * Se llama desde el observer de cambios de ruta. El guard [isReapplyingRoute] evita el
+     * bucle: re-aplicar genera otra notificacion de cambio de ruta.
+     */
+    private fun reapplyDesiredRouteIfNeeded() {
+        val wanted = desiredRoute ?: return
+        if (isReapplyingRoute) return
+
+        val current = getActiveRoute()
+        if (current == wanted) return
+
+        log.d(TAG) { "Ruta actual ($current) != pedida ($wanted); re-aplicando" }
+        isReapplyingRoute = true
+        setActiveRoute(wanted, remember = false)
+        coroutineScope.launch {
+            delay(REAPPLY_COOLDOWN_MS)
+            isReapplyingRoute = false
+        }
+    }
 
     private fun selectDefaultDeviceWithPriority() {
         // Crear copia para evitar ConcurrentModificationException
