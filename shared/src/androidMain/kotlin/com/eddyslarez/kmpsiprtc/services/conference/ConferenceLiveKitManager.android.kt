@@ -49,6 +49,12 @@ actual class ConferenceLiveKitManager actual constructor() {
     private val raisedHands = mutableMapOf<String, Long>()
     private var localHandRaised = false
 
+    // Plataforma anunciada por cada participante remoto (identity -> marcador).
+    // Se indexa por identity, no por sid, porque es la clave que usa el resto del
+    // manager (updateParticipants, raisedHands, video tracks) y la unica que el
+    // sobre DataPacket garantiza en las tres plataformas.
+    private val platformByIdentity = mutableMapOf<String, String>()
+
     private fun handAttributes(raised: Boolean, at: Long): Map<String, String> {
         return if (raised) {
             mapOf(
@@ -102,6 +108,9 @@ actual class ConferenceLiveKitManager actual constructor() {
             // Actualizar participantes iniciales
             updateParticipants()
             requestHandStateSync()
+            // Anuncio de plataforma: repetido, porque el data-channel puede no estar
+            // listo justo tras conectar y un anuncio unico se perderia.
+            scope.launch { announcePlatformRepeatedly(lkRoom) }
 
         } catch (e: Exception) {
             log.e(tag = TAG) { "Error conectando a LiveKit: ${e.message}" }
@@ -125,6 +134,7 @@ actual class ConferenceLiveKitManager actual constructor() {
             _videoTracks.value = emptyList()
             _mediaState.value = LkMediaState()
             raisedHands.clear()
+            platformByIdentity.clear()
             localHandRaised = false
         }
     }
@@ -330,10 +340,13 @@ actual class ConferenceLiveKitManager actual constructor() {
                     is RoomEvent.ParticipantConnected -> {
                         log.d(tag = TAG) { "Participante conectado: ${event.participant.identity}" }
                         applyParticipantHandAttributes(event.participant)
+                        // Re-anunciar la plataforma para que quien acaba de entrar la reciba.
+                        announcePlatform(lkRoom)
                         updateParticipants()
                     }
                     is RoomEvent.ParticipantDisconnected -> {
                         log.d(tag = TAG) { "Participante desconectado: ${event.participant.identity}" }
+                        event.participant.identity?.value?.let { platformByIdentity.remove(it) }
                         updateParticipants()
                         updateVideoTracks()
                     }
@@ -402,6 +415,13 @@ actual class ConferenceLiveKitManager actual constructor() {
                 return
             }
 
+            // Orden de parseo: hand -> platform -> chat (igual que la app Android nativa).
+            val platformMarker = data.parsePlatformDataMessage()
+            if (platformMarker != null) {
+                handlePlatformDataMessage(platformMarker, participant)
+                return
+            }
+
             val author = jsonObj["author"]?.jsonPrimitive?.contentOrNull ?: participant?.name ?: "?"
             val message = jsonObj["message"]?.jsonPrimitive?.contentOrNull ?: return
 
@@ -424,6 +444,50 @@ actual class ConferenceLiveKitManager actual constructor() {
             log.d(tag = TAG) { "Chat recibido de $author: $message" }
         } catch (e: Exception) {
             log.w(tag = TAG) { "Error parseando data recibida: ${e.message}" }
+        }
+    }
+
+    /**
+     * Guarda la plataforma del emisor y, si es su PRIMER marcador, responde con el
+     * nuestro (respond-on-receipt): si su mensaje llego, su canal ya puede recibir
+     * el nuestro, asi que el intercambio es fiable aunque hayan entrado en momentos
+     * distintos. Solo se responde la primera vez para no entrar en ping-pong.
+     */
+    private fun handlePlatformDataMessage(marker: String, participant: Participant?) {
+        val senderIdentity = participant?.identity?.value ?: return
+        val localIdentity = room?.localParticipant?.identity?.value ?: ""
+        if (senderIdentity == localIdentity) return
+
+        val isFirstMarker = platformByIdentity.put(senderIdentity, marker) == null
+        log.d(tag = TAG) { "Plataforma de $senderIdentity: $marker (primera=$isFirstMarker)" }
+        if (isFirstMarker) {
+            room?.let { lkRoom -> scope.launch { announcePlatform(lkRoom) } }
+        }
+        updateParticipants()
+    }
+
+    /** Difunde el marcador de plataforma propio a toda la sala. */
+    private suspend fun announcePlatform(activeRoom: Room) {
+        runCatching {
+            activeRoom.localParticipant.publishData(
+                data = buildPlatformDataMessageBytes(),
+                reliability = DataPublishReliability.RELIABLE,
+            ).getOrThrow()
+        }.onFailure { error ->
+            log.w(tag = TAG) { "Fallo anunciando plataforma: ${error.message}" }
+        }
+    }
+
+    /**
+     * El data-channel puede no estar listo para enviar en el momento de conectar
+     * (negociacion del publisher aun en curso), asi que repetimos el anuncio unas
+     * pocas veces con intervalo en vez de perderlo.
+     */
+    private suspend fun announcePlatformRepeatedly(activeRoom: Room) {
+        repeat(PLATFORM_ANNOUNCE_ATTEMPTS) {
+            if (room !== activeRoom || _connectionState.value != LkConnectionState.CONNECTED) return
+            announcePlatform(activeRoom)
+            delay(PLATFORM_ANNOUNCE_RETRY_INTERVAL_MS)
         }
     }
 
@@ -589,6 +653,12 @@ actual class ConferenceLiveKitManager actual constructor() {
             handRaisedAt = raisedHands[identityStr],
             videoTrackSid = videoSid,
             screenShareTrackSid = screenSid,
+            platform = if (isLocal) currentPlatformMarker() else platformByIdentity[identityStr],
         )
+    }
+
+    companion object {
+        private const val PLATFORM_ANNOUNCE_ATTEMPTS = 4
+        private const val PLATFORM_ANNOUNCE_RETRY_INTERVAL_MS = 1500L
     }
 }

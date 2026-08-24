@@ -69,6 +69,10 @@ actual class ConferenceLiveKitManager actual constructor() {
     private val raisedHands = mutableMapOf<String, Long>()
     private var localHandRaised = false
 
+    // Plataforma anunciada por cada participante remoto (identity -> marcador).
+    // Se indexa por identity, la misma clave que usan raisedHands y los tracks.
+    private val platformByIdentity = mutableMapOf<String, String>()
+
     private val _participants = MutableStateFlow<List<LkParticipant>>(emptyList())
     actual val participants: StateFlow<List<LkParticipant>> = _participants.asStateFlow()
 
@@ -123,6 +127,7 @@ actual class ConferenceLiveKitManager actual constructor() {
             _connectionState.value = LkConnectionState.CONNECTED
             refreshRoomState()
             requestHandStateSync()
+            announcePlatformRepeatedly()
             startStateRefreshLoop()
             log.d(tag = tag) { "Conectado exitosamente a LiveKit iOS" }
         } catch (error: Throwable) {
@@ -151,6 +156,7 @@ actual class ConferenceLiveKitManager actual constructor() {
         room = null
         roomDelegate = null
         raisedHands.clear()
+        platformByIdentity.clear()
         localHandRaised = false
         stopStateRefreshLoop()
         _connectionState.value = LkConnectionState.DISCONNECTED
@@ -305,6 +311,21 @@ actual class ConferenceLiveKitManager actual constructor() {
         scope.launch { refreshRoomState() }
     }
 
+    /** Un remoto acaba de entrar: re-anunciamos la plataforma para que la reciba. */
+    fun onRemoteParticipantConnected() {
+        scope.launch {
+            announcePlatform()
+            refreshRoomState()
+        }
+    }
+
+    fun onRemoteParticipantDisconnected(participant: RemoteParticipant?) {
+        scope.launch {
+            participant?.identity()?.stringValue()?.let { platformByIdentity.remove(it) }
+            refreshRoomState()
+        }
+    }
+
     fun onRoomDisconnected(error: NSError?) {
         scope.launch {
             if (error != null) {
@@ -456,6 +477,7 @@ actual class ConferenceLiveKitManager actual constructor() {
             handRaisedAt = raisedHands[identityStr],
             videoTrackSid = videoSid,
             screenShareTrackSid = screenSid,
+            platform = if (isLocal) currentPlatformMarker() else platformByIdentity[identityStr],
         )
     }
 
@@ -465,6 +487,13 @@ actual class ConferenceLiveKitManager actual constructor() {
             val type = jsonObj["type"]?.jsonPrimitive?.contentOrNull
             if (type == "hand/raise" || type == "hand/lower" || type == "hand/sync/request" || type == "hand/sync/state") {
                 handleHandDataMessage(jsonObj, participant)
+                return
+            }
+
+            // Orden de parseo: hand -> platform -> chat (igual que la app Android nativa).
+            val platformMarker = parsePlatformDataMessage(text)
+            if (platformMarker != null) {
+                handlePlatformDataMessage(platformMarker, participant)
                 return
             }
 
@@ -532,6 +561,46 @@ actual class ConferenceLiveKitManager actual constructor() {
         refreshRoomState()
     }
 
+    /**
+     * Guarda la plataforma del emisor y, si es su PRIMER marcador, responde con el
+     * nuestro (respond-on-receipt): si su mensaje llego, su canal ya puede recibir
+     * el nuestro, asi que el intercambio es fiable aunque hayan entrado en momentos
+     * distintos. Solo se responde la primera vez para no entrar en ping-pong.
+     */
+    private fun handlePlatformDataMessage(marker: String, participant: RemoteParticipant?) {
+        val senderIdentity = participant?.identity()?.stringValue() ?: return
+        val localIdentity = room?.localParticipant()?.identity()?.stringValue() ?: ""
+        if (senderIdentity == localIdentity) return
+
+        val isFirstMarker = platformByIdentity.put(senderIdentity, marker) == null
+        log.d(tag = tag) { "Plataforma de $senderIdentity: $marker (primera=$isFirstMarker)" }
+        if (isFirstMarker) {
+            scope.launch { announcePlatform() }
+        }
+        refreshRoomState()
+    }
+
+    /** Difunde el marcador de plataforma propio a toda la sala. */
+    private suspend fun announcePlatform() {
+        // No debe tumbar el flujo que lo invoca si el canal aun no esta listo.
+        runCatching { publishData(buildPlatformDataMessagePayload()) }
+            .onFailure { error -> log.w(tag = tag) { "Fallo anunciando plataforma: ${error.message}" } }
+    }
+
+    /**
+     * El data channel puede no estar listo justo tras conectar, asi que repetimos
+     * el anuncio unas pocas veces con intervalo en vez de perderlo.
+     */
+    private fun announcePlatformRepeatedly() {
+        scope.launch {
+            repeat(PLATFORM_ANNOUNCE_ATTEMPTS) {
+                if (room == null || _connectionState.value != LkConnectionState.CONNECTED) return@launch
+                announcePlatform()
+                delay(PLATFORM_ANNOUNCE_RETRY_INTERVAL_MS)
+            }
+        }
+    }
+
     private fun requestHandStateSync() {
         scope.launch {
             val identity = room?.localParticipant()?.identity()?.stringValue() ?: return@launch
@@ -581,6 +650,9 @@ actual class ConferenceLiveKitManager actual constructor() {
     private fun nowMs(): Long = (NSDate().timeIntervalSince1970 * 1000).toLong()
 }
 
+private const val PLATFORM_ANNOUNCE_ATTEMPTS = 4
+private const val PLATFORM_ANNOUNCE_RETRY_INTERVAL_MS = 1500L
+
 @OptIn(ExperimentalForeignApi::class)
 private class IosRoomDelegate(
     private val manager: ConferenceLiveKitManager,
@@ -619,13 +691,13 @@ private class IosRoomDelegate(
     
     @ObjCSignatureOverride
     override fun room(room: Room, participantDidConnect: RemoteParticipant) {
-        manager.onRoomContentChanged()
+        manager.onRemoteParticipantConnected()
     }
 
-    
+
     @ObjCSignatureOverride
     override fun room(room: Room, participantDidDisconnect: RemoteParticipant) {
-        manager.onRoomContentChanged()
+        manager.onRemoteParticipantDisconnected(participantDidDisconnect)
     }
 
     

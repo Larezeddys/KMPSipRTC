@@ -21,6 +21,13 @@ data class LkParticipant(
     val handRaisedAt: Long? = null,
     val videoTrackSid: String? = null,
     val screenShareTrackSid: String? = null,
+    /**
+     * Plataforma anunciada por el participante ("android", "ios", "web",
+     * "windows", "mac", "linux") o null si todavia no la anuncio / usa un
+     * cliente que no implementa el marcador.
+     * Ver [ConferencePlatformDataMessage.kt] para el protocolo.
+     */
+    val platform: String? = null,
 )
 
 /**

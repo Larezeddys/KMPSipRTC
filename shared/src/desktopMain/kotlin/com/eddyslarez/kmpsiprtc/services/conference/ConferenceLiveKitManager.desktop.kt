@@ -94,6 +94,11 @@ actual class ConferenceLiveKitManager actual constructor() {
     private val raisedHands = mutableMapOf<String, Long>()
     private var localHandRaised = false
 
+    // Plataforma anunciada por cada participante remoto (identity -> marcador).
+    // Se indexa por identity porque es lo unico que el sobre DataPacket del SFU
+    // garantiza: el sid del emisor no viaja en el paquete de datos.
+    private val platformByIdentity = mutableMapOf<String, String>()
+
     @OptIn(ExperimentalTime::class)
     private fun currentTimeMs(): Long = Clock.System.now().toEpochMilliseconds()
 
@@ -541,7 +546,7 @@ actual class ConferenceLiveKitManager actual constructor() {
         }
 
         val safeName = localName.replace("\"", "\\\"")
-        publishHandData(
+        publishDataPacket(
             """{"type":"${if (raised) "hand/raise" else "hand/lower"}","at":$now,"participantIdentity":"$localIdentity","author":"$safeName"}"""
         )
         rebuildParticipantList()
@@ -619,8 +624,10 @@ actual class ConferenceLiveKitManager actual constructor() {
                         // DISCONNECTED — remover
                         remoteParticipants.remove(info.identity)
                         raisedHands.remove(info.identity)
+                        platformByIdentity.remove(info.identity)
                         log.d(tag = TAG) { "Participant left: ${info.name} (${info.identity})" }
                     } else {
+                        val isNewParticipant = !remoteParticipants.containsKey(info.identity)
                         // JOINING/JOINED/ACTIVE — agregar/actualizar.
                         // Mano por atributos/metadata (estado "pegajoso" del participante):
                         // complementa el mensaje por data channel, que es transitorio y se
@@ -648,6 +655,10 @@ actual class ConferenceLiveKitManager actual constructor() {
                         )
                         log.d(tag = TAG) { "Participant updated: ${info.name} (${info.identity}, state=${info.state}, screen=$remoteScreenSharing)" }
                         publishLocalHandState()
+                        // Equivalente a RoomEvent.ParticipantConnected: re-anunciar la
+                        // plataforma solo cuando el participante es nuevo (este callback
+                        // llega tambien por cualquier cambio de estado del participante).
+                        if (isNewParticipant) announcePlatform()
                     }
                 }
                 rebuildParticipantList()
@@ -664,6 +675,7 @@ actual class ConferenceLiveKitManager actual constructor() {
                     reconnectAttempts = 0
                     log.d(tag = TAG) { "Marcando CONNECTED por TrackPublished (fallback)" }
                     requestHandStateSync()
+                    announcePlatformRepeatedly()
                 }
             }
 
@@ -831,6 +843,7 @@ actual class ConferenceLiveKitManager actual constructor() {
                             reconnectAttempts = 0
                             log.d(tag = TAG) { "Publisher RTC CONNECTED — sala lista" }
                             requestHandStateSync()
+                            announcePlatformRepeatedly()
                         }
                     }
                     WebRtcConnectionState.FAILED -> {
@@ -902,6 +915,7 @@ actual class ConferenceLiveKitManager actual constructor() {
                 isScreenSharing = _mediaState.value.screenShareEnabled,
                 isHandRaised = localHandRaised,
                 handRaisedAt = raisedHands[localIdentity],
+                platform = currentPlatformMarker(),
             )
         )
 
@@ -911,6 +925,7 @@ actual class ConferenceLiveKitManager actual constructor() {
                 participant.copy(
                     isHandRaised = raisedHands.containsKey(participant.identity),
                     handRaisedAt = raisedHands[participant.identity],
+                    platform = platformByIdentity[participant.identity],
                 )
             }
         )
@@ -981,6 +996,13 @@ actual class ConferenceLiveKitManager actual constructor() {
                 return
             }
 
+            // Orden de parseo: hand -> platform -> chat (igual que la app Android nativa).
+            val platformMarker = parsePlatformDataMessage(text)
+            if (platformMarker != null) {
+                handlePlatformDataMessage(platformMarker, senderIdentity)
+                return
+            }
+
             // Chat: {"author":"nombre", "message":"texto"} (mismo formato que web/Android)
             val author = jsonObj["author"]?.jsonPrimitive?.content
                 ?: senderIdentity.ifEmpty { "Unknown" }
@@ -1000,21 +1022,62 @@ actual class ConferenceLiveKitManager actual constructor() {
         }
     }
 
-    private fun publishHandData(payload: String) {
-        // Igual que el chat: hay que envolver en livekit.DataPacket/UserPacket.
+    /**
+     * Envia un payload JSON de control (mano, plataforma) por el data channel.
+     * Igual que el chat: hay que envolver en livekit.DataPacket/UserPacket o el SFU
+     * lo descarta.
+     */
+    private fun publishDataPacket(payload: String) {
         val bytes = LiveKitProto.encodeUserDataPacket(payload.encodeToByteArray())
         val sent = publisherWebRtc?.sendDataChannelMessage(bytes) ?: false
         if (!sent) {
             val fallbackSent = subscriberWebRtc?.sendDataChannelMessage(bytes) ?: false
             if (!fallbackSent) {
-                log.w(tag = TAG) { "No hay data channel disponible para enviar estado de mano" }
+                log.w(tag = TAG) { "No hay data channel disponible para enviar: $payload" }
             }
         }
     }
 
+    // ==================== PLATAFORMA ====================
+
+    /** Difunde el marcador de plataforma propio a toda la sala. */
+    private fun announcePlatform() {
+        publishDataPacket(buildPlatformDataMessagePayload())
+    }
+
+    /**
+     * El data channel puede no estar listo para enviar justo al pasar a CONNECTED,
+     * asi que repetimos el anuncio unas pocas veces con intervalo en vez de
+     * perderlo (mismo criterio que la app Android nativa).
+     */
+    private fun announcePlatformRepeatedly() {
+        scope.launch {
+            repeat(PLATFORM_ANNOUNCE_ATTEMPTS) {
+                if (_connectionState.value != LkConnectionState.CONNECTED) return@launch
+                announcePlatform()
+                delay(PLATFORM_ANNOUNCE_RETRY_INTERVAL_MS)
+            }
+        }
+    }
+
+    /**
+     * Guarda la plataforma del emisor y, si es su PRIMER marcador, responde con el
+     * nuestro (respond-on-receipt): si su mensaje llego, su canal ya puede recibir
+     * el nuestro, asi que el intercambio es fiable aunque hayan entrado en momentos
+     * distintos. Solo se responde la primera vez para no entrar en ping-pong.
+     */
+    private fun handlePlatformDataMessage(marker: String, senderIdentity: String) {
+        if (senderIdentity.isEmpty() || senderIdentity == localIdentity) return
+
+        val isFirstMarker = platformByIdentity.put(senderIdentity, marker) == null
+        log.d(tag = TAG) { "Plataforma de $senderIdentity: $marker (primera=$isFirstMarker)" }
+        if (isFirstMarker) announcePlatform()
+        rebuildParticipantList()
+    }
+
     private fun requestHandStateSync() {
         if (localIdentity.isBlank()) return
-        publishHandData("""{"type":"hand/sync/request","at":${currentTimeMs()},"participantIdentity":"$localIdentity"}""")
+        publishDataPacket("""{"type":"hand/sync/request","at":${currentTimeMs()},"participantIdentity":"$localIdentity"}""")
         publishLocalHandState()
     }
 
@@ -1022,7 +1085,7 @@ actual class ConferenceLiveKitManager actual constructor() {
         if (localIdentity.isBlank()) return
         val safeName = localName.replace("\"", "\\\"")
         val at = raisedHands[localIdentity] ?: currentTimeMs()
-        publishHandData("""{"type":"hand/sync/state","raised":$localHandRaised,"at":$at,"participantIdentity":"$localIdentity","author":"$safeName"}""")
+        publishDataPacket("""{"type":"hand/sync/state","raised":$localHandRaised,"at":$at,"participantIdentity":"$localIdentity","author":"$safeName"}""")
     }
 
     /**
@@ -1119,6 +1182,7 @@ actual class ConferenceLiveKitManager actual constructor() {
         joinResponse = null
         remoteParticipants.clear()
         raisedHands.clear()
+        platformByIdentity.clear()
         localHandRaised = false
         // No reseteamos las preferencias de dispositivos (camera/mic/speaker/screen):
         // se conservan entre reconexiones para no obligar al usuario a re-seleccionar.
@@ -1129,3 +1193,6 @@ actual class ConferenceLiveKitManager actual constructor() {
         return regex.find(json)?.groupValues?.get(1)
     }
 }
+
+private const val PLATFORM_ANNOUNCE_ATTEMPTS = 4
+private const val PLATFORM_ANNOUNCE_RETRY_INTERVAL_MS = 1500L
