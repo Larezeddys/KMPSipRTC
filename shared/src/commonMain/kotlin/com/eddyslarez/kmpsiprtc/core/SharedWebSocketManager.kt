@@ -17,6 +17,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -54,6 +55,12 @@ class SharedWebSocketManager(
         private const val RECONNECT_JITTER_FACTOR = 0.1    // 10% jitter
         private const val DEGRADED_THRESHOLD = 10           // Intentos antes de notificar degradado
         private const val FAILED_NOTIFY_THRESHOLD = 30      // Intentos antes de notificar onConnectionFailed (informativo)
+
+        // Renovacion de registro (ver scheduleRegistrationRenewal)
+        private const val RENEWAL_MARGIN_SECONDS = 10       // Se re-registra 10s antes de vencer
+        private const val MIN_RENEWAL_DELAY_MS = 5_000L     // Suelo por si el server da un Expires ridiculo
+        private const val RENEWAL_CONFIRMATION_TIMEOUT_MS = 30_000L // Reintento si el 200 OK no llega
+        private const val RENEWAL_RETRY_DELAY_MS = 15_000L  // Reintento si no se pudo ni enviar
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -759,30 +766,57 @@ class SharedWebSocketManager(
      * Programa la renovacion de registro para una cuenta especifica.
      * Cada cuenta se auto-renueva individualmente basandose en su propio Expires
      * (puede ser 300s, 600s, 1800s, o dias en push mode).
-     * Se re-registra 10 segundos antes del vencimiento.
+     * Se re-registra [RENEWAL_MARGIN_SECONDS] segundos antes del vencimiento.
+     *
+     * IMPORTANTE — el bucle se RE-ARMA solo. Antes esto era un disparo unico: si el
+     * re-REGISTER no salia (socket reconectando, cuenta aun no cargada) o si el 200 OK no
+     * llegaba nunca, no quedaba ninguna renovacion programada y la cuenta se quedaba sin
+     * renovar **para siempre**, sin ningun error visible. El sintoma era justo este: el
+     * escritorio pierde el registro tras un rato sin tocar la app (pantalla bloqueada) y solo
+     * revive cuando el usuario vuelve a interactuar y algo dispara un registro nuevo.
+     *
+     * Cuando el REGISTER si es confirmado, el 200 OK vuelve a llamar a esta funcion con el
+     * Expires nuevo, lo que cancela este job y arranca otro: el bucle termina por si solo en
+     * el camino feliz.
      */
     fun scheduleRegistrationRenewal(accountKey: String, expiresSeconds: Int) {
         // Cancelar renovacion anterior de esta cuenta
         renewalJobs[accountKey]?.cancel()
 
-        // Programar renovacion 10 segundos antes del vencimiento
-        val delayMs = maxOf((expiresSeconds - 10) * 1000L, 5_000L)
+        // Programar renovacion unos segundos antes del vencimiento
+        val delayMs = maxOf((expiresSeconds - RENEWAL_MARGIN_SECONDS) * 1000L, MIN_RENEWAL_DELAY_MS)
 
         renewalJobs[accountKey] = scope.launch {
             log.d(tag = TAG) { "Renewal scheduled for $accountKey: re-REGISTER in ${delayMs / 1000}s (expires in ${expiresSeconds}s)" }
-            delay(delayMs)
+            var nextDelayMs = delayMs
+            while (isActive) {
+                delay(nextDelayMs)
 
-            val account = sipCoreManager.activeAccounts[accountKey]
-            if (account != null && isConnected()) {
-                log.d(tag = TAG) { "Renewing registration for $accountKey (${expiresSeconds}s expired)" }
-                val success = registerAccount(account, sipCoreManager.isAppInBackground)
-                if (success) {
-                    log.d(tag = TAG) { "Renewal REGISTER sent for $accountKey" }
-                } else {
-                    log.e(tag = TAG) { "Failed to send renewal REGISTER for $accountKey" }
+                val account = sipCoreManager.activeAccounts[accountKey]
+                if (account == null) {
+                    // La cuenta ya no existe (logout, cuenta eliminada): no hay nada que renovar.
+                    log.w(tag = TAG) { "Renewal loop for $accountKey stops: account no longer active" }
+                    return@launch
                 }
-            } else {
-                log.w(tag = TAG) { "Cannot renew $accountKey: account=${account != null}, connected=${isConnected()}" }
+
+                val connected = isConnected()
+                val sent = if (connected) {
+                    log.d(tag = TAG) { "Renewing registration for $accountKey (expires ${expiresSeconds}s)" }
+                    runCatching { registerAccount(account, sipCoreManager.isAppInBackground) }
+                        .onFailure { e -> log.e(tag = TAG) { "Renewal REGISTER threw for $accountKey: ${e.message}" } }
+                        .getOrDefault(false)
+                } else {
+                    log.w(tag = TAG) { "Cannot renew $accountKey now: socket not connected" }
+                    false
+                }
+
+                nextDelayMs = if (sent) {
+                    // Enviado: si el 200 OK llega, reprograma y cancela este bucle. Si no llega,
+                    // este reintento es la red de seguridad.
+                    RENEWAL_CONFIRMATION_TIMEOUT_MS
+                } else {
+                    RENEWAL_RETRY_DELAY_MS
+                }
             }
         }
     }

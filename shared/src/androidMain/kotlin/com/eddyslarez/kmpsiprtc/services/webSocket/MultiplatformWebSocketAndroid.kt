@@ -15,7 +15,8 @@ class AndroidWebSocket(private val url: String, private val headers: Map<String,
     private var webSocket: WebSocket? = null
     private var pingTimer: Timer? = null
     private var renewalTimer: Timer? = null
-    private var expirationMap = mutableMapOf<String, Long>()
+    private val expirationLock = Any()
+    private val expirationMap = mutableMapOf<String, Long>()
     private var isConnecting = false
     private var client: OkHttpClient? = null
 
@@ -153,8 +154,13 @@ class AndroidWebSocket(private val url: String, private val headers: Map<String,
 
     override fun startPingTimer(intervalMs: Long) {
         stopPingTimer()
+        // Con java.util.Timer, UNA excepcion no capturada mata el timer para siempre.
         pingTimer = timer(period = intervalMs) {
-            sendPing()
+            try {
+                sendPing()
+            } catch (e: Throwable) {
+                log.w(tag = "AndroidWebSocket") { "Ping timer tick failed: ${e.message}" }
+            }
         }
     }
 
@@ -163,14 +169,29 @@ class AndroidWebSocket(private val url: String, private val headers: Map<String,
         pingTimer = null
     }
 
+    /**
+     * Renovacion de registro. Se itera sobre una COPIA (setRegistrationExpiration escribe desde
+     * los hilos de red: iterar el mapa original lanzaba ConcurrentModificationException) y todo
+     * el tick va en try/catch, porque `java.util.Timer` cancela la tarea para siempre en cuanto
+     * una ejecucion lanza — y quedarse sin renovaciones es silencioso: el cliente se cree
+     * registrado mientras el servidor ya lo caduco.
+     */
     override fun startRegistrationRenewalTimer(checkIntervalMs: Long, renewBeforeExpirationMs: Long) {
         stopRegistrationRenewalTimer()
         renewalTimer = timer(period = checkIntervalMs) {
-            val now = System.currentTimeMillis()
-            for ((key, expiration) in expirationMap) {
-                if (expiration - now <= renewBeforeExpirationMs) {
-                    listener?.onRegistrationRenewalRequired(key)
+            try {
+                val now = System.currentTimeMillis()
+                val snapshot = synchronized(expirationLock) { expirationMap.toMap() }
+                for ((key, expiration) in snapshot) {
+                    if (expiration - now <= renewBeforeExpirationMs) {
+                        log.d(tag = "AndroidWebSocket") {
+                            "Registration renewal due for $key (expires in ${expiration - now}ms)"
+                        }
+                        listener?.onRegistrationRenewalRequired(key)
+                    }
                 }
+            } catch (e: Throwable) {
+                log.w(tag = "AndroidWebSocket") { "Registration renewal tick failed: ${e.message}" }
             }
         }
     }
@@ -181,7 +202,7 @@ class AndroidWebSocket(private val url: String, private val headers: Map<String,
     }
 
     override fun setRegistrationExpiration(accountKey: String, expirationTimeMs: Long) {
-        expirationMap[accountKey] = expirationTimeMs
+        synchronized(expirationLock) { expirationMap[accountKey] = expirationTimeMs }
     }
 
     override fun renewRegistration(accountKey: String) {

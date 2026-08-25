@@ -17,7 +17,8 @@ class DesktopWebSocket(private val url: String, private val headers: Map<String,
     private var webSocket: WebSocket? = null
     private var pingTimer: Timer? = null
     private var renewalTimer: Timer? = null
-    private var expirationMap = mutableMapOf<String, Long>()
+    private val expirationLock = Any()
+    private val expirationMap = mutableMapOf<String, Long>()
     private var client: OkHttpClient? = null
     private var isConnecting = false
 
@@ -146,8 +147,14 @@ class DesktopWebSocket(private val url: String, private val headers: Map<String,
 
     override fun startPingTimer(intervalMs: Long) {
         stopPingTimer()
+        // El cuerpo va envuelto: con java.util.Timer, UNA excepcion no capturada mata el timer
+        // entero y ya no vuelve a ejecutarse nunca, sin ruido en el log.
         pingTimer = timer(period = intervalMs) {
-            sendPing()
+            try {
+                sendPing()
+            } catch (e: Throwable) {
+                log.w(tag = "DesktopWebSocket") { "Ping timer tick failed: ${e.message}" }
+            }
         }
     }
 
@@ -156,14 +163,37 @@ class DesktopWebSocket(private val url: String, private val headers: Map<String,
         pingTimer = null
     }
 
+    /**
+     * Renovacion de registro.
+     *
+     * Dos cosas que parecen detalles y no lo son, porque su fallo es SILENCIOSO y deja al
+     * cliente creyendose registrado mientras el servidor ya lo ha caducado (sintoma tipico:
+     * el escritorio "pierde el registro" tras un rato inactivo — pantalla bloqueada — y solo
+     * se recupera cuando el usuario vuelve a tocar la app):
+     *
+     * 1. Se itera sobre una COPIA del mapa. [setRegistrationExpiration] se llama desde los
+     *    hilos de red mientras el timer recorre el mapa; iterar el original lanzaba
+     *    ConcurrentModificationException.
+     * 2. Todo el tick va en try/catch. `java.util.Timer` cancela la tarea para siempre en
+     *    cuanto una ejecucion lanza, asi que una sola excepcion aqui equivalia a quedarse sin
+     *    renovaciones hasta reiniciar la app.
+     */
     override fun startRegistrationRenewalTimer(checkIntervalMs: Long, renewBeforeExpirationMs: Long) {
         stopRegistrationRenewalTimer()
         renewalTimer = timer(period = checkIntervalMs) {
-            val now = System.currentTimeMillis()
-            for ((key, expiration) in expirationMap) {
-                if (expiration - now <= renewBeforeExpirationMs) {
-                    listener?.onRegistrationRenewalRequired(key)
+            try {
+                val now = System.currentTimeMillis()
+                val snapshot = synchronized(expirationLock) { expirationMap.toMap() }
+                for ((key, expiration) in snapshot) {
+                    if (expiration - now <= renewBeforeExpirationMs) {
+                        log.d(tag = "DesktopWebSocket") {
+                            "Registration renewal due for $key (expires in ${expiration - now}ms)"
+                        }
+                        listener?.onRegistrationRenewalRequired(key)
+                    }
                 }
+            } catch (e: Throwable) {
+                log.w(tag = "DesktopWebSocket") { "Registration renewal tick failed: ${e.message}" }
             }
         }
     }
@@ -174,7 +204,7 @@ class DesktopWebSocket(private val url: String, private val headers: Map<String,
     }
 
     override fun setRegistrationExpiration(accountKey: String, expirationTimeMs: Long) {
-        expirationMap[accountKey] = expirationTimeMs
+        synchronized(expirationLock) { expirationMap[accountKey] = expirationTimeMs }
     }
 
     override fun renewRegistration(accountKey: String) {
