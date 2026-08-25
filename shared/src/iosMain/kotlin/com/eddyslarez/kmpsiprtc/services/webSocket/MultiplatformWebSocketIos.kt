@@ -252,9 +252,13 @@ class IOSWebSocket(
         session?.invalidateAndCancel()
         session = null
 
-        dispatch_async(dispatch_get_main_queue()) {
-            listener?.onClose(code, reason)
-        }
+        // Se desengancha el listener y NO se notifica el cierre, igual que en Desktop y Android.
+        // Aqui la notificacion iba en dispatch_async, o sea que llegaba DESPUES de que close()
+        // retornara: para entonces quien pidio el cierre (forceReconnect/disconnect) ya habia
+        // bajado su bandera de "lo cerre yo", asi que el manager lo interpretaba como un cierre
+        // del servidor y programaba una reconexion fantasma que competia con la que ya estaba
+        // en marcha, cancelando de paso todas las renovaciones.
+        listener = null
 
         println("IOSWebSocket: Connection closed")
     }

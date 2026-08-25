@@ -28,6 +28,10 @@ class DesktopWebSocket(private val url: String, private val headers: Map<String,
     // Timestamp del ultimo ping enviado para calcular latencia
     private var lastPingSentTime = 0L
 
+    // OkHttp puede invocar onClosing Y onClosed para el mismo cierre: solo se notifica una vez.
+    @Volatile
+    private var closeNotified = false
+
     override fun connect() {
         if (isConnecting) {
             log.w(tag = "DesktopWebSocket") { "Already connecting, ignoring duplicate request" }
@@ -36,6 +40,7 @@ class DesktopWebSocket(private val url: String, private val headers: Map<String,
 
         isConnecting = true
         isOpen = false
+        closeNotified = false
         log.i(tag = "DesktopWebSocket") { "Connecting to $url" }
 
         try {
@@ -84,11 +89,29 @@ class DesktopWebSocket(private val url: String, private val headers: Map<String,
                     }
                 }
 
+                override fun onClosing(ws: WebSocket, code: Int, reason: String) {
+                    // Cuando el cierre lo inicia el SERVIDOR (p.ej. OpenSIPS corta la sesion por
+                    // inactividad) OkHttp invoca onClosing y NO invoca onClosed salvo que nosotros
+                    // completemos el handshake. Sin este override no se ejecutaba nada: isOpen
+                    // seguia en true y la cuenta parecia registrada con el binding ya muerto.
+                    isConnecting = false
+                    isOpen = false
+                    log.i(tag = "DesktopWebSocket") { "WebSocket closing by peer: code=$code, reason=$reason" }
+                    runCatching { ws.close(1000, null) }
+                    if (!closeNotified) {
+                        closeNotified = true
+                        listener?.onClose(code, reason)
+                    }
+                }
+
                 override fun onClosed(ws: WebSocket, code: Int, reason: String) {
                     isConnecting = false
                     isOpen = false
                     log.i(tag = "DesktopWebSocket") { "WebSocket closed with code: $code, reason: $reason" }
-                    listener?.onClose(code, reason)
+                    if (!closeNotified) {
+                        closeNotified = true
+                        listener?.onClose(code, reason)
+                    }
                 }
 
                 override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
@@ -127,6 +150,10 @@ class DesktopWebSocket(private val url: String, private val headers: Map<String,
 
             webSocket?.close(code, reason)
             webSocket = null
+            // Se desengancha el listener: si no, los callbacks tardios de este socket (un
+            // onFailure por readTimeout puede llegar decenas de segundos despues) siguen
+            // tocando el estado compartido del socket que ya lo sustituyo.
+            listener = null
 
             // Cerrar el cliente OkHttp
             client?.dispatcher?.executorService?.shutdown()
@@ -149,7 +176,7 @@ class DesktopWebSocket(private val url: String, private val headers: Map<String,
         stopPingTimer()
         // El cuerpo va envuelto: con java.util.Timer, UNA excepcion no capturada mata el timer
         // entero y ya no vuelve a ejecutarse nunca, sin ruido en el log.
-        pingTimer = timer(period = intervalMs) {
+        pingTimer = timer(daemon = true, period = intervalMs) {
             try {
                 sendPing()
             } catch (e: Throwable) {
@@ -180,7 +207,7 @@ class DesktopWebSocket(private val url: String, private val headers: Map<String,
      */
     override fun startRegistrationRenewalTimer(checkIntervalMs: Long, renewBeforeExpirationMs: Long) {
         stopRegistrationRenewalTimer()
-        renewalTimer = timer(period = checkIntervalMs) {
+        renewalTimer = timer(daemon = true, period = checkIntervalMs) {
             try {
                 val now = System.currentTimeMillis()
                 val snapshot = synchronized(expirationLock) { expirationMap.toMap() }

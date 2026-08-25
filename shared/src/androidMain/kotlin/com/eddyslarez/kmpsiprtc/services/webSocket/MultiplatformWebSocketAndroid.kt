@@ -26,6 +26,10 @@ class AndroidWebSocket(private val url: String, private val headers: Map<String,
     // Timestamp del ultimo ping enviado para calcular latencia
     private var lastPingSentTime = 0L
 
+    // OkHttp puede invocar onClosing Y onClosed para el mismo cierre: solo se notifica una vez.
+    @Volatile
+    private var closeNotified = false
+
     override fun connect() {
         if (isConnecting) {
             log.w(tag = "AndroidWebSocket") { "Already connecting, ignoring duplicate request" }
@@ -34,6 +38,7 @@ class AndroidWebSocket(private val url: String, private val headers: Map<String,
 
         isConnecting = true
         isOpen = false
+        closeNotified = false
 
         try {
             // Crear cliente OkHttp con configuración robusta
@@ -88,11 +93,29 @@ class AndroidWebSocket(private val url: String, private val headers: Map<String,
                     }
                 }
 
+                override fun onClosing(ws: WebSocket, code: Int, reason: String) {
+                    // Cuando el cierre lo inicia el SERVIDOR (p.ej. OpenSIPS corta la sesion por
+                    // inactividad) OkHttp invoca onClosing y NO invoca onClosed salvo que nosotros
+                    // completemos el handshake. Sin este override no se ejecutaba nada: isOpen
+                    // seguia en true y la cuenta parecia registrada con el binding ya muerto.
+                    isConnecting = false
+                    isOpen = false
+                    log.i(tag = "AndroidWebSocket") { "WebSocket closing by peer: code=$code, reason=$reason" }
+                    runCatching { ws.close(1000, null) }
+                    if (!closeNotified) {
+                        closeNotified = true
+                        listener?.onClose(code, reason)
+                    }
+                }
+
                 override fun onClosed(ws: WebSocket, code: Int, reason: String) {
                     isConnecting = false
                     isOpen = false
                     log.d(tag = "AndroidWebSocket") { "WebSocket closed: $code - $reason" }
-                    listener?.onClose(code, reason)
+                    if (!closeNotified) {
+                        closeNotified = true
+                        listener?.onClose(code, reason)
+                    }
                 }
 
                 override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
@@ -134,6 +157,10 @@ class AndroidWebSocket(private val url: String, private val headers: Map<String,
 
             webSocket?.close(code, reason)
             webSocket = null
+            // Se desengancha el listener: si no, los callbacks tardios de este socket (un
+            // onFailure por readTimeout puede llegar decenas de segundos despues) siguen
+            // tocando el estado compartido del socket que ya lo sustituyo.
+            listener = null
 
             // Cerrar el cliente OkHttp
             client?.dispatcher?.executorService?.shutdown()

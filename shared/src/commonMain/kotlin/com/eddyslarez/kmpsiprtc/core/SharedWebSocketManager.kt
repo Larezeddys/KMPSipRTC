@@ -61,6 +61,9 @@ class SharedWebSocketManager(
         private const val MIN_RENEWAL_DELAY_MS = 5_000L     // Suelo por si el server da un Expires ridiculo
         private const val RENEWAL_CONFIRMATION_TIMEOUT_MS = 30_000L // Reintento si el 200 OK no llega
         private const val RENEWAL_RETRY_DELAY_MS = 15_000L  // Reintento si no se pudo ni enviar
+
+        // Diagnostico
+        private const val HEARTBEAT_INTERVAL_MS = 5 * 60_000L
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -96,6 +99,39 @@ class SharedWebSocketManager(
     private val renewalJobs = mutableMapOf<String, Job>()
 
     /**
+     * Generacion del socket vigente.
+     *
+     * Cada `connect()` crea un socket nuevo con su propio listener, pero el listener del socket
+     * anterior NO se desengancha: sus callbacks siguen llegando (un `onClose` tardio del socket
+     * viejo puede tardar decenas de segundos si el servidor nunca responde al Close). Si esos
+     * callbacks tocan el estado compartido, pisan al socket nuevo — el caso peligroso es un
+     * `onClose` tardio que ejecuta `cancelAllRenewals()` DESPUES de que el socket nuevo ya se
+     * registro, dejando la cuenta sin renovacion y caducando en silencio.
+     *
+     * Por eso cada listener captura su generacion y se ignora si ya no es la vigente.
+     */
+    private var socketGeneration = 0
+
+    /** Deadline de renovacion por cuenta, solo para el heartbeat de diagnostico. */
+    private val renewalDeadlines = mutableMapOf<String, Long>()
+
+    private var heartbeatJob: Job? = null
+
+    /**
+     * true mientras el cierre en curso lo hayamos pedido NOSOTROS (disconnect, dispose,
+     * forceReconnect). Sin esto habria que deducirlo del codigo de cierre, y no vale: un
+     * servidor que corta la sesion por inactividad tambien manda 1000, asi que un cierre del
+     * peer se confundiria con uno nuestro y nos quedariamos sin reconectar.
+     */
+    private var selfInitiatedClose = false
+
+    /** Ultima generacion cuya caida de transporte ya se proceso (dedup). */
+    private var transportDownGeneration = -1
+
+    @OptIn(ExperimentalTime::class)
+    private val startedAtMs = kotlin.time.Clock.System.now().toEpochMilliseconds()
+
+    /**
      * Listener para eventos de estado de conexion - propaga a la app
      */
     interface ConnectionEventListener {
@@ -128,11 +164,27 @@ class SharedWebSocketManager(
             log.d(tag = TAG) { "Connecting shared WebSocket to: ${config.webSocketUrl}" }
 
             val headers = createHeaders()
+            // El cliente anterior se cierra antes de soltarlo: sus timers son hilos reales y su
+            // OkHttpClient tiene su propio pool. Sustituirlo sin cerrar los dejaba vivos para
+            // siempre (en escritorio, ademas, hilos no-daemon que impiden salir del proceso).
+            webSocketClient?.let { previous ->
+                selfInitiatedClose = true
+                runCatching {
+                    previous.stopPingTimer()
+                    previous.stopRegistrationRenewalTimer()
+                    previous.close(1000, "Replaced by new connection")
+                }.onFailure { e -> log.w(tag = TAG) { "Error closing previous socket: ${e.message}" } }
+                selfInitiatedClose = false
+            }
+            // Generacion nueva: a partir de aqui los callbacks del socket anterior se ignoran.
+            val generation = ++socketGeneration
             webSocketClient = createWebSocket(config.webSocketUrl, headers)
 
-            setupWebSocketListeners()
+            setupWebSocketListeners(generation)
+            log.d(tag = TAG) { "[WS gen=$generation] CONNECT -> ${config.webSocketUrl}" }
             webSocketClient?.connect()
             webSocketClient?.startPingTimer(config.pingIntervalMs)
+            startHeartbeatIfNeeded()
 
             // Esperar confirmacion de conexion
             var waitTime = 0L
@@ -331,9 +383,11 @@ class SharedWebSocketManager(
         isForceReconnecting = true
         scope.launch {
             try {
+                selfInitiatedClose = true
                 webSocketClient?.stopPingTimer()
                 webSocketClient?.close(1000, "Force reconnect")
                 webSocketClient = null
+                selfInitiatedClose = false
                 connect()
             } catch (e: Exception) {
                 log.e(tag = TAG) { "Error during force reconnect: ${e.message}" }
@@ -403,10 +457,19 @@ class SharedWebSocketManager(
      * Configurar listeners del WebSocket
      */
     @OptIn(ExperimentalTime::class)
-    private fun setupWebSocketListeners() {
+    private fun setupWebSocketListeners(generation: Int) {
         webSocketClient?.setListener(object : MultiplatformWebSocket.Listener {
+
+            /** true si este callback viene de un socket ya sustituido: hay que ignorarlo. */
+            private fun isStale(event: String): Boolean {
+                if (generation == socketGeneration) return false
+                log.w(tag = TAG) { "[WS gen=$generation] $event IGNORED (stale, current gen=$socketGeneration)" }
+                return true
+            }
+
             override fun onOpen() {
-                log.d(tag = TAG) { "Shared WebSocket opened" }
+                if (isStale("OPEN")) return
+                log.d(tag = TAG) { "[WS gen=$generation] OPEN" }
                 onConnectionSuccess()
 
                 scope.launch {
@@ -415,6 +478,7 @@ class SharedWebSocketManager(
             }
 
             override fun onMessage(message: String) {
+                if (isStale("MESSAGE")) return
                 scope.launch {
                     // Determinar a que cuenta pertenece el mensaje
                     val accountInfo = determineAccountFromMessage(message)
@@ -434,57 +498,56 @@ class SharedWebSocketManager(
             }
 
             override fun onClose(code: Int, reason: String) {
-                log.w(tag = TAG) { "Shared WebSocket closed: $code - $reason" }
-
-                // Reset pong timestamp para que la proxima conexion empiece limpia
-                lastPongTimestamp = 0L
-
-                // Cancelar todas las renovaciones programadas (conexion perdida)
-                cancelAllRenewals()
-
-                // Registrar timestamp de desconexion
-                if (disconnectedSince == 0L) {
-                    disconnectedSince = kotlin.time.Clock.System.now().toEpochMilliseconds()
-                }
-
-                // Marcar todas las cuentas como no registradas
-                registeredAccounts.forEach { accountKey ->
-                    sipCoreManager.updateRegistrationState(accountKey, RegistrationState.NONE)
-                }
-
-                // Intentar reconexion si no fue cierre normal
-                if (code != 1000 && !sipCoreManager.isShuttingDown) {
-                    scheduleReconnect()
-                } else {
-                    _connectionState.value = WebSocketConnectionState.DISCONNECTED
-                }
+                if (isStale("CLOSE($code)")) return
+                log.w(tag = TAG) { "[WS gen=$generation] CLOSE code=$code reason=\"$reason\" self=$selfInitiatedClose" }
+                // Cualquier cierre que NO hayamos pedido nosotros exige reconectar, tenga el
+                // codigo que tenga: un servidor que corta por inactividad manda 1000 igual que
+                // nosotros al desconectar a proposito.
+                handleTransportDown(
+                    generation = generation,
+                    event = "onClose($code)",
+                    reconnect = !selfInitiatedClose,
+                    // Cierre ordenado: el binding ya no existe, pero no es un error que
+                    // haya que pintar en rojo al usuario.
+                    targetState = RegistrationState.NONE,
+                )
             }
 
             override fun onError(error: Exception) {
-                // Debounce: ignorar errores repetidos dentro de 1 segundo para evitar storms
+                if (isStale("ERROR")) return
+
+                // El debounce es SOLO para el log: antes hacia `return` y con el se iba tambien
+                // la recuperacion. Un send() fallido puede consumir la ventana de 1s y hacer que
+                // el error siguiente — el de la caida real — se descartara entero.
                 val now = kotlin.time.Clock.System.now().toEpochMilliseconds()
-                if (now - lastErrorTimestamp < 1000L) {
-                    return
-                }
+                val isRepeatedError = now - lastErrorTimestamp < 1000L
                 lastErrorTimestamp = now
-
-                log.e(tag = TAG) { "WebSocket error: ${error.message}" }
                 lastError = error
-
-                // Registrar timestamp de desconexion
-                if (disconnectedSince == 0L) {
-                    disconnectedSince = now
+                if (!isRepeatedError) {
+                    log.e(tag = TAG) { "[WS gen=$generation] ERROR ${error::class.simpleName}: ${error.message}" }
                 }
 
-                // Marcar cuentas como fallidas
-                registeredAccounts.forEach { accountKey ->
-                    sipCoreManager.updateRegistrationState(accountKey, RegistrationState.FAILED)
-                }
+                // CRITICO: OkHttp NO vuelve a llamar a ningun callback despues de onFailure —
+                // onClosed no llega nunca. Si aqui no se programa la reconexion, un socket que
+                // muere en silencio (NAT/router tirando el TCP ocioso) deja la app sorda hasta
+                // que otra cosa la despierte por casualidad. Por eso onClose y onError van por
+                // el MISMO camino.
+                handleTransportDown(
+                    generation = generation,
+                    event = "onError(${error::class.simpleName})",
+                    reconnect = true,
+                    // Fallo real del transporte: la UI debe verlo en rojo. Marcarlo NONE hacia
+                    // que SipManagerImpl lo mapeara a DEFAULT y la cuenta siguiera pareciendo OK.
+                    targetState = RegistrationState.FAILED,
+                )
             }
 
             override fun onPong(timeMs: Long) {
-                lastPongTimestamp = kotlin.time.Clock.System.now().toEpochMilliseconds()
-                log.d(tag = TAG) { "Pong received: ${timeMs}ms RTT" }
+                if (isStale("PONG")) return
+                val now = kotlin.time.Clock.System.now().toEpochMilliseconds()
+                val sinceLast = if (lastPongTimestamp == 0L) -1L else now - lastPongTimestamp
+                lastPongTimestamp = now
+                log.d(tag = TAG) { "[WS gen=$generation] PONG rtt=${timeMs}ms since_last=${sinceLast}ms" }
             }
 
             override fun onRegistrationRenewalRequired(accountKey: String) {
@@ -516,6 +579,93 @@ class SharedWebSocketManager(
                 log.d(tag = TAG) { "Connection restored notification from platform (downtime: ${downTimeMs}ms)" }
             }
         })
+    }
+
+    /**
+     * Camino UNICO de "el transporte se cayo", compartido por onClose y onError.
+     *
+     * Antes cada uno hacia una cosa distinta y solo onClose programaba reconexion, que es
+     * justo el callback que OkHttp NO invoca cuando el socket muere en silencio. El resultado
+     * era una app sorda sin ningun error visible.
+     *
+     * Las cuentas se marcan en NONE (no en FAILED) a proposito: [reregisterOnlyFailedAccounts]
+     * recoge ambos estados, pero NONE describe mejor "ya no hay binding en el servidor" y no
+     * ensucia los contadores de fallo de autenticacion.
+     */
+    @OptIn(ExperimentalTime::class)
+    private fun handleTransportDown(
+        generation: Int,
+        event: String,
+        reconnect: Boolean,
+        targetState: RegistrationState,
+    ) {
+        // Idempotente por socket: un mismo cierre puede notificarse por varias vias (onClosing y
+        // onClosed de OkHttp, o un onError seguido del onClose). Sin esto cada muerte contaba
+        // doble y programaba dos reconexiones que se pisaban.
+        // No se usa un guard sobre reconnectJob porque el propio job se reprograma a si mismo
+        // cuando un intento falla: bloquearlo cortaria la cadena de reintentos.
+        if (transportDownGeneration == generation) {
+            log.d(tag = TAG) { "[WS gen=$generation] TRANSPORT_DOWN ($event) ya procesado, ignorado" }
+            return
+        }
+        transportDownGeneration = generation
+
+        // El pong viejo no vale para el socket que venga: sin esto isWebSocketHealthy() devuelve
+        // false sobre un socket recien abierto y provoca un forceReconnect que lo tira de nuevo.
+        lastPongTimestamp = 0L
+
+        cancelAllRenewals(reason = "$event gen=$generation")
+
+        if (disconnectedSince == 0L) {
+            disconnectedSince = kotlin.time.Clock.System.now().toEpochMilliseconds()
+        }
+
+        registeredAccounts.forEach { accountKey ->
+            log.d(tag = TAG) { "[REG $accountKey] -> $targetState by=$event" }
+            sipCoreManager.updateRegistrationState(accountKey, targetState)
+        }
+
+        if (reconnect && !sipCoreManager.isShuttingDown) {
+            log.w(tag = TAG) {
+                "[WS gen=$generation] TRANSPORT_DOWN ($event) -> cancelRenewals, accounts->NONE, scheduleReconnect"
+            }
+            scheduleReconnect()
+        } else {
+            log.d(tag = TAG) { "[WS gen=$generation] TRANSPORT_DOWN ($event) -> no reconnect (shutdown or clean close)" }
+            _connectionState.value = WebSocketConnectionState.DISCONNECTED
+        }
+    }
+
+    /**
+     * Latido de diagnostico: una linea cada 5 minutos con el estado consolidado, aunque no pase
+     * nada. Es lo que permite mirar el log del tester a las 03:00 y ver que estaba mintiendo,
+     * en vez de reproducir el problema a ciegas.
+     */
+    @OptIn(ExperimentalTime::class)
+    private fun startHeartbeatIfNeeded() {
+        if (heartbeatJob?.isActive == true) return
+        heartbeatJob = scope.launch {
+            while (isActive) {
+                delay(HEARTBEAT_INTERVAL_MS)
+                try {
+                    val now = kotlin.time.Clock.System.now().toEpochMilliseconds()
+                    val upSeconds = (now - startedAtMs) / 1000
+                    val lastPong = if (lastPongTimestamp == 0L) "never" else "${(now - lastPongTimestamp) / 1000}s"
+                    val accounts = registeredAccounts.joinToString(",") { key ->
+                        val state = sipCoreManager.getRegistrationState(key)
+                        val renewIn = renewalDeadlines[key]?.let { "${(it - now) / 1000}s" } ?: "none"
+                        "$key:$state,renew_in=$renewIn"
+                    }.ifEmpty { "none" }
+                    log.i(tag = TAG) {
+                        "[HEARTBEAT] up=${upSeconds}s ws=${_connectionState.value}(gen=$socketGeneration," +
+                                "connected=${isConnected()},last_pong=$lastPong) accounts=[$accounts] " +
+                                "reconnect_attempts=$reconnectAttempts"
+                    }
+                } catch (e: Exception) {
+                    log.w(tag = TAG) { "Heartbeat tick failed: ${e.message}" }
+                }
+            }
+        }
     }
 
     /**
@@ -743,8 +893,11 @@ class SharedWebSocketManager(
             log.d(tag = TAG) { "Disconnecting shared WebSocket" }
 
             reconnectJob?.cancel()
-            cancelAllRenewals()
+            cancelAllRenewals(reason = "disconnect()")
+            heartbeatJob?.cancel()
+            heartbeatJob = null
 
+            selfInitiatedClose = true
             webSocketClient?.stopPingTimer()
             webSocketClient?.stopRegistrationRenewalTimer()
             webSocketClient?.close(1000, "Normal disconnect")
@@ -779,6 +932,7 @@ class SharedWebSocketManager(
      * Expires nuevo, lo que cancela este job y arranca otro: el bucle termina por si solo en
      * el camino feliz.
      */
+    @OptIn(ExperimentalTime::class)
     fun scheduleRegistrationRenewal(accountKey: String, expiresSeconds: Int) {
         // Cancelar renovacion anterior de esta cuenta
         renewalJobs[accountKey]?.cancel()
@@ -786,8 +940,12 @@ class SharedWebSocketManager(
         // Programar renovacion unos segundos antes del vencimiento
         val delayMs = maxOf((expiresSeconds - RENEWAL_MARGIN_SECONDS) * 1000L, MIN_RENEWAL_DELAY_MS)
 
+        renewalDeadlines[accountKey] = kotlin.time.Clock.System.now().toEpochMilliseconds() + delayMs
+
         renewalJobs[accountKey] = scope.launch {
-            log.d(tag = TAG) { "Renewal scheduled for $accountKey: re-REGISTER in ${delayMs / 1000}s (expires in ${expiresSeconds}s)" }
+            log.d(tag = TAG) {
+                "[REG $accountKey] renewal scheduled: renew_in=${delayMs / 1000}s expires_granted=${expiresSeconds}s"
+            }
             var nextDelayMs = delayMs
             while (isActive) {
                 delay(nextDelayMs)
@@ -824,10 +982,14 @@ class SharedWebSocketManager(
     /**
      * Cancela todas las renovaciones programadas (al desconectar)
      */
-    fun cancelAllRenewals() {
+    fun cancelAllRenewals(reason: String = "unspecified") {
+        val keys = renewalJobs.keys.toList()
         renewalJobs.values.forEach { it.cancel() }
         renewalJobs.clear()
-        log.d(tag = TAG) { "All renewal jobs cancelled" }
+        renewalDeadlines.clear()
+        if (keys.isNotEmpty()) {
+            log.w(tag = TAG) { "[REG] renewal jobs CANCELLED for $keys by=$reason" }
+        }
     }
 
     /**
@@ -856,6 +1018,7 @@ class SharedWebSocketManager(
             cancelAllRenewals()
             webSocketClient?.stopPingTimer()
             webSocketClient?.stopRegistrationRenewalTimer()
+            selfInitiatedClose = true
             webSocketClient?.close(1000, "Dispose")
             webSocketClient = null
             registeredAccounts.clear()
