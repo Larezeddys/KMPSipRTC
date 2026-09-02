@@ -24,6 +24,14 @@ import cocoapods.LiveKitClient.setCameraWithEnabled
 import cocoapods.LiveKitClient.setMicrophoneWithEnabled
 import cocoapods.LiveKitClient.setScreenShareWithEnabled
 import com.eddyslarez.kmpsiprtc.platform.log
+import platform.AVFAudio.AVAudioSession
+import platform.AVFAudio.AVAudioSessionPortBluetoothA2DP
+import platform.AVFAudio.AVAudioSessionPortBluetoothHFP
+import platform.AVFAudio.AVAudioSessionPortBuiltInReceiver
+import platform.AVFAudio.AVAudioSessionPortDescription
+import platform.AVFAudio.AVAudioSessionPortOverrideNone
+import platform.AVFAudio.AVAudioSessionPortOverrideSpeaker
+import platform.AVFAudio.setPreferredInput
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.ObjCSignatureOverride
 import kotlinx.coroutines.CoroutineScope
@@ -226,20 +234,36 @@ actual class ConferenceLiveKitManager actual constructor() {
         refreshRoomState()
     }
 
-    actual suspend fun loadDevices(): LkDevices = LkDevices(
-        cameras = listOf(
-            LkDevice("front", "Front camera"),
-            LkDevice("back", "Back camera"),
-        ),
-        microphones = listOf(LkDevice("default", "Default microphone")),
-        speakers = listOf(
-            LkDevice("speaker", "Speaker"),
-            LkDevice("earpiece", "Earpiece"),
-        ),
-        selectedCameraId = "front",
-        selectedMicrophoneId = "default",
-        selectedSpeakerId = "speaker",
-    )
+    /**
+     * La lista de salidas era fija -- solo altavoz y auricular -- asi que un Bluetooth conectado
+     * ni siquiera aparecia en el selector. Ahora se anade cuando iOS expone su puerto HFP.
+     */
+    actual suspend fun loadDevices(): LkDevices {
+        val session = AVAudioSession.sharedInstance()
+        val bluetooth = session.bluetoothHfpPort()
+        val speakers = buildList {
+            add(LkDevice(SPEAKER_ID, "Speaker"))
+            add(LkDevice(EARPIECE_ID, "Earpiece"))
+            bluetooth?.let { add(LkDevice(BLUETOOTH_ID, it.portName)) }
+        }
+        return LkDevices(
+            cameras = listOf(
+                LkDevice("front", "Front camera"),
+                LkDevice("back", "Back camera"),
+            ),
+            microphones = listOf(LkDevice("default", "Default microphone")),
+            speakers = speakers,
+            selectedCameraId = "front",
+            selectedMicrophoneId = "default",
+            selectedSpeakerId = currentSpeakerId(session),
+        )
+    }
+
+    private companion object {
+        const val SPEAKER_ID = "speaker"
+        const val EARPIECE_ID = "earpiece"
+        const val BLUETOOTH_ID = "bluetooth"
+    }
 
     actual suspend fun selectCamera(deviceId: String) {
         log.d(tag = tag) { "selectCamera iOS: $deviceId" }
@@ -249,8 +273,51 @@ actual class ConferenceLiveKitManager actual constructor() {
         log.d(tag = tag) { "selectMicrophone iOS: $deviceId (gestionado por AVAudioSession/LiveKit)" }
     }
 
+    /**
+     * Cambia la salida de audio de la conferencia.
+     *
+     * Antes esto solo escribia un log "gestionado por AVAudioSession/LiveKit", y no lo gestionaba
+     * nadie: con unos auriculares Bluetooth conectados el boton de altavoz no hacia nada y la
+     * unica forma de sacar el audio del Bluetooth era apagarlo. Es la misma logica que ya usaba
+     * la parte de llamadas SIP en IosAudioController.setActiveRoute.
+     */
     actual suspend fun selectSpeaker(deviceId: String) {
-        log.d(tag = tag) { "selectSpeaker iOS: $deviceId (gestionado por AVAudioSession/LiveKit)" }
+        val session = AVAudioSession.sharedInstance()
+        val ok = runCatching {
+            when (deviceId) {
+                // Lo que de verdad saca el audio del Bluetooth o del auricular.
+                SPEAKER_ID -> session.overrideOutputAudioPort(AVAudioSessionPortOverrideSpeaker, null)
+
+                BLUETOOTH_ID -> {
+                    session.overrideOutputAudioPort(AVAudioSessionPortOverrideNone, null)
+                    // Sin setPreferredInput iOS puede dejar la ruta en el camino interno aunque
+                    // el Bluetooth este disponible.
+                    session.bluetoothHfpPort()?.let { session.setPreferredInput(it, null) }
+                }
+
+                else -> session.overrideOutputAudioPort(AVAudioSessionPortOverrideNone, null)
+            }
+        }.isSuccess
+        log.d(tag = tag) { "selectSpeaker iOS: $deviceId aplicado=$ok" }
+    }
+
+    /** Puerto HFP del Bluetooth, o null si no hay ninguno emparejado y activo. */
+    private fun AVAudioSession.bluetoothHfpPort(): AVAudioSessionPortDescription? =
+        availableInputs
+            ?.mapNotNull { it as? AVAudioSessionPortDescription }
+            ?.firstOrNull { it.portType == AVAudioSessionPortBluetoothHFP }
+
+    /** Salida que iOS esta usando ahora mismo, para que el selector no mienta al abrirse. */
+    private fun currentSpeakerId(session: AVAudioSession): String {
+        val salida = session.currentRoute.outputs
+            .mapNotNull { it as? AVAudioSessionPortDescription }
+            .firstOrNull()
+            ?.portType
+        return when (salida) {
+            AVAudioSessionPortBluetoothHFP, AVAudioSessionPortBluetoothA2DP -> BLUETOOTH_ID
+            AVAudioSessionPortBuiltInReceiver -> EARPIECE_ID
+            else -> SPEAKER_ID
+        }
     }
 
     actual suspend fun selectScreenShareSource(deviceId: String) {
