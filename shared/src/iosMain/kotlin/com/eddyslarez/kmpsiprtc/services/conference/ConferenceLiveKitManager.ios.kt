@@ -24,14 +24,7 @@ import cocoapods.LiveKitClient.setCameraWithEnabled
 import cocoapods.LiveKitClient.setMicrophoneWithEnabled
 import cocoapods.LiveKitClient.setScreenShareWithEnabled
 import com.eddyslarez.kmpsiprtc.platform.log
-import platform.AVFAudio.AVAudioSession
-import platform.AVFAudio.AVAudioSessionPortBluetoothA2DP
-import platform.AVFAudio.AVAudioSessionPortBluetoothHFP
-import platform.AVFAudio.AVAudioSessionPortBuiltInReceiver
-import platform.AVFAudio.AVAudioSessionPortDescription
-import platform.AVFAudio.AVAudioSessionPortOverrideNone
-import platform.AVFAudio.AVAudioSessionPortOverrideSpeaker
-import platform.AVFAudio.setPreferredInput
+import platform.AVFAudio.*
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.ObjCSignatureOverride
 import kotlinx.coroutines.CoroutineScope
