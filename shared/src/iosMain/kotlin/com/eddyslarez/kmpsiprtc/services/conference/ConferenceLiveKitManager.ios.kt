@@ -5,6 +5,7 @@ import cocoapods.LiveKitClient.ConnectionStateConnecting
 import cocoapods.LiveKitClient.ConnectionStateDisconnected
 import cocoapods.LiveKitClient.ConnectionStateReconnecting
 import cocoapods.LiveKitClient.LocalParticipant
+import cocoapods.MCNLiveKitDataBridge.LKBroadcastBridge
 import cocoapods.MCNLiveKitDataBridge.LKDataPublisher
 import cocoapods.LiveKitClient.LocalTrackPublication
 import cocoapods.LiveKitClient.LocalVideoTrack
@@ -65,7 +66,9 @@ actual class ConferenceLiveKitManager actual constructor() {
     private var room: Room? = null
     private var roomDelegate: IosRoomDelegate? = null
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-    private var stateRefreshJob: Job? = null
+    private var stateRefreshJob: Job? = null
+    private var broadcastPending = false
+    private var broadcastTimeoutJob: Job? = null
 
     private val raisedHands = mutableMapOf<String, Long>()
     private var localHandRaised = false
@@ -145,6 +148,12 @@ actual class ConferenceLiveKitManager actual constructor() {
     actual suspend fun disconnect() {
         val lkRoom = room
         stopStateRefreshLoop()
+        // El observador Darwin es global al proceso: si no se suelta aqui, sobrevive a la sala
+        // y una transmision posterior le llegaria a un manager ya muerto.
+        LKBroadcastBridge.stopObserving()
+        broadcastTimeoutJob?.cancel()
+        broadcastTimeoutJob = null
+        broadcastPending = false
         log.d(tag = tag) { "Desconectando de conferencia iOS" }
         if (lkRoom != null) {
             suspendCancellableCoroutine { continuation ->
@@ -195,16 +204,126 @@ actual class ConferenceLiveKitManager actual constructor() {
         refreshRoomState()
     }
 
-    actual suspend fun setScreenShareEnabled(enabled: Boolean) {
-        val lp = room?.localParticipant() ?: return
-        awaitPublication { completion ->
-            lp.setScreenShareWithEnabled(
-                enabled = enabled,
-                completionHandler = completion,
-            )
-        }
-        _mediaState.value = _mediaState.value.copy(screenShareEnabled = enabled)
-        refreshRoomState()
+    /**
+     * Comparte la pantalla COMPLETA del telefono, no solo la ventana de la app.
+     *
+     * El flujo de iOS no se parece al de Android:
+     *  1. Se publica el track de broadcast y el SDK abre el RPSystemBroadcastPickerView.
+     *  2. La llamada vuelve YA. Nadie sabe todavia si el usuario va a aceptar.
+     *  3. Cuando pulsa "Iniciar transmision", el appex arranca y su LKSampleHandler postea
+     *     el Darwin iOS_BroadcastStarted (LKSampleHandler.swift:54).
+     *  4. Al parar (boton in-app, pildora roja o Centro de Control) llega
+     *     iOS_BroadcastStopped (LKSampleHandler.swift:68).
+     *
+     * Por eso aqui NO se marca screenShareEnabled sino screenSharePending, y se espera al
+     * paso 3. Si nunca llega, el timeout despublica para no dejar un rectangulo negro
+     * colgado en la sala.
+     */
+    actual suspend fun setScreenShareEnabled(enabled: Boolean) {
+        val lkRoom = room ?: return
+
+        if (!enabled) {
+            stopBroadcastScreenShare(lkRoom)
+            return
+        }
+
+        if (!LKBroadcastBridge.isConfigured()) {
+            throw ScreenShareUnavailableException(
+                "Falta RTCAppGroupIdentifier o RTCScreenSharingExtension en el Info.plist, " +
+                    "o el App Group no es accesible: la extension de transmision no esta disponible."
+            )
+        }
+
+        observeBroadcastLifecycle()
+        broadcastPending = true
+        _mediaState.value = _mediaState.value.copy(screenSharePending = true)
+
+        try {
+            awaitNSError { completion ->
+                LKBroadcastBridge.setBroadcastScreenShareWithRoom(
+                    room = lkRoom as objcnames.classes.Room,
+                    enabled = true,
+                    fps = BROADCAST_FPS,
+                    maxWidth = BROADCAST_WIDTH,
+                    maxHeight = BROADCAST_HEIGHT,
+                    completion = completion,
+                )
+            }
+        } catch (error: Throwable) {
+            stopBroadcastScreenShare(lkRoom)
+            throw error
+        }
+
+        armBroadcastTimeout(lkRoom)
+        refreshRoomState()
+    }
+
+    private fun observeBroadcastLifecycle() {
+        LKBroadcastBridge.startObservingWithOnStarted(
+            started = {
+                scope.launch {
+                    broadcastTimeoutJob?.cancel()
+                    broadcastTimeoutJob = null
+                    broadcastPending = false
+                    _mediaState.value = _mediaState.value.copy(
+                        screenShareEnabled = true,
+                        screenSharePending = false,
+                    )
+                    log.d(tag = tag) { "Broadcast iniciado: llegan frames de la pantalla" }
+                    refreshRoomState()
+                }
+            },
+            stopped = {
+                // El usuario paro desde la pildora roja o el Centro de Control. Sin esto el
+                // boton se quedaria encendido y el track publicado en negro.
+                scope.launch {
+                    log.d(tag = tag) { "Broadcast detenido desde el sistema" }
+                    room?.let { stopBroadcastScreenShare(it) }
+                }
+            },
+        )
+    }
+
+    private suspend fun stopBroadcastScreenShare(lkRoom: Room) {
+        broadcastTimeoutJob?.cancel()
+        broadcastTimeoutJob = null
+        broadcastPending = false
+        LKBroadcastBridge.stopObserving()
+
+        // Al despublicar se cierra el socket; el appex lo detecta en su didClose y llama a
+        // finishBroadcastWithError (LKSampleHandler.swift:82-93), asi que la transmision del
+        // sistema tambien se corta. No hay nada mas que hacer desde la app.
+        runCatching {
+            awaitNSError { completion ->
+                LKBroadcastBridge.setBroadcastScreenShareWithRoom(
+                    room = lkRoom as objcnames.classes.Room,
+                    enabled = false,
+                    fps = BROADCAST_FPS,
+                    maxWidth = BROADCAST_WIDTH,
+                    maxHeight = BROADCAST_HEIGHT,
+                    completion = completion,
+                )
+            }
+        }.onFailure { log.w(tag = tag) { "Error despublicando broadcast: ${it.message}" } }
+
+        _mediaState.value = _mediaState.value.copy(
+            screenShareEnabled = false,
+            screenSharePending = false,
+        )
+        refreshRoomState()
+    }
+
+    /** Si el usuario cierra la hoja sin transmitir no llega ningun Darwin y el track se
+     *  quedaria publicado en negro. */
+    private fun armBroadcastTimeout(lkRoom: Room) {
+        broadcastTimeoutJob?.cancel()
+        broadcastTimeoutJob = scope.launch {
+            delay(BROADCAST_START_TIMEOUT_MS)
+            if (broadcastPending) {
+                log.w(tag = tag) { "El broadcast no arranco en $BROADCAST_START_TIMEOUT_MS ms" }
+                stopBroadcastScreenShare(lkRoom)
+            }
+        }
     }
 
     actual suspend fun setHandRaised(raised: Boolean) {
@@ -253,6 +372,14 @@ actual class ConferenceLiveKitManager actual constructor() {
     }
 
     private companion object {
+        // Por defecto ScreenShareCaptureOptions es 1080p/30fps: demasiado ancho de banda y
+        // bateria para un movil, y demasiada presion sobre el limite de 50 MB de la appex, que
+        // codifica cada frame a JPEG.
+        const val BROADCAST_FPS = 15L
+        const val BROADCAST_WIDTH = 1280
+        const val BROADCAST_HEIGHT = 720
+        const val BROADCAST_START_TIMEOUT_MS = 120_000L
+
         const val SPEAKER_ID = "speaker"
         const val EARPIECE_ID = "earpiece"
         const val BLUETOOTH_ID = "bluetooth"
@@ -815,4 +942,6 @@ private class IosRoomDelegate(
     }
 }
 
-private class LiveKitIosException(message: String) : RuntimeException(message)
+private class LiveKitIosException(message: String) : RuntimeException(message)
+
+private class ScreenShareUnavailableException(message: String) : RuntimeException(message)
