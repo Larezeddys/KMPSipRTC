@@ -228,10 +228,25 @@ actual class ConferenceLiveKitManager actual constructor() {
         cameras.add(LkDevice("front", "Camara frontal"))
         cameras.add(LkDevice("back", "Camara trasera"))
 
-        // Mic y speaker default
+        // Mic y salidas. La lista era fija, asi que unos auriculares Bluetooth conectados no
+        // aparecian siquiera en el selector. Desde API 31 se pueden enumerar de verdad.
         microphones.add(LkDevice("default", "Microfono por defecto"))
-        speakers.add(LkDevice("earpiece", "Auricular"))
-        speakers.add(LkDevice("speaker", "Altavoz"))
+        speakers.add(LkDevice(EARPIECE_ID, "Auricular"))
+        speakers.add(LkDevice(SPEAKER_ID, "Altavoz"))
+
+        val audioManager = applicationContext
+            ?.getSystemService(android.content.Context.AUDIO_SERVICE) as? android.media.AudioManager
+        if (audioManager != null && android.os.Build.VERSION.SDK_INT >= 31) {
+            audioManager.availableCommunicationDevices
+                .firstOrNull { it.type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+                ?.let { speakers.add(LkDevice(BLUETOOTH_ID, it.productName?.toString() ?: "Bluetooth")) }
+            audioManager.availableCommunicationDevices
+                .firstOrNull {
+                    it.type == android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                        it.type == android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES
+                }
+                ?.let { speakers.add(LkDevice(HEADSET_ID, it.productName?.toString() ?: "Auriculares")) }
+        }
 
         return LkDevices(
             cameras = cameras,
@@ -239,7 +254,7 @@ actual class ConferenceLiveKitManager actual constructor() {
             speakers = speakers,
             selectedCameraId = "front",
             selectedMicrophoneId = "default",
-            selectedSpeakerId = "speaker"
+            selectedSpeakerId = currentSpeakerId()
         )
     }
 
@@ -255,13 +270,62 @@ actual class ConferenceLiveKitManager actual constructor() {
         log.d(tag = TAG) { "selectMicrophone: $deviceId (gestionado por SDK)" }
     }
 
+    /**
+     * Cambia la salida de audio de la conferencia.
+     *
+     * Antes solo hacia `isSpeakerphoneOn = useSpeaker`. Esa propiedad esta obsoleta desde API 31
+     * y, sobre todo, NO gana a una ruta Bluetooth SCO activa: con unos auriculares conectados el
+     * boton de altavoz no movia el audio y habia que apagar el Bluetooth. Desde API 31 la via
+     * buena es setCommunicationDevice; por debajo se queda el camino antiguo, que ahi si manda.
+     */
     actual suspend fun selectSpeaker(deviceId: String) {
         val ctx = applicationContext ?: return
         val audioManager = ctx.getSystemService(android.content.Context.AUDIO_SERVICE) as? android.media.AudioManager
             ?: return
-        val useSpeaker = deviceId == "speaker"
-        audioManager.isSpeakerphoneOn = useSpeaker
-        log.d(tag = TAG) { "selectSpeaker: $deviceId, speakerOn=$useSpeaker" }
+
+        if (android.os.Build.VERSION.SDK_INT >= 31) {
+            val tipos = when (deviceId) {
+                SPEAKER_ID -> intArrayOf(android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
+                BLUETOOTH_ID -> intArrayOf(android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO)
+                HEADSET_ID -> intArrayOf(
+                    android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET,
+                    android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+                )
+                else -> intArrayOf(android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE)
+            }
+            val destino = audioManager.availableCommunicationDevices
+                .firstOrNull { it.type in tipos }
+            val ok = destino?.let { audioManager.setCommunicationDevice(it) } ?: false
+            if (!ok) {
+                // Sin el dispositivo pedido, al menos soltar la ruta forzada para que el sistema
+                // vuelva a decidir; quedarse con la anterior seria peor.
+                audioManager.clearCommunicationDevice()
+            }
+            log.d(tag = TAG) { "selectSpeaker: $deviceId -> ${destino?.type} ok=$ok" }
+            return
+        }
+
+        @Suppress("DEPRECATION")
+        run {
+            audioManager.isSpeakerphoneOn = deviceId == SPEAKER_ID
+            if (deviceId == BLUETOOTH_ID) audioManager.startBluetoothSco() else audioManager.stopBluetoothSco()
+        }
+        log.d(tag = TAG) { "selectSpeaker (API<31): $deviceId" }
+    }
+
+    /** Salida que Android esta usando ahora, para que el selector no mienta al abrirse. */
+    private fun currentSpeakerId(): String {
+        if (android.os.Build.VERSION.SDK_INT < 31) return SPEAKER_ID
+        val audioManager = applicationContext
+            ?.getSystemService(android.content.Context.AUDIO_SERVICE) as? android.media.AudioManager
+            ?: return SPEAKER_ID
+        return when (audioManager.communicationDevice?.type) {
+            android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> BLUETOOTH_ID
+            android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET,
+            android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> HEADSET_ID
+            android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> EARPIECE_ID
+            else -> SPEAKER_ID
+        }
     }
 
     actual suspend fun selectScreenShareSource(deviceId: String) {
@@ -658,6 +722,12 @@ actual class ConferenceLiveKitManager actual constructor() {
     }
 
     companion object {
+        // Ids de salida de audio, compartidos por loadDevices/selectSpeaker.
+        const val SPEAKER_ID = "speaker"
+        const val EARPIECE_ID = "earpiece"
+        const val BLUETOOTH_ID = "bluetooth"
+        const val HEADSET_ID = "headset"
+
         private const val PLATFORM_ANNOUNCE_ATTEMPTS = 4
         private const val PLATFORM_ANNOUNCE_RETRY_INTERVAL_MS = 1500L
     }
