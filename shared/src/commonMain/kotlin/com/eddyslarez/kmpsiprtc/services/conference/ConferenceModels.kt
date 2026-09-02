@@ -71,6 +71,12 @@ data class LkMediaState(
     val microphoneEnabled: Boolean = false,
     val cameraEnabled: Boolean = false,
     val screenShareEnabled: Boolean = false,
+    /**
+     * Solo iOS: el track de broadcast ya esta publicado y la hoja del sistema esta abierta,
+     * pero aun no llega ni un frame porque el usuario no ha pulsado "Iniciar transmision".
+     * Android y Desktop nunca lo ponen a true: alli el permiso es sincrono.
+     */
+    val screenSharePending: Boolean = false,
 )
 
 /**
