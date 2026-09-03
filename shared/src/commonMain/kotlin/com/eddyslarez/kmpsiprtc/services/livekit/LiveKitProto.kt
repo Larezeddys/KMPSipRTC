@@ -315,6 +315,19 @@ object LiveKitProto {
                     val data = reader.readBytes()
                     return decodeLeave(data)
                 }
+                // field 9: mute — el servidor nos silencia (moderador). Reusa MuteTrackRequest.
+                9 -> {
+                    if (wireType != 2) { reader.skip(wireType); continue }
+                    val data = reader.readBytes()
+                    val (sid, muted) = decodeMuteTrackRequest(data)
+                    return LiveKitSignalMessage.RemoteMute(sid, muted)
+                }
+                // field 10: speakers_changed
+                10 -> {
+                    if (wireType != 2) { reader.skip(wireType); continue }
+                    val data = reader.readBytes()
+                    return LiveKitSignalMessage.SpeakersChanged(decodeSpeakersChanged(data))
+                }
                 // field 18: Pong (respuesta al Ping del cliente, protocol < 8)
                 18 -> {
                     if (wireType != 2) { reader.skip(wireType); continue }
@@ -653,12 +666,69 @@ object LiveKitProto {
     }
 
     /** Decodifica un livekit.TrackInfo. Campos: sid=1, type=2, name=3, source=9. */
+    /** livekit.MuteTrackRequest { sid = 1, muted = 2 }. Mismo mensaje que enviamos nosotros. */
+    private fun decodeMuteTrackRequest(data: ByteArray): Pair<String, Boolean> {
+        val reader = ProtoReader(data)
+        var sid = ""
+        var muted = false
+        while (reader.hasMore()) {
+            val tag = reader.readTag()
+            val fieldNumber = tag shr 3
+            val wireType = tag and 0x07
+            when (fieldNumber) {
+                1 -> if (wireType == 2) sid = reader.readString() else reader.skip(wireType)
+                2 -> if (wireType == 0) muted = reader.readVarint() != 0L else reader.skip(wireType)
+                else -> reader.skip(wireType)
+            }
+        }
+        return sid to muted
+    }
+
+    /** livekit.SpeakersChanged { repeated SpeakerInfo speakers = 1 }. */
+    private fun decodeSpeakersChanged(data: ByteArray): List<LiveKitSpeakerInfo> {
+        val reader = ProtoReader(data)
+        val speakers = mutableListOf<LiveKitSpeakerInfo>()
+        while (reader.hasMore()) {
+            val tag = reader.readTag()
+            val fieldNumber = tag shr 3
+            val wireType = tag and 0x07
+            when (fieldNumber) {
+                1 -> if (wireType == 2) speakers.add(decodeSpeakerInfo(reader.readBytes()))
+                     else reader.skip(wireType)
+                else -> reader.skip(wireType)
+            }
+        }
+        return speakers
+    }
+
+    /** livekit.SpeakerInfo { sid = 1, level = 2 (float), active = 3 }. */
+    private fun decodeSpeakerInfo(data: ByteArray): LiveKitSpeakerInfo {
+        val reader = ProtoReader(data)
+        var sid = ""
+        var level = 0f
+        var active = false
+        while (reader.hasMore()) {
+            val tag = reader.readTag()
+            val fieldNumber = tag shr 3
+            val wireType = tag and 0x07
+            when (fieldNumber) {
+                1 -> if (wireType == 2) sid = reader.readString() else reader.skip(wireType)
+                // float = fixed32, little endian.
+                2 -> if (wireType == 5) level = Float.fromBits(reader.readFixed32()) else reader.skip(wireType)
+                3 -> if (wireType == 0) active = reader.readVarint() != 0L else reader.skip(wireType)
+                else -> reader.skip(wireType)
+            }
+        }
+        return LiveKitSpeakerInfo(sid = sid, level = level, active = active)
+    }
+
     private fun decodeTrackInfo(data: ByteArray): LiveKitTrackInfo {
         val reader = ProtoReader(data)
         var sid = ""
         var type = 0
         var name = ""
         var source = 0
+        var muted = false
         while (reader.hasMore()) {
             val tag = reader.readTag()
             val fieldNumber = tag shr 3
@@ -667,11 +737,12 @@ object LiveKitProto {
                 1 -> if (wireType == 2) sid = reader.readString() else reader.skip(wireType)
                 2 -> if (wireType == 0) type = reader.readVarint().toInt() else reader.skip(wireType)
                 3 -> if (wireType == 2) name = reader.readString() else reader.skip(wireType)
+                4 -> if (wireType == 0) muted = reader.readVarint() != 0L else reader.skip(wireType)
                 9 -> if (wireType == 0) source = reader.readVarint().toInt() else reader.skip(wireType)
                 else -> reader.skip(wireType)
             }
         }
-        return LiveKitTrackInfo(sid = sid, type = type, name = name, source = source)
+        return LiveKitTrackInfo(sid = sid, type = type, name = name, source = source, muted = muted)
     }
 
     /** Decodifica una entrada de un map<string,string> de protobuf (key=1, value=2). */
@@ -786,6 +857,17 @@ object LiveKitProto {
         }
 
         fun readString(): String = readBytes().decodeToString()
+
+        /** 32 bits little-endian (wire type 5): lo usan float y fixed32. */
+        fun readFixed32(): Int {
+            if (pos + 4 > data.size) throw IllegalStateException("fixed32 fuera de rango")
+            val v = (data[pos].toInt() and 0xFF) or
+                    ((data[pos + 1].toInt() and 0xFF) shl 8) or
+                    ((data[pos + 2].toInt() and 0xFF) shl 16) or
+                    ((data[pos + 3].toInt() and 0xFF) shl 24)
+            pos += 4
+            return v
+        }
 
         fun skip(wireType: Int) {
             when (wireType) {

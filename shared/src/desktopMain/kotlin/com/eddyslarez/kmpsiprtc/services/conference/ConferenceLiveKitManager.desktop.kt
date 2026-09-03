@@ -18,6 +18,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlin.time.Clock
@@ -57,17 +59,36 @@ actual class ConferenceLiveKitManager actual constructor() {
     private var selectedCameraId: String? = null
     private var selectedMicrophoneId: String? = null
 
+    /**
+     * Serializa TODO lo que toca el mute del micro.
+     *
+     * Sin esto hay una carrera real, no teorica: onTrackPublished llega por la corrutina que lee
+     * el WebSocket (Dispatchers.Default) mientras setMicrophoneEnabled corre en el hilo de la
+     * interfaz, y ambos hacen leer-decidir-enviar-escribir sobre los mismos campos. Como se entra
+     * a la sala en mute (LkMediaState.microphoneEnabled arranca en false), la primera accion del
+     * usuario casi siempre es des-mutear, y justo cae en esa ventana: si el envio tardio gana,
+     * el SFU se queda con muted=true, la interfaz local muestra el micro abierto, y el guardia de
+     * redundancia impide corregirlo hasta pulsar el boton dos veces.
+     *
+     * El candado tiene que cubrir tambien el envio, no solo los campos: sendMuteTrack suspende, y
+     * si se suelta antes se vuelve a colar otra intencion en medio.
+     */
+    private val micMuteMutex = Mutex()
+
     /** cid que mandamos en el AddTrackRequest de audio; sirve para casar el TrackPublished. */
+    @Volatile
     private var localAudioCid: String? = null
 
     /** SID que asigna el SFU al track de audio local. Sin el no hay MuteTrackRequest posible. */
+    @Volatile
     private var localAudioTrackSid: String? = null
 
-    /** Mute pedido por el usuario ANTES de que el track estuviera publicado. */
-    private var pendingMicMuted: Boolean? = null
-
     /** Ultimo valor que el servidor conoce, para no repetir mensajes identicos. */
+    @Volatile
     private var serverKnownMicMuted: Boolean? = null
+
+    /** Sids de PARTICIPANTE que el SFU marca como hablando (livekit.SpeakerInfo). */
+    private val activeSpeakerSids = mutableSetOf<String>()
     private var selectedSpeakerId: String? = null
 
     // Reconexión automática ante caídas inesperadas de la señalización (ver
@@ -184,7 +205,8 @@ actual class ConferenceLiveKitManager actual constructor() {
                         name = info.name.ifEmpty { info.identity },
                         sid = info.sid,
                         isLocal = false,
-                        isAudioEnabled = true,
+                        isAudioEnabled = info.tracks.hasActive(LiveKitTrackSource.MICROPHONE),
+                        isVideoEnabled = info.tracks.hasActive(LiveKitTrackSource.CAMERA),
                         isScreenSharing = remoteScreenSharing,
                         isHandRaised = raisedHands.containsKey(info.identity),
                         handRaisedAt = raisedHands[info.identity],
@@ -240,35 +262,39 @@ actual class ConferenceLiveKitManager actual constructor() {
         // WebRTC, el RTP sigue fluyendo en silencio y el SFU no cambia el estado del track.
         // Android e iOS lo hacen por dentro del SDK oficial; con el cliente escrito a mano hay
         // que emitirlo explicitamente.
-        syncMicMuteToServer(muted = !enabled)
+        syncMicMuteToServer()
     }
 
+    /** Publica al SFU el estado de mute del micro. Ver [micMuteMutex]. */
+    private suspend fun syncMicMuteToServer() = micMuteMutex.withLock { sendMicMuteLocked() }
+
     /**
-     * Publica el estado de mute del micro al SFU.
+     * Requiere [micMuteMutex] tomado.
      *
-     * Si el track aun no esta publicado se deja pendiente: LiveKit resuelve el MuteTrackRequest
-     * por SID, y un SID inexistente se descarta en silencio. El pendiente se vacia en
-     * onTrackPublished.
+     * No recibe el valor por parametro a proposito: lo relee de [_mediaState] aqui dentro, que es
+     * la unica fuente de verdad. Pasarlo por parametro permitiria que una corrutina enviase una
+     * intencion ya caducada por encima de otra mas nueva.
      */
-    private suspend fun syncMicMuteToServer(muted: Boolean) {
+    private suspend fun sendMicMuteLocked() {
         val sid = localAudioTrackSid
         if (sid.isNullOrEmpty()) {
-            pendingMicMuted = muted
-            log.d(tag = TAG) { "Mute aplazado, el track de audio aun no esta publicado: $muted" }
+            // No se guarda como pendiente: al publicar el track se vuelve a entrar aqui y se
+            // lee el estado de entonces, que es el bueno. Un SID inexistente el SFU lo tira.
+            log.d(tag = TAG) { "Mute aplazado: el track de audio aun no esta publicado" }
             return
         }
+        val muted = !_mediaState.value.microphoneEnabled
         if (serverKnownMicMuted == muted) return
         try {
             signalingClient.sendMuteTrack(sid, muted)
             serverKnownMicMuted = muted
-            pendingMicMuted = null
             log.d(tag = TAG) { "MuteTrackRequest enviado: sid=$sid muted=$muted" }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            // serverKnownMicMuted no se toca: al no cuadrar con el estado local, el proximo
+            // cambio o la republicacion del track lo reintentan solos.
             log.w(tag = TAG) { "Error enviando MuteTrackRequest: ${e.message}" }
-            // Se reintenta en el proximo cambio o al republicar el track.
-            pendingMicMuted = muted
         }
     }
 
@@ -694,7 +720,8 @@ actual class ConferenceLiveKitManager actual constructor() {
                             name = info.name.ifEmpty { info.identity },
                             sid = info.sid,
                             isLocal = false,
-                            isAudioEnabled = true, // asumimos activo hasta tener track info
+                            isAudioEnabled = info.tracks.hasActive(LiveKitTrackSource.MICROPHONE),
+                            isVideoEnabled = info.tracks.hasActive(LiveKitTrackSource.CAMERA),
                             isScreenSharing = remoteScreenSharing,
                             isHandRaised = raisedHands.containsKey(info.identity),
                             handRaisedAt = raisedHands[info.identity],
@@ -714,14 +741,20 @@ actual class ConferenceLiveKitManager actual constructor() {
                 log.d(tag = TAG) { "Track publicado: cid=${published.cid} sid=${published.trackSid}" }
 
                 // El SID del audio local es el unico identificador que acepta MuteTrackRequest.
-                // El SFU devuelve el cid que mandamos, asi que sirve para casarlos.
-                if (localAudioTrackSid.isNullOrEmpty() && published.trackSid.isNotEmpty() &&
-                    (published.cid == localAudioCid || published.cid.isEmpty())
-                ) {
-                    localAudioTrackSid = published.trackSid
-                    val deseado = pendingMicMuted ?: !_mediaState.value.microphoneEnabled
-                    pendingMicMuted = null
-                    scope.launch { syncMicMuteToServer(deseado) }
+                // El SFU devuelve el cid que mandamos, asi que sirve para casarlos. La comparacion
+                // es estricta: por aqui pasan tambien la camara y la pantalla compartida, y
+                // aceptar un cid vacio dejaria que cualquiera de ellas se llevase el sid del audio.
+                val esAudioLocal = published.trackSid.isNotEmpty() &&
+                        localAudioCid != null && published.cid == localAudioCid
+                if (esAudioLocal) {
+                    scope.launch {
+                        micMuteMutex.withLock {
+                            if (localAudioTrackSid.isNullOrEmpty()) {
+                                localAudioTrackSid = published.trackSid
+                                sendMicMuteLocked()
+                            }
+                        }
+                    }
                 }
                 // Fallback: el callback de cambio de estado del publisher PC no siempre
                 // se dispara en webrtc-java/JVM. Cuando el SFU confirma la publicación
@@ -734,6 +767,36 @@ actual class ConferenceLiveKitManager actual constructor() {
                     requestHandStateSync()
                     announcePlatformRepeatedly()
                 }
+            }
+
+            override fun onRemoteMute(trackSid: String, muted: Boolean) {
+                // Un moderador nos silencia. Hay que obedecer y reflejarlo, pero SIN contestar
+                // con otro MuteTrackRequest: se actualiza serverKnownMicMuted a lo que el
+                // servidor ya sabe, que ademas evita el rebote.
+                if (trackSid.isEmpty() || trackSid != localAudioTrackSid) {
+                    log.d(tag = TAG) { "Mute del servidor para un track que no es el nuestro: $trackSid" }
+                    return
+                }
+                log.d(tag = TAG) { "El servidor nos silencia: muted=$muted" }
+                scope.launch {
+                    micMuteMutex.withLock {
+                        serverKnownMicMuted = muted
+                        publisherWebRtc?.setMuted(muted)
+                        _mediaState.value = _mediaState.value.copy(microphoneEnabled = !muted)
+                    }
+                    rebuildParticipantList()
+                }
+            }
+
+            override fun onSpeakersChanged(speakers: List<LiveKitSpeakerInfo>) {
+                // Es un delta: el SFU manda solo los que cambiaron, con su flag active.
+                var cambio = false
+                speakers.forEach { s ->
+                    if (s.sid.isEmpty()) return@forEach
+                    cambio = if (s.active) activeSpeakerSids.add(s.sid)
+                             else activeSpeakerSids.remove(s.sid)
+                }
+                if (cambio) rebuildParticipantList()
             }
 
             override fun onLeave(canReconnect: Boolean, reason: Int) {
@@ -923,21 +986,24 @@ actual class ConferenceLiveKitManager actual constructor() {
         })
 
         // Solicitar publicar audio
-        val cid = "audio-${currentTimeMs()}"
-        localAudioCid = cid
-        localAudioTrackSid = null
-        pendingMicMuted = null
-        val initialMuted = !_mediaState.value.microphoneEnabled
-        signalingClient.sendAddTrack(
-            cid = cid,
-            name = "microphone",
-            trackType = LiveKitTrackType.AUDIO.value,
-            source = LiveKitTrackSource.MICROPHONE.value,
-            muted = initialMuted,
-        )
-        // Despues de que sendAddTrack retorne: si lanzara, el guardia de redundancia de
-        // syncMicMuteToServer suprimiria el primer mute de verdad.
-        serverKnownMicMuted = initialMuted
+        // Todo el bloque bajo el candado: sendAddTrack suspende, y entre el calculo de
+        // initialMuted y la escritura de serverKnownMicMuted cabe un setMicrophoneEnabled.
+        micMuteMutex.withLock {
+            val cid = "audio-${currentTimeMs()}"
+            localAudioCid = cid
+            localAudioTrackSid = null
+            val initialMuted = !_mediaState.value.microphoneEnabled
+            signalingClient.sendAddTrack(
+                cid = cid,
+                name = "microphone",
+                trackType = LiveKitTrackType.AUDIO.value,
+                source = LiveKitTrackSource.MICROPHONE.value,
+                muted = initialMuted,
+            )
+            // Solo si sendAddTrack no lanzo: si no, el guardia de redundancia suprimiria el
+            // primer mute de verdad.
+            serverKnownMicMuted = initialMuted
+        }
 
         val offer = pub.createOffer()
         signalingClient.sendOffer(offer)
@@ -966,6 +1032,16 @@ actual class ConferenceLiveKitManager actual constructor() {
         log.d(tag = TAG) { "Subscriber answer enviado" }
     }
 
+    /**
+     * Si el participante tiene publicado un track de esa fuente y NO esta silenciado.
+     *
+     * Es asi como se entera un cliente del mute ajeno: el SFU marca TrackInfo.muted y sigue
+     * reenviando el RTP. Antes esto era un `true` fijo y en Desktop nadie aparecia nunca mudo.
+     * Sin track publicado devuelve false, igual que hace el SDK oficial de Android.
+     */
+    private fun List<LiveKitTrackInfo>.hasActive(source: LiveKitTrackSource): Boolean =
+        any { it.source == source.value && !it.muted }
+
     // ==================== PARTICIPANT MANAGEMENT ====================
 
     private fun rebuildParticipantList() {
@@ -978,6 +1054,7 @@ actual class ConferenceLiveKitManager actual constructor() {
                 name = localName.ifEmpty { localIdentity },
                 sid = joinResponse?.participantSid ?: "",
                 isLocal = true,
+                isSpeaking = (joinResponse?.participantSid ?: "") in activeSpeakerSids,
                 isAudioEnabled = _mediaState.value.microphoneEnabled,
                 isVideoEnabled = _mediaState.value.cameraEnabled,
                 isScreenSharing = _mediaState.value.screenShareEnabled,
@@ -991,6 +1068,7 @@ actual class ConferenceLiveKitManager actual constructor() {
         list.addAll(
             remoteParticipants.values.map { participant ->
                 participant.copy(
+                    isSpeaking = participant.sid.isNotEmpty() && participant.sid in activeSpeakerSids,
                     isHandRaised = raisedHands.containsKey(participant.identity),
                     handRaisedAt = raisedHands[participant.identity],
                     platform = platformByIdentity[participant.identity],
@@ -1243,8 +1321,8 @@ actual class ConferenceLiveKitManager actual constructor() {
         // conservar el viejo mandaria mutes a un track que ya no existe.
         localAudioCid = null
         localAudioTrackSid = null
-        pendingMicMuted = null
         serverKnownMicMuted = null
+        activeSpeakerSids.clear()
 
         publisherWebRtc?.closePeerConnection()
         publisherWebRtc?.dispose()

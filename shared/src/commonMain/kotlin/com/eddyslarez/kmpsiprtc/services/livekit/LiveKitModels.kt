@@ -59,6 +59,24 @@ data class LiveKitTrackInfo(
     val type: Int = 0,      // livekit.TrackType: 0=AUDIO, 1=VIDEO, 2=DATA
     val name: String = "",
     val source: Int = 0,    // livekit.TrackSource: 1=CAMERA, 2=MIC, 3=SCREEN_SHARE, 4=SCREEN_SHARE_AUDIO
+    /**
+     * livekit.TrackInfo.muted (campo 4). Es COMO SE ENTERA UN CLIENTE de que otro participante
+     * esta silenciado: el SFU no deja de reenviar el RTP, solo marca el track. Sin leer esto,
+     * todos los remotos parecen tener el micro abierto siempre.
+     */
+    val muted: Boolean = false,
+)
+
+/**
+ * livekit.SpeakerInfo. Ojo: [sid] es el sid del PARTICIPANTE, no el del track.
+ *
+ * @param level volumen normalizado (0..1) que calcula el SFU.
+ * @param active si sigue considerandose hablando; el servidor manda solo los que cambian.
+ */
+data class LiveKitSpeakerInfo(
+    val sid: String = "",
+    val level: Float = 0f,
+    val active: Boolean = false,
 )
 
 /**
@@ -137,6 +155,15 @@ sealed class LiveKitSignalMessage {
     data class ParticipantUpdated(val update: LiveKitParticipantUpdate) : LiveKitSignalMessage()
     data class TrackPublished(val published: LiveKitTrackPublished) : LiveKitSignalMessage()
     data class Leave(val canReconnect: Boolean, val reason: Int) : LiveKitSignalMessage()
+
+    /**
+     * El SERVIDOR nos silencia (un moderador, o una politica de la sala). Hay que obedecerlo y
+     * reflejarlo en la interfaz; NO se responde con otro MuteTrackRequest o se hace un bucle.
+     */
+    data class RemoteMute(val trackSid: String, val muted: Boolean) : LiveKitSignalMessage()
+
+    /** Cambios en quien esta hablando. Es un delta: solo vienen los que cambiaron. */
+    data class SpeakersChanged(val speakers: List<LiveKitSpeakerInfo>) : LiveKitSignalMessage()
     object Pong : LiveKitSignalMessage()
     data class Unknown(val fieldNumber: Int) : LiveKitSignalMessage()
 }

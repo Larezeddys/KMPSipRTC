@@ -352,6 +352,13 @@ class LiveKitSignalingClient {
                 log.d(tag = TAG) { "Leave recibido: canReconnect=${message.canReconnect}" }
                 listener?.onLeave(message.canReconnect, message.reason)
             }
+            is LiveKitSignalMessage.RemoteMute -> {
+                log.d(tag = TAG) { "Mute del servidor: sid=${message.trackSid} muted=${message.muted}" }
+                listener?.onRemoteMute(message.trackSid, message.muted)
+            }
+            is LiveKitSignalMessage.SpeakersChanged -> {
+                listener?.onSpeakersChanged(message.speakers)
+            }
             is LiveKitSignalMessage.Pong -> {
                 // Calculamos RTT para futuros pings — útil para QoS pero también
                 // confirma que el server respondió a nuestro keepalive.
@@ -380,4 +387,13 @@ interface LiveKitSignalingListener {
     fun onLeave(canReconnect: Boolean, reason: Int)
     fun onDisconnected()
     fun onError(error: Exception)
+
+    /**
+     * El servidor ha silenciado (o reactivado) un track nuestro. Hay implementacion por defecto
+     * para no romper a quien ya implementa esta interfaz y no le interesa.
+     */
+    fun onRemoteMute(trackSid: String, muted: Boolean) {}
+
+    /** Delta de quien esta hablando. Solo llegan los participantes que cambiaron. */
+    fun onSpeakersChanged(speakers: List<LiveKitSpeakerInfo>) {}
 }
