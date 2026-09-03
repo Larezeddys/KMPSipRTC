@@ -199,13 +199,23 @@ class LiveKitSignalingClient {
      * @param cid Client ID local del track
      * @param name Nombre del track
      */
+    /** Publica al SFU el estado de mute de un track propio. Sin esto nadie ve tu silencio. */
+    suspend fun sendMuteTrack(trackSid: String, muted: Boolean) {
+        if (trackSid.isBlank()) {
+            log.w(tag = TAG) { "sendMuteTrack ignorado: trackSid vacio (track aun sin publicar)" }
+            return
+        }
+        sendBinary(LiveKitProto.encodeMuteTrack(trackSid, muted))
+    }
+
     suspend fun sendAddTrack(
         cid: String,
         name: String = "microphone",
         trackType: Int = LiveKitTrackType.AUDIO.value,
-        source: Int = LiveKitTrackSource.MICROPHONE.value
+        source: Int = LiveKitTrackSource.MICROPHONE.value,
+        muted: Boolean = false,
     ) {
-        sendBinary(LiveKitProto.encodeAddTrack(cid, name, trackType, source))
+        sendBinary(LiveKitProto.encodeAddTrack(cid, name, trackType, source, muted))
     }
 
     /**

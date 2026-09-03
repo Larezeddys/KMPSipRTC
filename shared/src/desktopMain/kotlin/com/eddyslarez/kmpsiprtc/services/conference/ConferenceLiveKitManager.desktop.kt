@@ -56,6 +56,18 @@ actual class ConferenceLiveKitManager actual constructor() {
     private var selectedScreenShareSourceId: String? = null
     private var selectedCameraId: String? = null
     private var selectedMicrophoneId: String? = null
+
+    /** cid que mandamos en el AddTrackRequest de audio; sirve para casar el TrackPublished. */
+    private var localAudioCid: String? = null
+
+    /** SID que asigna el SFU al track de audio local. Sin el no hay MuteTrackRequest posible. */
+    private var localAudioTrackSid: String? = null
+
+    /** Mute pedido por el usuario ANTES de que el track estuviera publicado. */
+    private var pendingMicMuted: Boolean? = null
+
+    /** Ultimo valor que el servidor conoce, para no repetir mensajes identicos. */
+    private var serverKnownMicMuted: Boolean? = null
     private var selectedSpeakerId: String? = null
 
     // Reconexión automática ante caídas inesperadas de la señalización (ver
@@ -221,9 +233,43 @@ actual class ConferenceLiveKitManager actual constructor() {
     }
 
     actual suspend fun setMicrophoneEnabled(enabled: Boolean) {
-        publisherWebRtc?.setMuted(!enabled)  // muted = !enabled
+        publisherWebRtc?.setMuted(!enabled)  // corta el audio local
         _mediaState.value = _mediaState.value.copy(microphoneEnabled = enabled)
         rebuildParticipantList()
+        // Sin esto el resto de la sala no se entera nunca: setMuted es una operacion local de
+        // WebRTC, el RTP sigue fluyendo en silencio y el SFU no cambia el estado del track.
+        // Android e iOS lo hacen por dentro del SDK oficial; con el cliente escrito a mano hay
+        // que emitirlo explicitamente.
+        syncMicMuteToServer(muted = !enabled)
+    }
+
+    /**
+     * Publica el estado de mute del micro al SFU.
+     *
+     * Si el track aun no esta publicado se deja pendiente: LiveKit resuelve el MuteTrackRequest
+     * por SID, y un SID inexistente se descarta en silencio. El pendiente se vacia en
+     * onTrackPublished.
+     */
+    private suspend fun syncMicMuteToServer(muted: Boolean) {
+        val sid = localAudioTrackSid
+        if (sid.isNullOrEmpty()) {
+            pendingMicMuted = muted
+            log.d(tag = TAG) { "Mute aplazado, el track de audio aun no esta publicado: $muted" }
+            return
+        }
+        if (serverKnownMicMuted == muted) return
+        try {
+            signalingClient.sendMuteTrack(sid, muted)
+            serverKnownMicMuted = muted
+            pendingMicMuted = null
+            log.d(tag = TAG) { "MuteTrackRequest enviado: sid=$sid muted=$muted" }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log.w(tag = TAG) { "Error enviando MuteTrackRequest: ${e.message}" }
+            // Se reintenta en el proximo cambio o al republicar el track.
+            pendingMicMuted = muted
+        }
     }
 
     actual suspend fun setCameraEnabled(enabled: Boolean) {
@@ -665,7 +711,18 @@ actual class ConferenceLiveKitManager actual constructor() {
             }
 
             override fun onTrackPublished(published: LiveKitTrackPublished) {
-                log.d(tag = TAG) { "Track publicado: ${published.trackSid}" }
+                log.d(tag = TAG) { "Track publicado: cid=${published.cid} sid=${published.trackSid}" }
+
+                // El SID del audio local es el unico identificador que acepta MuteTrackRequest.
+                // El SFU devuelve el cid que mandamos, asi que sirve para casarlos.
+                if (localAudioTrackSid.isNullOrEmpty() && published.trackSid.isNotEmpty() &&
+                    (published.cid == localAudioCid || published.cid.isEmpty())
+                ) {
+                    localAudioTrackSid = published.trackSid
+                    val deseado = pendingMicMuted ?: !_mediaState.value.microphoneEnabled
+                    pendingMicMuted = null
+                    scope.launch { syncMicMuteToServer(deseado) }
+                }
                 // Fallback: el callback de cambio de estado del publisher PC no siempre
                 // se dispara en webrtc-java/JVM. Cuando el SFU confirma la publicación
                 // del primer track significa que el handshake completo (SDP + ICE +
@@ -822,7 +879,10 @@ actual class ConferenceLiveKitManager actual constructor() {
         // ICE servers también para publisher — DEBE estar antes de createOffer.
         if (iceServersTriples.isNotEmpty()) pub.setIceServers(iceServersTriples)
         pub.setAudioEnabled(true)
-        pub.setMuted(true)
+        // No un `true` literal: cleanup() no resetea _mediaState y la reconexion automatica
+        // vuelve a pasar por aqui. Con el literal se anunciaba muted=false y acto seguido se
+        // deshabilitaba el track, o sea entrar mudo y aparecer con el micro abierto.
+        pub.setMuted(!_mediaState.value.microphoneEnabled)
 
         // Crear data channel ANTES de createOffer para que se incluya en el SDP
         pub.createPublisherDataChannel()
@@ -864,12 +924,20 @@ actual class ConferenceLiveKitManager actual constructor() {
 
         // Solicitar publicar audio
         val cid = "audio-${currentTimeMs()}"
+        localAudioCid = cid
+        localAudioTrackSid = null
+        pendingMicMuted = null
+        val initialMuted = !_mediaState.value.microphoneEnabled
         signalingClient.sendAddTrack(
             cid = cid,
             name = "microphone",
             trackType = LiveKitTrackType.AUDIO.value,
-            source = LiveKitTrackSource.MICROPHONE.value
+            source = LiveKitTrackSource.MICROPHONE.value,
+            muted = initialMuted,
         )
+        // Despues de que sendAddTrack retorne: si lanzara, el guardia de redundancia de
+        // syncMicMuteToServer suprimiria el primer mute de verdad.
+        serverKnownMicMuted = initialMuted
 
         val offer = pub.createOffer()
         signalingClient.sendOffer(offer)
@@ -1171,6 +1239,13 @@ actual class ConferenceLiveKitManager actual constructor() {
     // ==================== CLEANUP ====================
 
     private fun cleanup() {
+        // Tras reconectar, setupPublisher republica el audio y el SFU asigna un SID nuevo:
+        // conservar el viejo mandaria mutes a un track que ya no existe.
+        localAudioCid = null
+        localAudioTrackSid = null
+        pendingMicMuted = null
+        serverKnownMicMuted = null
+
         publisherWebRtc?.closePeerConnection()
         publisherWebRtc?.dispose()
         publisherWebRtc = null

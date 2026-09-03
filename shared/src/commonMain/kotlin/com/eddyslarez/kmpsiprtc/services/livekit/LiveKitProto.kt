@@ -46,11 +46,37 @@ object LiveKitProto {
      * @param trackType 1 = AUDIO, 2 = VIDEO
      * @param source 2 = MICROPHONE, 1 = CAMERA
      */
+    /**
+     * SignalRequest.mute (campo 5) -> livekit.MuteTrackRequest { sid = 1, muted = 2 }.
+     *
+     * Es el UNICO canal por el que LiveKit propaga el mute al resto de la sala.
+     * `localAudioTrack.setEnabled(false)` es 100% local: el RTP sigue fluyendo en silencio y el
+     * SFU nunca marca el track como silenciado, asi que los demas te siguen viendo con el micro
+     * abierto. Android e iOS lo mandan por dentro del SDK oficial; aqui hay que emitirlo a mano.
+     *
+     * Numeros de campo verificados contra livekit_rtc.pb.swift del pod oficial.
+     *
+     * @param trackSid SID que asigna el SERVIDOR (TrackPublishedResponse.track.sid), nunca el
+     *   cid local: un sid desconocido el SFU lo descarta en silencio.
+     */
+    fun encodeMuteTrack(trackSid: String, muted: Boolean): ByteArray {
+        val mute = buildByteArray {
+            writeTag(1, 2)
+            writeString(trackSid)
+            // proto3 omitiria el `false` por defecto; se escribe explicito para que una captura
+            // del wire sea legible. El servidor lo acepta igual.
+            writeTag(2, 0)
+            writeVarint(if (muted) 1L else 0L)
+        }
+        return encodeSignalRequest(fieldNumber = 5, value = mute)
+    }
+
     fun encodeAddTrack(
         cid: String,
         name: String = "microphone",
         trackType: Int = LiveKitTrackType.AUDIO.value,
-        source: Int = LiveKitTrackSource.MICROPHONE.value
+        source: Int = LiveKitTrackSource.MICROPHONE.value,
+        muted: Boolean = false,
     ): ByteArray {
         val addTrack = buildByteArray {
             // field 1: cid (string)
@@ -67,6 +93,13 @@ object LiveKitProto {
             // dejando source=UNKNOWN(0). El SDK Android filtra el screen share por
             // source==SCREEN_SHARE y por eso no renderizaba el track (aunque web sí,
             // porque web pinta cualquier video). El campo correcto es 8.
+            // field 6: muted. Publicar YA silenciado cierra la ventana entre el AddTrack y el
+            // primer MuteTrackRequest, en la que el resto nos veria con el micro abierto sin
+            // oirnos. Con muted=false no se escribe nada y los bytes salen identicos a antes.
+            if (muted) {
+                writeTag(6, 0)
+                writeVarint(1L)
+            }
             writeTag(8, 0)
             writeVarint(source.toLong())
         }
