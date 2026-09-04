@@ -8,6 +8,7 @@ import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.services.screencapture.DesktopScreenCaptureSupport
 import com.eddyslarez.kmpsiprtc.services.screencapture.PortalScreenCastSession
 import com.eddyslarez.kmpsiprtc.services.screencapture.ScreenShareUnavailableException
+import com.eddyslarez.kmpsiprtc.services.webrtc.LocalTrackIds
 import com.eddyslarez.kmpsiprtc.services.webrtc.PORTAL_SOURCE_ID
 import com.eddyslarez.kmpsiprtc.services.livekit.*
 import com.eddyslarez.kmpsiprtc.services.webrtc.DesktopWebRtcManager
@@ -326,7 +327,8 @@ actual class ConferenceLiveKitManager actual constructor() {
             selectedCameraId = targetDevice?.name ?: selectedCameraId
 
             // Notificar a LiveKit que vamos a publicar un video track
-            val cid = "video-${currentTimeMs()}"
+            // El cid TIENE que ser el id real del track del SDP: ver LocalTrackIds.
+            val cid = LocalTrackIds.VIDEO
             signalingClient.sendAddTrack(
                 cid = cid,
                 name = "camera",
@@ -405,7 +407,8 @@ actual class ConferenceLiveKitManager actual constructor() {
                 )
             }
 
-            val cid = "screen-${currentTimeMs()}"
+            // El cid TIENE que ser el id real del track del SDP: ver LocalTrackIds.
+            val cid = LocalTrackIds.SCREEN
             signalingClient.sendAddTrack(
                 cid = cid,
                 name = "screen",
@@ -989,7 +992,11 @@ actual class ConferenceLiveKitManager actual constructor() {
         // Todo el bloque bajo el candado: sendAddTrack suspende, y entre el calculo de
         // initialMuted y la escritura de serverKnownMicMuted cabe un setMicrophoneEnabled.
         micMuteMutex.withLock {
-            val cid = "audio-${currentTimeMs()}"
+            // El cid TIENE que ser el id real del track del SDP, no uno inventado: LiveKit
+            // correlaciona el AddTrackRequest con el track del SDP por ese identificador. Con un
+            // cid inventado el SFU se quedaba con un track pendiente sin medios y el sid que nos
+            // devolvia no correspondia al RTP real, asi que el mute no lo veia nadie.
+            val cid = LocalTrackIds.AUDIO
             localAudioCid = cid
             localAudioTrackSid = null
             val initialMuted = !_mediaState.value.microphoneEnabled

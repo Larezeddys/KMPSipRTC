@@ -31,6 +31,22 @@ import kotlin.coroutines.suspendCoroutine
 /** Id sintético de la fuente "elegir con el selector del sistema" (Wayland). */
 const val PORTAL_SOURCE_ID = "portal"
 
+/**
+ * Identificadores de los MediaStreamTrack locales.
+ *
+ * **No son un detalle interno.** LiveKit correlaciona el `AddTrackRequest.cid` con el id del track
+ * que aparece en el SDP; el SDK oficial manda literalmente `track.rtcTrack.id()`. Si no coinciden,
+ * el SFU deja el AddTrackRequest como un track "pendiente" al que nunca se le asocian medios, y el
+ * RTP real acaba en otro track distinto: por eso un MuteTrackRequest sobre ese sid no cambiaba nada
+ * para el resto de la sala.
+ */
+object LocalTrackIds {
+    const val AUDIO = "audio0"
+    const val VIDEO = "video0"
+    const val SCREEN = "screen0"
+    const val INJECTION = "injection0"
+}
+
 class DesktopPeerConnectionController(
     private val onIceCandidate: (String, String, Int) -> Unit,
     private val onConnectionStateChange: (WebRtcConnectionState) -> Unit,
@@ -305,7 +321,7 @@ class DesktopPeerConnectionController(
             }
 
             val audioSource = factory.createAudioSource(audioOptions)
-            localAudioTrack = factory.createAudioTrack("audio0", audioSource)
+            localAudioTrack = factory.createAudioTrack(LocalTrackIds.AUDIO, audioSource)
 
             val sender = pc.addTrack(localAudioTrack, listOf("stream0"))
             audioSender = sender  // Guardar referencia al sender para replaceTrack()
@@ -374,7 +390,7 @@ class DesktopPeerConnectionController(
             customAudioSource = CustomAudioSource()
 
             // Crear un nuevo AudioTrack basado en el CustomAudioSource
-            injectionAudioTrack = factory.createAudioTrack("injection0", customAudioSource)
+            injectionAudioTrack = factory.createAudioTrack(LocalTrackIds.INJECTION, customAudioSource)
             injectionAudioTrack?.setEnabled(true)
 
             // Reemplazar el track del mic real con el de inyección en el sender RTP
@@ -961,7 +977,7 @@ class DesktopPeerConnectionController(
             source.setVideoCaptureCapability(VideoCaptureCapability(640, 480, 30))
             videoDeviceSource = source
 
-            val videoTrack = factory.createVideoTrack("video0", source)
+            val videoTrack = factory.createVideoTrack(LocalTrackIds.VIDEO, source)
             localVideoTrack = videoTrack
 
             val sender = pc.addTrack(videoTrack, listOf("stream0"))
@@ -1052,7 +1068,7 @@ class DesktopPeerConnectionController(
             }
             screenVideoSource = source
 
-            val track = factory.createVideoTrack("screen0", source)
+            val track = factory.createVideoTrack(LocalTrackIds.SCREEN, source)
             localScreenTrack = track
             screenSender = pc.addTrack(track, listOf("stream0"))
 
@@ -1100,7 +1116,7 @@ class DesktopPeerConnectionController(
             capture = PipeWireVideoCapture.start(session.nodeId, source)
             pipeWireCapture = capture
 
-            val track = factory.createVideoTrack("screen0", source)
+            val track = factory.createVideoTrack(LocalTrackIds.SCREEN, source)
             localScreenTrack = track
             screenSender = pc.addTrack(track, listOf("stream0"))
 
