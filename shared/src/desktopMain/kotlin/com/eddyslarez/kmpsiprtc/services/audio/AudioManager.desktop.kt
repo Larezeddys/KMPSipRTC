@@ -33,6 +33,9 @@ class DesktopAudioManagerImpl : AudioManager {
     /** Ultima peticion de vibracion, para poder reiniciar el tono conservandola. */
     @Volatile private var lastSyncVibration = true
 
+    /** Fichero que esta sonando ahora mismo, para no reiniciarlo si piden el mismo. */
+    @Volatile private var pathEnCurso: String? = null
+
     @Volatile private var isIncomingRingtonePlaying = false
     @Volatile private var isOutgoingRingtonePlaying = false
     @Volatile private var shouldStopIncoming = false
@@ -223,14 +226,22 @@ class DesktopAudioManagerImpl : AudioManager {
             return
         }
 
-        // Antes habia aqui un `if (isIncomingRingtonePlaying) return`, y era parte del problema:
-        // hacia imposible cambiar de tono con la llamada ya sonando. Ahora se para lo que hubiera
-        // y se arranca de nuevo, que es idempotente si el tono es el mismo.
+        // Idempotente si YA esta sonando este mismo fichero. La condicion original era
+        // `if (isIncomingRingtonePlaying) return`, sin mirar el path, y hacia imposible cambiar de
+        // tono con la llamada sonando —que es justo el caso del tono por cuenta—. Pero quitarla
+        // del todo tampoco vale: la app llama a stop+play despues de fijar el tono, asi que cada
+        // llamada entrante cortaba el audio a media reproduccion y volvia a empezar con un clic.
+        if (isIncomingRingtonePlaying && pathEnCurso == path) {
+            println("AudioManager: ringtone entrante ya sonando con $path, no se reinicia")
+            return
+        }
+
         stopOutgoingRingtone()
         stopRingtone()
 
         val generacion = incomingGeneration.incrementAndGet()
         lastSyncVibration = syncVibration
+        pathEnCurso = path
         isIncomingRingtonePlaying = true
         shouldStopIncoming = false
 
@@ -253,10 +264,12 @@ class DesktopAudioManagerImpl : AudioManager {
                     loopCount++
                     println("AudioManager: Ringtone entrante iteración: $loopCount")
 
+                    // Se relee en cada vuelta: si el tono cambia entre repeticiones, la
+                    // siguiente ya suena con el nuevo.
+                    val pathVuelta = incomingRingtonePath ?: path
+                    pathEnCurso = pathVuelta
                     val played = playAudioStreaming(
-                        // Se relee en cada vuelta: si el tono cambia entre repeticiones, la
-                        // siguiente ya suena con el nuevo.
-                        incomingRingtonePath ?: path,
+                        pathVuelta,
                         shouldStop = { !vigente() },
                         lineRef = { if (vigente()) activeIncomingLine = it }
                     )
@@ -281,6 +294,7 @@ class DesktopAudioManagerImpl : AudioManager {
                 if (incomingGeneration.get() == generacion) {
                     isIncomingRingtonePlaying = false
                     shouldStopIncoming = false
+                    pathEnCurso = null
                     stopVibration()
                 }
             }
@@ -343,6 +357,7 @@ class DesktopAudioManagerImpl : AudioManager {
         incomingGeneration.incrementAndGet()
         shouldStopIncoming = true
         isIncomingRingtonePlaying = false
+        pathEnCurso = null
         stopVibration()
 
         try {
