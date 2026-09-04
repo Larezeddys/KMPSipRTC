@@ -322,6 +322,11 @@ class DesktopPeerConnectionController(
 
             val audioSource = factory.createAudioSource(audioOptions)
             localAudioTrack = factory.createAudioTrack(LocalTrackIds.AUDIO, audioSource)
+            // Un MediaStreamTrack nace HABILITADO. Si ya se pidio silencio antes de que existiera
+            // -que es lo normal: se entra a la conferencia en mute y el PeerConnection no se crea
+            // hasta el data channel- ese setMuted solo pudo guardar el flag, y sin esta linea el
+            // micro quedaba fisicamente abierto mientras la interfaz decia lo contrario.
+            localAudioTrack?.setEnabled(!isMuted)
 
             val sender = pc.addTrack(localAudioTrack, listOf("stream0"))
             audioSender = sender  // Guardar referencia al sender para replaceTrack()
@@ -752,6 +757,12 @@ class DesktopPeerConnectionController(
 
     // ==================== AUDIO CONTROL ====================
 
+    /**
+     * Habilita o corta el track de audio local **sin tocar** el estado de mute del usuario.
+     *
+     * No usar para el mute: para eso esta [setMuted], que ademas recuerda la intencion para cuando
+     * el track se recree. Esto es para el pipeline de traduccion en vivo.
+     */
     fun setAudioEnabled(enabled: Boolean) {
         localAudioTrack?.setEnabled(enabled)
     }

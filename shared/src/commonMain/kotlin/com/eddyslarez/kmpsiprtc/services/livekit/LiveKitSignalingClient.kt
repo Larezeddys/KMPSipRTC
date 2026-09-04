@@ -199,13 +199,17 @@ class LiveKitSignalingClient {
      * @param cid Client ID local del track
      * @param name Nombre del track
      */
-    /** Publica al SFU el estado de mute de un track propio. Sin esto nadie ve tu silencio. */
-    suspend fun sendMuteTrack(trackSid: String, muted: Boolean) {
+    /**
+     * Publica al SFU el estado de mute de un track propio. Sin esto nadie ve tu silencio.
+     *
+     * @return true solo si el mensaje llego a salir por el socket.
+     */
+    suspend fun sendMuteTrack(trackSid: String, muted: Boolean): Boolean {
         if (trackSid.isBlank()) {
             log.w(tag = TAG) { "sendMuteTrack ignorado: trackSid vacio (track aun sin publicar)" }
-            return
+            return false
         }
-        sendBinary(LiveKitProto.encodeMuteTrack(trackSid, muted))
+        return sendBinary(LiveKitProto.encodeMuteTrack(trackSid, muted))
     }
 
     suspend fun sendAddTrack(
@@ -304,14 +308,22 @@ class LiveKitSignalingClient {
     @OptIn(ExperimentalTime::class)
     private fun currentTimeMs(): Long = Clock.System.now().toEpochMilliseconds()
 
-    private suspend fun sendBinary(data: ByteArray) {
+    /**
+     * @return false si no habia sesion y el mensaje se descarto.
+     *
+     * Devolver un booleano en vez de tragarselo en silencio importa para el mute: quien lo envia
+     * apunta lo que el servidor "ya sabe" para no repetir mensajes, y si daba por enviado algo que
+     * se perdio en una reconexion, el guardia de deduplicacion bloqueaba ese valor para siempre.
+     */
+    private suspend fun sendBinary(data: ByteArray): Boolean {
         val session = wsSession
         if (session == null) {
             log.w(tag = TAG) { "No hay sesion WebSocket activa para enviar" }
-            return
+            return false
         }
         try {
             session.send(Frame.Binary(true, data))
+            return true
         } catch (e: Exception) {
             log.e(tag = TAG) { "Error enviando frame binario: ${e.message}" }
             throw e

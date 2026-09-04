@@ -287,9 +287,14 @@ actual class ConferenceLiveKitManager actual constructor() {
         val muted = !_mediaState.value.microphoneEnabled
         if (serverKnownMicMuted == muted) return
         try {
-            signalingClient.sendMuteTrack(sid, muted)
-            serverKnownMicMuted = muted
-            log.d(tag = TAG) { "MuteTrackRequest enviado: sid=$sid muted=$muted" }
+            if (signalingClient.sendMuteTrack(sid, muted)) {
+                serverKnownMicMuted = muted
+                log.d(tag = TAG) { "MuteTrackRequest enviado: sid=$sid muted=$muted" }
+            } else {
+                // No salio (reconectando). No se apunta: si se apuntara, el guardia de
+                // deduplicacion daria este valor por sabido y no se reintentaria nunca.
+                log.w(tag = TAG) { "MuteTrackRequest NO enviado (sin socket): sid=$sid muted=$muted" }
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -1008,8 +1013,10 @@ actual class ConferenceLiveKitManager actual constructor() {
                 muted = initialMuted,
             )
             // Solo si sendAddTrack no lanzo: si no, el guardia de redundancia suprimiria el
-            // primer mute de verdad.
-            serverKnownMicMuted = initialMuted
+            // primer mute de verdad. Se deja en null a proposito cuando no hay confirmacion: el
+            // servidor todavia no ha dicho nada del track, asi que cualquier suposicion aqui
+            // podria suprimir el primer mute real del usuario.
+            serverKnownMicMuted = null
         }
 
         val offer = pub.createOffer()
