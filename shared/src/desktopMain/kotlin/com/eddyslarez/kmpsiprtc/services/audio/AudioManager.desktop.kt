@@ -13,8 +13,25 @@ class DesktopAudioManagerImpl : AudioManager {
     private var vibrationJob: Job? = null
     private val audioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    private var incomingRingtonePath: String? = null
-    private var outgoingRingtonePath: String? = null
+    @Volatile private var incomingRingtonePath: String? = null
+    @Volatile private var outgoingRingtonePath: String? = null
+
+    /**
+     * Numero de reproduccion del tono de entrada.
+     *
+     * Cada vez que se arranca o se para el tono, sube. Cada corrutina se queda con el suyo y solo
+     * actua mientras siga siendo el vigente.
+     *
+     * Sin esto, cambiar de tono con la llamada ya sonando —que es justo lo que pasa con el tono
+     * por cuenta: la libreria arranca con el global y la app lo sustituye enseguida— era una
+     * carrera: la corrutina vieja, ya cancelada, ejecutaba su `finally` DESPUES de que la nueva
+     * hubiera arrancado y le ponia `isIncomingRingtonePlaying = false` por debajo, matandola. Se
+     * oia el tono que hubiera antes, o ninguno.
+     */
+    private val incomingGeneration = java.util.concurrent.atomic.AtomicLong(0)
+
+    /** Ultima peticion de vibracion, para poder reiniciar el tono conservandola. */
+    @Volatile private var lastSyncVibration = true
 
     @Volatile private var isIncomingRingtonePlaying = false
     @Volatile private var isOutgoingRingtonePlaying = false
@@ -45,7 +62,15 @@ class DesktopAudioManagerImpl : AudioManager {
     }
 
     override fun setIncomingRingtone(path: String) {
+        val cambio = incomingRingtonePath != path
         incomingRingtonePath = path
+        // Si el tono ya esta sonando y ahora es otro, hay que reiniciarlo. Es el caso del tono por
+        // cuenta: cuando la app resuelve que esta llamada va con otro tono, el reproductor ya
+        // arranco con el global; sin reinicio se seguiria oyendo aquel hasta el final.
+        if (cambio && isIncomingRingtonePlaying) {
+            println("AudioManager: tono entrante cambiado en caliente -> $path")
+            playRingtone(lastSyncVibration)
+        }
     }
 
     override fun setOutgoingRingtone(path: String) {
@@ -193,19 +218,27 @@ class DesktopAudioManagerImpl : AudioManager {
     }
 
     override fun playRingtone(syncVibration: Boolean) {
-        if (isIncomingRingtonePlaying) return
-
-        stopOutgoingRingtone()
-
         val path = incomingRingtonePath ?: run {
             println("AudioManager: No incoming ringtone path set")
             return
         }
 
+        // Antes habia aqui un `if (isIncomingRingtonePlaying) return`, y era parte del problema:
+        // hacia imposible cambiar de tono con la llamada ya sonando. Ahora se para lo que hubiera
+        // y se arranca de nuevo, que es idempotente si el tono es el mismo.
+        stopOutgoingRingtone()
+        stopRingtone()
+
+        val generacion = incomingGeneration.incrementAndGet()
+        lastSyncVibration = syncVibration
         isIncomingRingtonePlaying = true
         shouldStopIncoming = false
 
-        println("AudioManager: Iniciando ringtone entrante: $path")
+        println("AudioManager: Iniciando ringtone entrante: $path (gen $generacion)")
+
+        // Solo sigue viva la reproduccion mas reciente: cualquier otra se apaga sola aunque su
+        // cancelacion tarde en llegar.
+        fun vigente() = incomingGeneration.get() == generacion && !shouldStopIncoming
 
         incomingRingtoneJob = audioScope.launch {
             try {
@@ -216,23 +249,25 @@ class DesktopAudioManagerImpl : AudioManager {
                 }
 
                 var loopCount = 0
-                while (!shouldStopIncoming && isIncomingRingtonePlaying) {
+                while (vigente()) {
                     loopCount++
                     println("AudioManager: Ringtone entrante iteración: $loopCount")
 
                     val played = playAudioStreaming(
-                        path,
-                        shouldStop = { shouldStopIncoming || !isIncomingRingtonePlaying },
-                        lineRef = { activeIncomingLine = it }
+                        // Se relee en cada vuelta: si el tono cambia entre repeticiones, la
+                        // siguiente ya suena con el nuevo.
+                        incomingRingtonePath ?: path,
+                        shouldStop = { !vigente() },
+                        lineRef = { if (vigente()) activeIncomingLine = it }
                     )
 
-                    if (!played && !shouldStopIncoming) {
+                    if (!played && vigente()) {
                         println("AudioManager: Fallo reproducción, deteniendo loop")
                         break
                     }
 
                     // Pausa entre repeticiones
-                    if (!shouldStopIncoming && isIncomingRingtonePlaying) {
+                    if (vigente()) {
                         delay(800)
                     }
                 }
@@ -241,9 +276,13 @@ class DesktopAudioManagerImpl : AudioManager {
             } catch (e: Exception) {
                 println("AudioManager: Error en coroutine de ringtone: ${e.message}")
             } finally {
-                isIncomingRingtonePlaying = false
-                shouldStopIncoming = false
-                stopVibration()
+                // Solo si nadie ha arrancado otra reproducción mientras tanto: si no, esta
+                // corrutina moribunda apagaria la que acaba de empezar.
+                if (incomingGeneration.get() == generacion) {
+                    isIncomingRingtonePlaying = false
+                    shouldStopIncoming = false
+                    stopVibration()
+                }
             }
         }
     }
@@ -290,13 +329,18 @@ class DesktopAudioManagerImpl : AudioManager {
             } catch (e: Exception) {
                 println("AudioManager: Error en coroutine de ringback: ${e.message}")
             } finally {
-                isOutgoingRingtonePlaying = false
-                shouldStopOutgoing = false
+                // Mismo cuidado que en el tono de entrada: no apagar una reproducción posterior.
+                if (outgoingRingtoneJob == coroutineContext[Job]) {
+                    isOutgoingRingtonePlaying = false
+                    shouldStopOutgoing = false
+                }
             }
         }
     }
 
     override fun stopRingtone() {
+        // Invalida cualquier reproduccion viva aunque su cancelacion tarde en hacerse efectiva.
+        incomingGeneration.incrementAndGet()
         shouldStopIncoming = true
         isIncomingRingtonePlaying = false
         stopVibration()
