@@ -17,7 +17,7 @@ plugins {
 }
 
 group = "com.github.larezeddys"
-version = "1.0.9"
+version = "1.0.10"
 
 // Versión de Trixnity
 val trixnityVersion = "4.22.7" // Última versión disponible
