@@ -860,9 +860,33 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 val perCallState = MultiCallManager.getCallState(it.callId)?.state
                 val isPendingInvite = perCallState == CallState.INCOMING_RECEIVED
 
+                // Un CANCEL sobre una llamada ya establecida no debe tumbarla (RFC 3261).
+                val isEstablished = perCallState in setOf(
+                    CallState.CONNECTED,
+                    CallState.STREAMS_RUNNING,
+                    CallState.PAUSING,
+                    CallState.PAUSED,
+                    CallState.RESUMING
+                )
+                if (isEstablished) {
+                    log.w(tag = TAG) {
+                        "[CANCEL] Ignored for call ${it.callId} in state=$perCallState (already answered)"
+                    }
+                    return@let
+                }
+
+                // Fuera de esos dos casos la llamada ya no puede prosperar. Antes se hacia
+                // `return@let` en silencio y la entrada quedaba viva en MultiCallManager para
+                // siempre: la app la seguia viendo sonando y rechazaba toda llamada nueva
+                // hasta reiniciar el proceso. Se limpia igual, solo sin registrar perdida.
                 if (!isPendingInvite) {
                     log.w(tag = TAG) {
-                        "[CANCEL] Ignored for call ${it.callId} in state=$perCallState (already answered or terminated)"
+                        "[CANCEL] Call ${it.callId} in state=$perCallState; cleaning up without missed-call log"
+                    }
+                    CallStateManager.callEnded(it.callId, 487, "Request Terminated")
+                    scope.launch {
+                        sipCoreManager.audioManager.stopAllRingtones()
+                        accountInfo.resetCallState()
                     }
                     return@let
                 }
@@ -878,6 +902,16 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                     SipMessageBuilder.buildRequestTerminatedResponse(accountInfo, it)
                 sendViaSharedWebSocket(requestTerminatedResponse)
                 log.d(tag = TAG) { "[OK] 487 Request Terminated sent" }
+
+                // Avisar a la app de que el INVITE entrante murio. Sin esto,
+                // IncomingCallListener.onIncomingCallCancelled nunca se disparaba y la llamada
+                // se quedaba sonando en la UI indefinidamente.
+                sipCoreManager.sipCallbacks?.onIncomingCallCancelled(
+                    callId = it.callId,
+                    callerNumber = it.from,
+                    callerName = it.remoteDisplayName.takeIf { name -> name.isNotBlank() },
+                    targetAccount = it.to
+                )
 
                 // Actualizar estado
                 CallStateManager.callEnded(it.callId, 487, "Request Terminated")

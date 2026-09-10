@@ -11,6 +11,20 @@ internal interface SipCallbacks {
     }
 
     fun onIncomingCall(callerNumber: String, callerName: String?) {}
+
+    /**
+     * El llamante colgo antes de que se respondiera el INVITE entrante.
+     *
+     * Se emite solo para llamadas aun sonando: un CANCEL sobre una llamada ya
+     * establecida no la tumba y no llega aqui.
+     */
+    fun onIncomingCallCancelled(
+        callId: String,
+        callerNumber: String,
+        callerName: String?,
+        targetAccount: String
+    ) {
+    }
     fun onCallConnected() {}
     fun onCallFailed(error: String) {}
     fun onCallEndedForAccount(accountKey: String) {}

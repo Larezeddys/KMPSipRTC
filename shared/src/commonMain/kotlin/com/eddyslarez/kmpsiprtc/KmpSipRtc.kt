@@ -605,6 +605,24 @@ class KmpSipRtc private constructor() {
                     notifyIncomingCall(callInfo)
                 }
 
+                override fun onIncomingCallCancelled(
+                    callId: String,
+                    callerNumber: String,
+                    callerName: String?,
+                    targetAccount: String
+                ) {
+                    log.d(tag = TAG) { "Internal callback: onIncomingCallCancelled $callId" }
+                    notifyIncomingCallCancelled(
+                        IncomingCallInfo(
+                            callId = callId,
+                            callerNumber = callerNumber,
+                            callerName = callerName,
+                            targetAccount = targetAccount,
+                            timestamp = kotlin.time.Clock.System.now().toEpochMilliseconds()
+                        )
+                    )
+                }
+
                 override fun onCallConnected() {
                     log.d(tag = TAG) { "Internal callback: onCallConnected" }
                     getCurrentCallInfo()?.let { notifyCallConnected(it) }
@@ -1054,6 +1072,31 @@ class KmpSipRtc private constructor() {
                 durationMs = info.duration
             ))
         }
+    }
+
+    /**
+     * Notifica que una llamada entrante fue cancelada por el llamante antes de responderse.
+     *
+     * Hasta ahora `IncomingCallListener.onIncomingCallCancelled` y
+     * `SipEvent.Call.IncomingCancelled` estaban declarados pero no se emitian nunca, asi que
+     * la app no tenia forma de saber que el INVITE habia muerto y dejaba la llamada colgada
+     * como "sonando" indefinidamente.
+     */
+    private fun notifyIncomingCallCancelled(callInfo: IncomingCallInfo) {
+        log.d(tag = TAG) { "Notifying incoming call cancelled: ${callInfo.callId}" }
+        // Sin fan-out a `listeners`: SipEventListener ya recibe onCallEnded por la transicion
+        // a ENDED, y notificarlo aqui tambien lo entregaria dos veces.
+        try {
+            incomingCallListener?.onIncomingCallCancelled(callInfo)
+        } catch (e: Exception) {
+            log.e(tag = TAG) { "Error in IncomingCallListener onIncomingCallCancelled: ${e.message}" }
+        }
+        emitEvent(
+            SipEvent.Call.IncomingCancelled(
+                callId = callInfo.callId,
+                callerNumber = callInfo.callerNumber
+            )
+        )
     }
 
     /**
