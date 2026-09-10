@@ -722,6 +722,8 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             val ringingResponse = SipMessageBuilder.buildRingingResponse(accountInfo, normalizedCallData)
             sendViaSharedWebSocket(ringingResponse)
 
+            startIncomingCallTimeout(accountInfo, normalizedCallData)
+
             scope.launch {
                 delay(200)
                 // Solo reproducir ringtone en-app si la llamada NO viene de push.
@@ -821,6 +823,50 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
         } catch (e: Exception) {
             log.e(tag = TAG) { "[ERROR] Error handling BYE request: ${e.message}" }
             sipCoreManager.audioManager.stopAllRingtones()
+        }
+    }
+
+    /**
+     * Cierra la entrante si nadie la responde a tiempo.
+     *
+     * Red de seguridad: normalmente el llamante o el proxy envian CANCEL, pero si la red se
+     * cae o el servidor se calla, sin esto el INVITE se queda sonando para siempre y bloquea
+     * cualquier llamada posterior. Equivale al `inc_timeout` de Linphone.
+     *
+     * No hace falta cancelar el temporizador al responder o rechazar: al dispararse comprueba
+     * el estado y no hace nada si la llamada ya salio de INCOMING_RECEIVED.
+     */
+    private fun startIncomingCallTimeout(accountInfo: AccountInfo, callData: CallData) {
+        val timeoutSeconds = sipCoreManager.incomingCallTimeoutSeconds
+        if (timeoutSeconds <= 0) return
+
+        scope.launch {
+            delay(timeoutSeconds * 1000L)
+
+            if (MultiCallManager.getCallState(callData.callId)?.state != CallState.INCOMING_RECEIVED) {
+                return@launch
+            }
+
+            log.w(tag = TAG) {
+                "[TIMEOUT] Incoming call ${callData.callId} unanswered after ${timeoutSeconds}s"
+            }
+            try {
+                sendViaSharedWebSocket(
+                    SipMessageBuilder.buildTemporarilyUnavailableResponse(accountInfo, callData)
+                )
+                sipCoreManager.callManager?.registerMissedCall(callData)
+                sipCoreManager.sipCallbacks?.onIncomingCallTimeout(
+                    callId = callData.callId,
+                    callerNumber = callData.from,
+                    callerName = callData.remoteDisplayName.takeIf { it.isNotBlank() },
+                    targetAccount = callData.to
+                )
+                CallStateManager.callEnded(callData.callId, 480, "Temporarily Unavailable")
+                sipCoreManager.audioManager.stopAllRingtones()
+                accountInfo.resetCallState()
+            } catch (e: Exception) {
+                log.e(tag = TAG) { "Error in incoming call timeout: ${e.message}" }
+            }
         }
     }
 

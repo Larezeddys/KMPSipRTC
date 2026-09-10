@@ -623,6 +623,24 @@ class KmpSipRtc private constructor() {
                     )
                 }
 
+                override fun onIncomingCallTimeout(
+                    callId: String,
+                    callerNumber: String,
+                    callerName: String?,
+                    targetAccount: String
+                ) {
+                    log.d(tag = TAG) { "Internal callback: onIncomingCallTimeout $callId" }
+                    notifyIncomingCallTimeout(
+                        IncomingCallInfo(
+                            callId = callId,
+                            callerNumber = callerNumber,
+                            callerName = callerName,
+                            targetAccount = targetAccount,
+                            timestamp = kotlin.time.Clock.System.now().toEpochMilliseconds()
+                        )
+                    )
+                }
+
                 override fun onCallConnected() {
                     log.d(tag = TAG) { "Internal callback: onCallConnected" }
                     getCurrentCallInfo()?.let { notifyCallConnected(it) }
@@ -1093,6 +1111,28 @@ class KmpSipRtc private constructor() {
         }
         emitEvent(
             SipEvent.Call.IncomingCancelled(
+                callId = callInfo.callId,
+                callerNumber = callInfo.callerNumber
+            )
+        )
+    }
+
+    /**
+     * Notifica que una llamada entrante expiro sin respuesta.
+     *
+     * Igual que con la cancelacion, `IncomingCallListener.onIncomingCallTimeout` y
+     * `SipEvent.Call.IncomingTimeout` estaban declarados pero nunca se emitian.
+     */
+    private fun notifyIncomingCallTimeout(callInfo: IncomingCallInfo) {
+        log.d(tag = TAG) { "Notifying incoming call timeout: ${callInfo.callId}" }
+        // Sin fan-out a `listeners`: reciben onCallEnded por la transicion a ENDED.
+        try {
+            incomingCallListener?.onIncomingCallTimeout(callInfo)
+        } catch (e: Exception) {
+            log.e(tag = TAG) { "Error in IncomingCallListener onIncomingCallTimeout: ${e.message}" }
+        }
+        emitEvent(
+            SipEvent.Call.IncomingTimeout(
                 callId = callInfo.callId,
                 callerNumber = callInfo.callerNumber
             )

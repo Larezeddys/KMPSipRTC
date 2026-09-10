@@ -511,6 +511,9 @@ object SipMessageBuilder {
     fun buildBusyHereResponse(accountInfo: AccountInfo, callData: CallData): String =
         buildSipResponse(486, "Busy Here", accountInfo, callData, includeContact = true)
 
+    fun buildTemporarilyUnavailableResponse(accountInfo: AccountInfo, callData: CallData): String =
+        buildSipResponse(480, "Temporarily Unavailable", accountInfo, callData, includeContact = true)
+
     fun buildRequestTerminatedResponse(accountInfo: AccountInfo, callData: CallData): String =
         buildSipResponse(487, "Request Terminated", accountInfo, callData)
 

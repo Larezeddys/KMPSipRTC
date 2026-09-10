@@ -25,6 +25,17 @@ internal interface SipCallbacks {
         targetAccount: String
     ) {
     }
+    /**
+     * Nadie respondio el INVITE entrante dentro de `incomingCallTimeoutSeconds`.
+     */
+    fun onIncomingCallTimeout(
+        callId: String,
+        callerNumber: String,
+        callerName: String?,
+        targetAccount: String
+    ) {
+    }
+
     fun onCallConnected() {}
     fun onCallFailed(error: String) {}
     fun onCallEndedForAccount(accountKey: String) {}

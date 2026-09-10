@@ -163,6 +163,7 @@ class SipCoreManager private constructor(
 
     /** Identificador APNs TeamID.BundleID.voip enviado como pn-param. */
     val apnsPushParam: String? get() = config.apnsPushParam
+    val incomingCallTimeoutSeconds: Int get() = config.incomingCallTimeoutSeconds
 
     fun getDefaultDomain(): String? = currentAccountInfo?.domain
 

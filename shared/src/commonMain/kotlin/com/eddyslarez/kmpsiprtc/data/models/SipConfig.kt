@@ -46,7 +46,18 @@ data class SipConfig(
      * Es modificable en caliente vía KmpSipRtc.setCallWaitingEnabled(...) sin
      * reinicializar la libreria.
      */
-    val callWaitingEnabled: Boolean = true
+    val callWaitingEnabled: Boolean = true,
+    /**
+     * Segundos que una llamada entrante puede sonar sin respuesta antes de que la
+     * biblioteca la cierre con 480 Temporarily Unavailable y la registre como perdida.
+     *
+     * Existe como red de seguridad: si el llamante o el proxy nunca envian CANCEL
+     * (red caida, servidor que se calla), sin esto el INVITE entrante se queda sonando
+     * indefinidamente y bloquea llamadas posteriores. Equivale a `inc_timeout` de Linphone.
+     *
+     * `0` lo desactiva y deja que solo el CANCEL remoto cierre la llamada.
+     */
+    val incomingCallTimeoutSeconds: Int = 45
 ) {
     /**
      * Valida la configuracion y retorna una lista de errores encontrados.
@@ -72,6 +83,15 @@ data class SipConfig(
                     )
                 )
             }
+        }
+
+        if (incomingCallTimeoutSeconds < 0) {
+            errors.add(
+                SipError.Configuration(
+                    "incomingCallTimeoutSeconds",
+                    "Must be >= 0, 0 disables the timeout (got: $incomingCallTimeoutSeconds)"
+                )
+            )
         }
 
         if (pingIntervalMs < 5000) {
