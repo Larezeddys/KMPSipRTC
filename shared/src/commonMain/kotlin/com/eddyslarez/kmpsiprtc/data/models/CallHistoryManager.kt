@@ -324,7 +324,14 @@ class CallHistoryManager(
         endTime: Long? = null
     ) {
         try {
-            val currentAccount = sipCoreManager?.currentAccountInfo
+            // Un intento push puede fallar antes de seleccionar currentAccountInfo.
+            // Persistirlo en su cuenta destino, tambien cuando hay varias cuentas SIP.
+            val targetAccount = callData?.sipName?.takeIf { it.isNotBlank() }
+            val currentAccount = targetAccount?.let { name ->
+                sipCoreManager?.activeAccounts?.values?.firstOrNull {
+                    it.username == name || "${it.username}@${it.domain}" == name
+                }
+            } ?: sipCoreManager?.currentAccountInfo
             val dbManager = databaseManager ?: return
 
             if (currentAccount == null) {

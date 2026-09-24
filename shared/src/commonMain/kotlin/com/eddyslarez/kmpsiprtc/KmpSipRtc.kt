@@ -2120,6 +2120,18 @@ class KmpSipRtc private constructor() {
     /**
      * [OK] SOLUCIÓN: Obtiene historial de llamadas preservado entre inicializaciones
      */
+    /** Conserva los intentos entrantes que llegaron por push pero nunca recibieron INVITE. */
+    fun recordUnconnectedIncomingCall(
+        callId: String, caller: String, account: String, startedAt: Long, answered: Boolean
+    ) {
+        checkInitialized()
+        sipCoreManager?.callHistoryManager?.addCallLog(
+            CallData(callId = callId, from = caller, to = account, sipName = account,
+                direction = CallDirections.INCOMING, startTime = startedAt),
+            if (answered) CallTypes.ABORTED else CallTypes.MISSED
+        )
+    }
+
     fun getCallLogs(limit: Int = 50): List<CallLog> {
         checkInitialized()
         return sipCoreManager?.callLogs() ?: emptyList()

@@ -67,7 +67,8 @@ class SharedWebSocketManager(
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private var lastPongTimestamp = 0L
+    private val heartbeat = SocketHeartbeat()
+    private val lastPongTimestamp get() = heartbeat.lastPongTimestamp
     private var webSocketClient: MultiplatformWebSocket? = null
     private var isConnecting = false
     private var reconnectAttempts = 0
@@ -178,6 +179,9 @@ class SharedWebSocketManager(
             }
             // Generacion nueva: a partir de aqui los callbacks del socket anterior se ignoran.
             val generation = ++socketGeneration
+            // Cada transporte empieza sin pong previo, incluso en cierres voluntarios donde
+            // handleTransportDown no se ejecuta. Un pong viejo invalidaba el socket nuevo.
+            heartbeat.reset()
             webSocketClient = createWebSocket(config.webSocketUrl, headers)
 
             setupWebSocketListeners(generation)
@@ -284,8 +288,13 @@ class SharedWebSocketManager(
         // Verificar salud del WebSocket antes de registrar
         if (!isWebSocketHealthy()) {
             log.w(tag = TAG) { "WebSocket not healthy, forcing reconnection before register" }
-            forceReconnect()
-            delay(500)
+            // Un socket que sigue abriendo no debe cerrarse por otro REGISTER concurrente.
+            if (!isConnecting) forceReconnect()
+            var waitedMs = 0L
+            while (!isWebSocketHealthy() && waitedMs < 10_000L) {
+                delay(100)
+                waitedMs += 100
+            }
             if (!isWebSocketHealthy()) {
                 log.e(tag = TAG) { "Cannot register account - WebSocket still not healthy after reconnect" }
                 return false
@@ -364,10 +373,7 @@ class SharedWebSocketManager(
         }
 
         // Cuanto tiempo paso desde el ultimo pong
-        val elapsed = kotlin.time.Clock.System.now().toEpochMilliseconds() - lastPongTimestamp
-
-        // Considerar no saludable si paso mas de 2 intervalos de ping
-        return elapsed < (config.pingIntervalMs * 2)
+        return heartbeat.isFresh(kotlin.time.Clock.System.now().toEpochMilliseconds(), config.pingIntervalMs)
     }
 
     /**
@@ -546,7 +552,7 @@ class SharedWebSocketManager(
                 if (isStale("PONG")) return
                 val now = kotlin.time.Clock.System.now().toEpochMilliseconds()
                 val sinceLast = if (lastPongTimestamp == 0L) -1L else now - lastPongTimestamp
-                lastPongTimestamp = now
+                heartbeat.onPong(now)
                 log.d(tag = TAG) { "[WS gen=$generation] PONG rtt=${timeMs}ms since_last=${sinceLast}ms" }
             }
 
@@ -612,7 +618,7 @@ class SharedWebSocketManager(
 
         // El pong viejo no vale para el socket que venga: sin esto isWebSocketHealthy() devuelve
         // false sobre un socket recien abierto y provoca un forceReconnect que lo tira de nuevo.
-        lastPongTimestamp = 0L
+        heartbeat.reset()
 
         cancelAllRenewals(reason = "$event gen=$generation")
 
