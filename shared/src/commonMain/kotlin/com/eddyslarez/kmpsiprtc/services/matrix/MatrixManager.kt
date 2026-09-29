@@ -42,14 +42,26 @@ import net.folivo.trixnity.core.model.events.m.space.ChildEventContent
 import net.folivo.trixnity.core.model.events.m.call.CallEventContent
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.utils.generateId
+import io.ktor.client.call.HttpClientCall
+import io.ktor.client.plugins.api.Send
+import io.ktor.client.plugins.api.createClientPlugin
+import io.ktor.client.request.HttpResponseData
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
+import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpProtocolVersion
+import io.ktor.http.HttpStatusCode
 import io.ktor.http.Url
 import io.ktor.http.encodeURLParameter
+import io.ktor.http.headersOf
+import io.ktor.util.date.GMTDate
+import io.ktor.utils.io.ByteReadChannel
+import io.ktor.utils.io.InternalAPI
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
@@ -65,6 +77,42 @@ import okio.SYSTEM
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
+
+/**
+ * El backoffice emite la sesión de Matrix con la admin API de Synapse, y ese access token
+ * NO lleva device asociado. Trixnity sube las claves del dispositivo dentro de `loginWith`
+ * con `getOrThrow()`, así que Synapse contestaba 400 "To upload keys, you must pass device_id
+ * when authenticating" y se caía el login entero: sin sesión no hay sync, y el chat queda vacío.
+ *
+ * Este chat no usa E2EE —igual que la versión web, que funciona porque matrix-js-sdk no sube
+ * claves si no se inicializa el cifrado—, así que la subida se responde en local y nunca sale
+ * a la red. Si algún día hiciera falta E2EE, el token tendría que venir de un login normal.
+ */
+@OptIn(InternalAPI::class)
+private val SkipMatrixKeyUpload = createClientPlugin("SkipMatrixKeyUpload") {
+    on(Send) { request ->
+        val path = request.url.encodedPathSegments
+        val isKeyUpload = path.size >= 2 && path[path.size - 2] == "keys" && path.last() == "upload"
+        if (!isKeyUpload) return@on proceed(request)
+
+        val body = """{"one_time_key_counts":{"signed_curve25519":50}}"""
+        HttpClientCall(
+            client,
+            request.build(),
+            HttpResponseData(
+                statusCode = HttpStatusCode.OK,
+                requestTime = GMTDate(),
+                headers = headersOf(
+                    HttpHeaders.ContentType,
+                    ContentType.Application.Json.toString()
+                ),
+                version = HttpProtocolVersion.HTTP_1_1,
+                body = ByteReadChannel(body.encodeToByteArray()),
+                callContext = request.executionContext,
+            )
+        )
+    }
+}
 
 class MatrixManager(
     private val config: MatrixConfig,
@@ -316,6 +364,9 @@ class MatrixManager(
                 mediaStoreModule = mediaModule,
                 configuration = {
                     syncLoopTimeout = config.syncTimeout.seconds
+                    // La sesión guardada viene del backoffice y su token no tiene device:
+                    // sin esto el sync intentaría subir one-time keys y Synapse las rechaza.
+                    httpClientConfig = { install(SkipMatrixKeyUpload) }
                 }
             )
 
@@ -408,12 +459,13 @@ class MatrixManager(
                             userId = UserId(resolvedUserId),
                             deviceId = resolvedDeviceId,
                             accessToken = accessToken,
-                            refreshToken = refreshToken,
+                            refreshToken = refreshToken?.takeIf { it.isNotBlank() },
                         )
                     )
                 },
                 configuration = {
                     syncLoopTimeout = config.syncTimeout.seconds
+                    httpClientConfig = { install(SkipMatrixKeyUpload) }
                 },
             )
 
