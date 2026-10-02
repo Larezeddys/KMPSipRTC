@@ -43,7 +43,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
+
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.to
@@ -463,13 +463,11 @@ class SipCoreManager private constructor(
                     updateRegistrationState(accountKey, RegistrationState.IN_PROGRESS)
                 }
 
-                override fun onReconnectAccount(accountInfo: AccountInfo): Boolean {
+                override suspend fun onReconnectAccount(accountInfo: AccountInfo): Boolean {
                     return try {
                         log.d(tag = TAG) { "[CONN] Attempting to reconnect account ${accountInfo.username}@${accountInfo.domain}" }
 
-                        runBlocking {
-                            sharedWebSocketManager.registerAccount(accountInfo, isAppInBackground)
-                        }
+                        sharedWebSocketManager.registerAccount(accountInfo, isAppInBackground)
                     } catch (e: Exception) {
                         log.e(tag = TAG) { "[ERROR] Error reconnecting account: ${e.message}" }
                         false
@@ -1738,7 +1736,7 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
     }
 
     @OptIn(ExperimentalTime::class)
-    fun performRegistrationHealthCheck(): String {
+    suspend fun performRegistrationHealthCheck(): String {
         log.d(tag = TAG) { "Performing registration health check..." }
 
         val report = StringBuilder()
@@ -1750,7 +1748,7 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
 
         try {
             val dbManager = getDatabaseManager()
-            val dbAccounts = runBlocking { dbManager?.getRegisteredSipAccounts()?.first() ?: emptyList() }
+            val dbAccounts = dbManager?.getRegisteredSipAccounts()?.first() ?: emptyList()
 
             report.appendLine("Active accounts in memory: ${activeAccounts.size}")
             report.appendLine("Accounts in database: ${dbAccounts.size}")
@@ -2322,44 +2320,34 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
 
     suspend fun dispose() {
         isShuttingDown = true
-
         accountSyncJob?.cancel()
-
+        var firstError: Throwable? = null
+        val steps: List<suspend () -> Unit> = listOf(
+            { callManager?.dispose(); Unit },
+            { messageHandler.dispose(); Unit },
+            { registrationGuardian.dispose(); Unit },
+            { sharedWebSocketManager.dispose(); Unit },
+            { audioManager.dispose(); Unit },
+            { reconnectionManager.dispose(); Unit },
+            { networkManager.dispose(); Unit },
+            { callHistoryManager.dispose(); Unit },
+            { databaseManager?.closeDatabaseSuspend(); Unit },
+        )
         try {
-            callManager?.dispose()
-        } catch (e: Exception) {
-            log.e(tag = TAG) { "Error disposing CallManager: ${e.message}" }
+            for (step in steps) {
+                try { step() }
+                catch (error: Exception) { if (firstError == null) firstError = error }
+            }
+        } finally {
+            MultiCallManager.clearAllCalls()
+            activeAccounts.clear()
+            _registrationStates.value = emptyMap()
+            CallStateManager.resetToIdle()
+            CallStateManager.clearHistory()
+            scope.cancel()
+            mainScope.cancel()
         }
-
-        try {
-            messageHandler.dispose()
-        } catch (e: Exception) {
-            log.e(tag = TAG) { "Error disposing messageHandler: ${e.message}" }
-        }
-
-        try {
-            registrationGuardian.dispose()
-        } catch (e: Exception) {
-            log.e(tag = TAG) { "Error disposing guardian: ${e.message}" }
-        }
-        sharedWebSocketManager.dispose()
-
-        audioManager.dispose()
-        reconnectionManager.dispose()
-        networkManager.dispose()
-
-        MultiCallManager.clearAllCalls()
-        activeAccounts.clear()
-        _registrationStates.value = emptyMap()
-
-        CallStateManager.resetToIdle()
-        CallStateManager.clearHistory()
-        callHistoryManager.dispose()
-
-        databaseManager?.closeDatabase()
-
-        scope.cancel()
-        mainScope.cancel()
+        firstError?.let { throw it }
     }
 
     // === MÉTODOS AUXILIARES ===
@@ -2594,7 +2582,7 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
      */
     fun getMissedCalls(): List<CallLog> {
         return try {
-            runBlocking { getMissedCallsFromDatabase() }
+            callHistoryManager.getMissedCalls()
         } catch (e: Exception) {
             log.w(tag = TAG) { "Database unavailable, using memory fallback: ${e.message}" }
             callHistoryManager.getMissedCalls()
@@ -2606,7 +2594,7 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
      */
     fun getCallLogsForNumber(phoneNumber: String): List<CallLog> {
         return try {
-            runBlocking { getCallLogsForNumberFromDatabase(phoneNumber) }
+            callHistoryManager.getCallLogsForNumber(phoneNumber)
         } catch (e: Exception) {
             log.w(tag = TAG) { "Database unavailable, using memory fallback: ${e.message}" }
             callHistoryManager.getCallLogsForNumber(phoneNumber)
@@ -2616,10 +2604,15 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
     /**
      * Limpia call logs tanto en BD como en memoria
      */
+    suspend fun clearCallLogsSuspend() {
+        DatabaseManager.getInstance().clearAllCallLogs()
+        callHistoryManager.clearCallLogs()
+    }
+
     fun clearCallLogs() {
         try {
             // Limpiar en BD
-            runBlocking {
+            scope.launch {
                 val dbManager = DatabaseManager.getInstance()
                 dbManager.clearAllCallLogs()
             }
@@ -2688,7 +2681,7 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
     }
     fun callLogs(): List<CallLog> {
         return try {
-            runBlocking { getCallLogsFromDatabase() }
+            callHistoryManager.getAllCallLogs()
         } catch (e: Exception) {
             callHistoryManager.getAllCallLogs()
         }

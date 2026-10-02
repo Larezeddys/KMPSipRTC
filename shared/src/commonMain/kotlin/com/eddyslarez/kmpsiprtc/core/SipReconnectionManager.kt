@@ -362,7 +362,7 @@ interface ReconnectionListener {
     fun onReconnectionStarted()
     fun onReconnectionCompleted(successful: Boolean)
     fun onReconnectionAttempt(accountKey: String, attempt: Int)
-    fun onReconnectAccount(accountInfo: AccountInfo): Boolean
+    suspend fun onReconnectAccount(accountInfo: AccountInfo): Boolean
     fun onAccountReconnected(accountKey: String, successful: Boolean)
     fun onReconnectionFailed(accountKey: String)
 }

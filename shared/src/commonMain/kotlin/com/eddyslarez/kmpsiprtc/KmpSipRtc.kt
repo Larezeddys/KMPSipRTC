@@ -2245,14 +2245,8 @@ class KmpSipRtc private constructor() {
      * Realiza verificación de salud del registro
      */
     fun performRegistrationHealthCheck(): String {
-        checkInitialized()
-        return try {
-            sipCoreManager?.performRegistrationHealthCheck()
-                ?: "[ERROR] SipCoreManager not available"
-        } catch (e: Exception) {
-            log.e(tag = TAG) { "Error in health check: ${e.message}" }
-            "[ERROR] Health check error: ${e.message}"
-        }
+        internalScope.launch { performRegistrationHealthCheckSuspend() }
+        return "Estados de registro: ${getAllRegistrationStates()}"
     }
 
     /**
@@ -2935,37 +2929,77 @@ class KmpSipRtc private constructor() {
     /**
      * Libera recursos de la biblioteca
      */
-    fun dispose(onComplete: (() -> Unit)? = null) {
-        internalScope.launch {
-            initMutex.withLock {
-                if (isInitialized) {
-                    log.d(tag = TAG) { "Disposing KmpSipRtc" }
-
-                    databaseManager?.closeDatabase()
-                    databaseManager = null
-
-                    sipCoreManager?.dispose()
-                    sipCoreManager = null
-
-                    listeners.clear()
-                    registrationListener = null
-                    callListener = null
-                    incomingCallListener = null
-
-                    lastNotifiedRegistrationStates.clear()
-                    lastNotifiedCallState.value = null
-
-                    isInitialized = false
-
-                    internalScope.cancel()
-
-                    log.d(tag = TAG) { "KmpSipRtc disposed completely" }
-                    onComplete?.invoke()
+    /** Cierra recursos y permite inicializar otra sesión en el mismo singleton. */
+    suspend fun disposeSuspend(): Unit = withContext(Dispatchers.Main + NonCancellable) {
+        internalScope.coroutineContext.cancelChildren()
+        initMutex.withLock {
+            var firstError: Throwable? = null
+            val steps: List<suspend () -> Unit> = listOf(
+                { healthMonitor?.dispose(); Unit },
+                { pushModeManager?.dispose(); Unit },
+                { livekitCallManager?.leaveCall(); Unit },
+                { matrixManager?.dispose(); Unit },
+                { sipCoreManager?.dispose(); Unit },
+                { databaseManager?.closeDatabaseSuspend(); Unit },
+            )
+            try {
+                for (step in steps) {
+                    try {
+                        if (withTimeoutOrNull(3_000) { step(); true } != true && firstError == null) {
+                            firstError = IllegalStateException("Tiempo agotado liberando un recurso SIP")
+                        }
+                    } catch (error: Exception) {
+                        if (firstError == null) firstError = error
+                    }
                 }
+            } finally {
+                healthMonitor = null
+                pushModeManager = null
+                livekitCallManager = null
+                matrixManager = null
+                unifiedCallRouter = null
+                databaseManager = null
+                sipCoreManager = null
+                listeners.clear()
+                registrationListener = null
+                callListener = null
+                incomingCallListener = null
+                lastNotifiedRegistrationStates.clear()
+                lastNotifiedCallState.value = null
+                isInitialized = false
+                initTimestamp = null
+            }
+            // El supervisor sigue reutilizable para iniciar sesión de nuevo.
+            firstError?.let { throw it }
+        }
+    }
+
+    fun dispose(onComplete: (() -> Unit)? = null) {
+        val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+        cleanupScope.launch {
+            try { disposeSuspend() }
+            catch (error: Exception) { log.e(tag = "KmpSipRtc") { "Error al cerrar: ${error.message}" } }
+            finally {
+                try { onComplete?.invoke() }
+                finally { cleanupScope.cancel() }
             }
         }
     }
 
+    suspend fun clearCallLogsSuspend() {
+        if (!isInitialized) return
+        sipCoreManager?.clearCallLogsSuspend()
+    }
+
+    suspend fun getCallLogsSuspend(limit: Int = 50): List<CallLog> {
+        checkInitialized()
+        return sipCoreManager?.getCallLogsFromDatabase(limit) ?: emptyList()
+    }
+
+    suspend fun performRegistrationHealthCheckSuspend(): String {
+        checkInitialized()
+        return sipCoreManager?.performRegistrationHealthCheck() ?: "SIP no inicializado"
+    }
 
     ////////MATRIX//////
 

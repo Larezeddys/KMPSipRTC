@@ -1,4 +1,4 @@
-﻿package com.eddyslarez.kmpsiprtc.core
+package com.eddyslarez.kmpsiprtc.core
 
 import com.eddyslarez.kmpsiprtc.data.database.DatabaseManager
 import com.eddyslarez.kmpsiprtc.data.models.AccountInfo
@@ -16,7 +16,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
+
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.collections.containsKey
 import kotlin.collections.set
@@ -177,8 +177,8 @@ class RegistrationGuardianManager(
     }
 
     @OptIn(ExperimentalTime::class)
-    private fun isStuckInProgress(accountKey: String): Boolean {
-        val lastRetry = runBlocking { lastRetryTimestamp.get(accountKey) } ?: 0L
+    private suspend fun isStuckInProgress(accountKey: String): Boolean {
+        val lastRetry = lastRetryTimestamp.get(accountKey) ?: 0L
         val timeSinceLastRetry = kotlin.time.Clock.System.now().toEpochMilliseconds() - lastRetry
         return timeSinceLastRetry > 30_000L
     }

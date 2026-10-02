@@ -956,8 +956,9 @@ class MatrixManager(
             syncConnectionJob = null
             // Si el server rechaza el logout (token caducado, sin red), la
             // limpieza local debe ocurrir igualmente.
-            runCatching { matrixClient?.logout() }
+            runCatching { kotlinx.coroutines.withTimeoutOrNull(3_000) { matrixClient?.logout() } }
                 .onFailure { log.w(TAG) { "Server logout fallo (continuando limpieza local): ${it.message}" } }
+            runCatching { matrixClient?.close() }
             matrixClient = null
             storedUserId = null
 
@@ -2991,10 +2992,14 @@ class MatrixManager(
         return "mcall_${generateId()}"
     }
 
-    fun dispose() {
+    suspend fun dispose() {
         scope.cancel()
-        webRtcManager.closePeerConnection()
-        matrixClient = null
+        try { matrixClient?.close() }
+        finally {
+            webRtcManager.closePeerConnection()
+            matrixClient = null
+            _connectionState.value = MatrixConnectionState.Disconnected
+        }
     }
 }
 

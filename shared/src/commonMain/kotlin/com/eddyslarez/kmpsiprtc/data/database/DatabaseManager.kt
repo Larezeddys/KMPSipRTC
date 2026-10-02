@@ -514,35 +514,43 @@ class DatabaseManager private constructor() {
     /**
      * Cierra la base de datos (útil para testing)
      */
-    fun closeDatabase() {
-        scope.launch {
-            try {
-                log.d(tag = TAG) { "Closing database safely" }
+    private val closeMutex = kotlinx.coroutines.sync.Mutex()
+    private var closed = false
 
-                // Cancelar operaciones pendientes
-                scope.cancel()
-
-                // Forzar commit de transacciones pendientes
+    suspend fun closeDatabaseSuspend() = kotlinx.coroutines.withContext(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
+        closeMutex.lock()
+        try {
+            if (!closed) {
+                scope.coroutineContext[kotlinx.coroutines.Job]?.children?.toList()?.let { jobs ->
+                    jobs.forEach { it.cancel() }
+                    kotlinx.coroutines.withTimeoutOrNull(2_000) { jobs.forEach { it.join() } }
+                }
                 try {
-                    database.useWriterConnection { transactor ->
-                        transactor.execSQL("PRAGMA wal_checkpoint(TRUNCATE)")
+                    kotlinx.coroutines.withTimeoutOrNull(2_000) {
+                        database.useWriterConnection { it.execSQL("PRAGMA wal_checkpoint(TRUNCATE)") }
                     }
-                } catch (e: Exception) {
-                    log.w(tag = TAG) { "Error during WAL checkpoint: ${e.message}" }
+                } finally {
+                    try { database.close() }
+                    finally {
+                        scope.cancel()
+                        closed = true
+                        synchronized(LOCK) {
+                            if (INSTANCE === this@DatabaseManager) INSTANCE = null
+                            isInitialized = false
+                        }
+                    }
                 }
-
-                // Cerrar la base de datos
-                database.close()
-
-                synchronized(LOCK ) {
-                    INSTANCE = null
-                    isInitialized = false
-                }
-
-                log.d(tag = TAG) { "Database closed successfully" }
-            } catch (e: Exception) {
-                log.e(tag = TAG) { "Error closing database: ${e.message}" }
             }
+        } finally { closeMutex.unlock() }
+    }
+
+    fun closeDatabase() {
+        // No lanzar el cierre en el scope que se está cancelando.
+        val cleanupScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        cleanupScope.launch {
+            try { closeDatabaseSuspend() }
+            catch (error: Exception) { log.e(tag = TAG) { "Error cerrando BD: ${error.message}" } }
+            finally { cleanupScope.cancel() }
         }
     }
 
