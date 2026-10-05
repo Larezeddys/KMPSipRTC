@@ -7,13 +7,13 @@ import cocoapods.LiveKitClient.ConnectionStateReconnecting
 import cocoapods.LiveKitClient.LocalParticipant
 import cocoapods.MCNLiveKitDataBridge.LKBroadcastBridge
 import cocoapods.MCNLiveKitDataBridge.LKDataPublisher
+import cocoapods.MCNLiveKitDataBridge.LKRemoteAudioTrackVolumeBridge
 import cocoapods.LiveKitClient.LocalTrackPublication
 import cocoapods.LiveKitClient.LocalVideoTrack
 import cocoapods.LiveKitClient.Participant
 import cocoapods.LiveKitClient.RemoteAudioTrack
 import cocoapods.LiveKitClient.RemoteParticipant
 import cocoapods.LiveKitClient.RemoteTrackPublication
-import cocoapods.LiveKitClient.setVolume
 import cocoapods.LiveKitClient.RemoteVideoTrack
 import cocoapods.LiveKitClient.Room
 import cocoapods.LiveKitClient.RoomDelegateProtocol
@@ -39,6 +39,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -547,7 +548,16 @@ actual class ConferenceLiveKitManager actual constructor() {
             publication.track() as? RemoteAudioTrack
         }
         withContext(Dispatchers.Default) {
-            audioTracks.forEach { track -> runCatching { track.setVolume(volume = gain) } }
+            audioTracks.forEach { track ->
+                runCatching {
+                    // LiveKit publica el volumen como propiedad Swift sin exponer su setter
+                    // a Objective-C; se aplica mediante el puente Swift del pod local.
+                    LKRemoteAudioTrackVolumeBridge.setRemoteAudioTrackVolume(
+                        track = track as objcnames.classes.RemoteAudioTrack,
+                        volume = gain,
+                    )
+                }
+            }
         }
     }
 
