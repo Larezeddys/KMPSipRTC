@@ -21,6 +21,10 @@ data class LkParticipant(
     val handRaisedAt: Long? = null,
     val videoTrackSid: String? = null,
     val screenShareTrackSid: String? = null,
+    /** Porcentaje local de volumen de reproduccion (0..150). */
+    val playbackVolumePercent: Int = 100,
+    /** False en motores donde el audio remoto no se controla por participante. */
+    val canAdjustPlaybackVolume: Boolean = false,
     /**
      * Plataforma anunciada por el participante ("android", "ios", "web",
      * "windows", "mac", "linux") o null si todavia no la anuncio / usa un

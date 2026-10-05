@@ -633,6 +633,10 @@ actual class ConferenceLiveKitManager actual constructor() {
         log.d(tag = TAG) { if (raised) "Mano levantada" else "Mano bajada" }
     }
 
+    actual suspend fun setRemotePlaybackVolume(participantIdentity: String, volumePercent: Int) {
+        // Desktop mezcla los tracks remotos en PeerConnection y no expone ganancia por participante.
+    }
+
     actual fun getVideoTrackHandle(participantIdentity: String): LkVideoTrackHandle? {
         return _videoTracks.value.firstOrNull {
             it.participantIdentity == participantIdentity && !it.isScreenShare

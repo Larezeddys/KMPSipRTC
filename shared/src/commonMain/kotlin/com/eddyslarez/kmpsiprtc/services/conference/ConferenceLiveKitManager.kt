@@ -68,6 +68,9 @@ expect class ConferenceLiveKitManager() {
     /** Levanta o baja la mano local y lo publica a la sala */
     suspend fun setHandRaised(raised: Boolean)
 
+    /** Ajusta en este dispositivo el volumen de un participante remoto. */
+    suspend fun setRemotePlaybackVolume(participantIdentity: String, volumePercent: Int)
+
     // --- Dispositivos ---
 
     /** Carga y retorna los dispositivos disponibles */

@@ -11,6 +11,7 @@ import io.livekit.android.room.participant.Participant
 import io.livekit.android.room.track.CameraPosition
 import io.livekit.android.room.track.DataPublishReliability
 import io.livekit.android.room.track.LocalVideoTrack
+import io.livekit.android.room.track.RemoteAudioTrack
 import io.livekit.android.room.track.Track
 import io.livekit.android.room.track.VideoTrack
 import kotlinx.coroutines.*
@@ -54,6 +55,7 @@ actual class ConferenceLiveKitManager actual constructor() {
     // manager (updateParticipants, raisedHands, video tracks) y la unica que el
     // sobre DataPacket garantiza en las tres plataformas.
     private val platformByIdentity = mutableMapOf<String, String>()
+    private val playbackVolumeByIdentity = mutableMapOf<String, Int>()
 
     private fun handAttributes(raised: Boolean, at: Long): Map<String, String> {
         return if (raised) {
@@ -135,6 +137,7 @@ actual class ConferenceLiveKitManager actual constructor() {
             _mediaState.value = LkMediaState()
             raisedHands.clear()
             platformByIdentity.clear()
+            playbackVolumeByIdentity.clear()
             localHandRaised = false
         }
     }
@@ -216,6 +219,24 @@ actual class ConferenceLiveKitManager actual constructor() {
         // pero propagamos el fallo para que la UI pueda avisar que no se envió.
         updateParticipants()
         publishResult.getOrThrow()
+    }
+
+    actual suspend fun setRemotePlaybackVolume(participantIdentity: String, volumePercent: Int) {
+        val lkRoom = room ?: return
+        val participant = lkRoom.remoteParticipants.values.firstOrNull {
+            it.identity?.value == participantIdentity
+        } ?: return
+        val percent = volumePercent.coerceIn(0, 150)
+        playbackVolumeByIdentity[participantIdentity] = percent
+        val gain = percent / 100.0
+        val audioTracks = participant.audioTrackPublications.mapNotNull { (_, track) -> track as? RemoteAudioTrack }
+        withContext(Dispatchers.IO) {
+            audioTracks.forEach { remoteTrack ->
+                runCatching { remoteTrack.setVolume(gain) }
+                    .onFailure { log.w(tag = TAG) { "Error ajustando volumen remoto: ${it.message}" } }
+            }
+        }
+        updateParticipants()
     }
 
     actual suspend fun loadDevices(): LkDevices {
@@ -410,11 +431,26 @@ actual class ConferenceLiveKitManager actual constructor() {
                     }
                     is RoomEvent.ParticipantDisconnected -> {
                         log.d(tag = TAG) { "Participante desconectado: ${event.participant.identity}" }
-                        event.participant.identity?.value?.let { platformByIdentity.remove(it) }
+                        event.participant.identity?.value?.let {
+                            platformByIdentity.remove(it)
+                            playbackVolumeByIdentity.remove(it)
+                        }
                         updateParticipants()
                         updateVideoTracks()
                     }
                     is RoomEvent.TrackSubscribed -> {
+                        val subscribedIdentity = event.participant.identity?.value
+                        val savedPercent = subscribedIdentity?.let(playbackVolumeByIdentity::get)
+                        if (savedPercent != null) {
+                            val audioTrack = event.track as? RemoteAudioTrack
+                            if (audioTrack != null) {
+                                scope.launch(Dispatchers.IO) {
+                                    runCatching {
+                                        audioTrack.setVolume(savedPercent.coerceIn(0, 150) / 100.0)
+                                    }
+                                }
+                            }
+                        }
                         log.d(tag = TAG) { "Track suscrito: ${event.track.sid} de ${event.participant.identity}" }
                         updateParticipants()
                         updateVideoTracks()
@@ -457,6 +493,7 @@ actual class ConferenceLiveKitManager actual constructor() {
                         handleDataReceived(event.data, event.participant)
                     }
                     is RoomEvent.Disconnected -> {
+                        playbackVolumeByIdentity.clear()
                         log.w(tag = TAG) { "Room disconnected: reason=${event.reason} error=${event.error?.message}" }
                         _lastDisconnectReason.value = event.reason.toLkDisconnectReason()
                         _connectionState.value = LkConnectionState.DISCONNECTED
@@ -717,6 +754,8 @@ actual class ConferenceLiveKitManager actual constructor() {
             handRaisedAt = raisedHands[identityStr],
             videoTrackSid = videoSid,
             screenShareTrackSid = screenSid,
+            playbackVolumePercent = playbackVolumeByIdentity[identityStr] ?: 100,
+            canAdjustPlaybackVolume = !isLocal,
             platform = if (isLocal) currentPlatformMarker() else platformByIdentity[identityStr],
         )
     }

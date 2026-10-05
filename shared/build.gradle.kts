@@ -154,8 +154,8 @@ kotlin {
                 implementation("androidx.room:room-sqlite-wrapper:2.8.2")
 
                 // LiveKit Android SDK para conferencias
-                implementation("io.livekit:livekit-android:2.24.1")
-                implementation("io.livekit:livekit-android-camerax:2.24.1")
+                implementation("io.livekit:livekit-android:2.28.2")
+                implementation("io.livekit:livekit-android-camerax:2.28.2")
             }
         }
 

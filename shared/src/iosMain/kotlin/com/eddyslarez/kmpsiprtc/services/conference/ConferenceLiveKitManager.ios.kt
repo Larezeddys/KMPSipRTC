@@ -10,8 +10,10 @@ import cocoapods.MCNLiveKitDataBridge.LKDataPublisher
 import cocoapods.LiveKitClient.LocalTrackPublication
 import cocoapods.LiveKitClient.LocalVideoTrack
 import cocoapods.LiveKitClient.Participant
+import cocoapods.LiveKitClient.RemoteAudioTrack
 import cocoapods.LiveKitClient.RemoteParticipant
 import cocoapods.LiveKitClient.RemoteTrackPublication
+import cocoapods.LiveKitClient.setVolume
 import cocoapods.LiveKitClient.RemoteVideoTrack
 import cocoapods.LiveKitClient.Room
 import cocoapods.LiveKitClient.RoomDelegateProtocol
@@ -76,6 +78,7 @@ actual class ConferenceLiveKitManager actual constructor() {
     // Plataforma anunciada por cada participante remoto (identity -> marcador).
     // Se indexa por identity, la misma clave que usan raisedHands y los tracks.
     private val platformByIdentity = mutableMapOf<String, String>()
+    private val playbackVolumeByIdentity = mutableMapOf<String, Int>()
 
     private val _participants = MutableStateFlow<List<LkParticipant>>(emptyList())
     actual val participants: StateFlow<List<LkParticipant>> = _participants.asStateFlow()
@@ -167,6 +170,7 @@ actual class ConferenceLiveKitManager actual constructor() {
         roomDelegate = null
         raisedHands.clear()
         platformByIdentity.clear()
+        playbackVolumeByIdentity.clear()
         localHandRaised = false
         stopStateRefreshLoop()
         _connectionState.value = LkConnectionState.DISCONNECTED
@@ -350,6 +354,17 @@ actual class ConferenceLiveKitManager actual constructor() {
      * La lista de salidas era fija -- solo altavoz y auricular -- asi que un Bluetooth conectado
      * ni siquiera aparecia en el selector. Ahora se anade cuando iOS expone su puerto HFP.
      */
+    actual suspend fun setRemotePlaybackVolume(participantIdentity: String, volumePercent: Int) {
+        val participant = room?.remoteParticipants()?.values
+            ?.mapNotNull { it as? RemoteParticipant }
+            ?.firstOrNull { it.identity()?.stringValue() == participantIdentity }
+            ?: return
+        val percent = volumePercent.coerceIn(0, 150)
+        playbackVolumeByIdentity[participantIdentity] = percent
+        applyRemotePlaybackVolume(participant, percent)
+        updateParticipants()
+    }
+
     actual suspend fun loadDevices(): LkDevices {
         val session = AVAudioSession.sharedInstance()
         val bluetooth = session.bluetoothHfpPort()
@@ -508,8 +523,31 @@ actual class ConferenceLiveKitManager actual constructor() {
 
     fun onRemoteParticipantDisconnected(participant: RemoteParticipant?) {
         scope.launch {
-            participant?.identity()?.stringValue()?.let { platformByIdentity.remove(it) }
+            participant?.identity()?.stringValue()?.let {
+                platformByIdentity.remove(it)
+                playbackVolumeByIdentity.remove(it)
+            }
             refreshRoomState()
+        }
+    }
+
+    fun onRemotePlaybackTrackSubscribed(participant: RemoteParticipant) {
+        scope.launch {
+            val identity = participant.identity()?.stringValue() ?: return@launch
+            playbackVolumeByIdentity[identity]?.let { applyRemotePlaybackVolume(participant, it) }
+            refreshRoomState()
+        }
+    }
+
+    private suspend fun applyRemotePlaybackVolume(participant: RemoteParticipant, percent: Int) {
+        val gain = percent.coerceIn(0, 150) / 100.0
+        val audioTracks = participant.trackPublications().values.mapNotNull { publicationAny ->
+            val publication = publicationAny as? TrackPublication ?: return@mapNotNull null
+            if (publication.source() != TrackSourceMicrophone) return@mapNotNull null
+            publication.track() as? RemoteAudioTrack
+        }
+        withContext(Dispatchers.Default) {
+            audioTracks.forEach { track -> runCatching { track.setVolume(volume = gain) } }
         }
     }
 
@@ -521,6 +559,7 @@ actual class ConferenceLiveKitManager actual constructor() {
             _lastDisconnectReason.value = if (error != null) LkDisconnectReason.UNKNOWN else LkDisconnectReason.CLIENT_INITIATED
             stopStateRefreshLoop()
             _connectionState.value = LkConnectionState.DISCONNECTED
+            playbackVolumeByIdentity.clear()
             _participants.value = emptyList()
             _videoTracks.value = emptyList()
         }
@@ -664,6 +703,8 @@ actual class ConferenceLiveKitManager actual constructor() {
             handRaisedAt = raisedHands[identityStr],
             videoTrackSid = videoSid,
             screenShareTrackSid = screenSid,
+            playbackVolumePercent = playbackVolumeByIdentity[identityStr] ?: 100,
+            canAdjustPlaybackVolume = !isLocal,
             platform = if (isLocal) currentPlatformMarker() else platformByIdentity[identityStr],
         )
     }
@@ -920,7 +961,7 @@ private class IosRoomDelegate(
     
     @ObjCSignatureOverride
     override fun room(room: Room, participant: RemoteParticipant, didSubscribeTrack: RemoteTrackPublication) {
-        manager.onRoomContentChanged()
+        manager.onRemotePlaybackTrackSubscribed(participant)
     }
 
     
