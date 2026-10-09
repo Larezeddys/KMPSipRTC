@@ -222,6 +222,16 @@ class DesktopWebRtcManager : WebRtcManager {
         peerConnectionController.onRemoteVideoTrack = listener
     }
 
+    fun setRemoteVideoTrackListeners(
+        added: ((VideoTrack, List<String>, String?) -> Unit)?,
+        removed: ((String) -> Unit)?,
+    ) {
+        peerConnectionController.onRemoteVideoTrackAdded = added
+        peerConnectionController.onRemoteVideoTrackRemoved = removed
+    }
+
+    fun remoteVideoReceivers(): List<Pair<VideoTrack, String?>> = peerConnectionController.remoteVideoReceivers()
+
     // ==================== CONNECTION MANAGEMENT ====================
 
     override suspend fun createOffer(): String {

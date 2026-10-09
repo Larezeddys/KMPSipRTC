@@ -23,6 +23,9 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.time.Clock
 import kotlin.time.ExperimentalTime
 
@@ -49,13 +52,14 @@ actual class ConferenceLiveKitManager actual constructor() {
 
     // WebRTC PeerConnections
     private var publisherWebRtc: DesktopWebRtcManager? = null
-    private var subscriberWebRtc: DesktopWebRtcManager? = null
+    @Volatile private var subscriberWebRtc: DesktopWebRtcManager? = null
 
     private var joinResponse: LiveKitJoinResponse? = null
     private var localIdentity: String = ""
     private var localName: String = ""
-    private var subscriberReady = false
-    private val pendingOffers = mutableListOf<String>()
+    @Volatile private var subscriberReady = false
+    private val pendingOffers = ConcurrentLinkedQueue<String>()
+    private val subscriberOfferMutex = Mutex()
     private var selectedScreenShareSourceId: String? = null
     private var selectedCameraId: String? = null
     private var selectedMicrophoneId: String? = null
@@ -89,7 +93,7 @@ actual class ConferenceLiveKitManager actual constructor() {
     private var serverKnownMicMuted: Boolean? = null
 
     /** Sids de PARTICIPANTE que el SFU marca como hablando (livekit.SpeakerInfo). */
-    private val activeSpeakerSids = mutableSetOf<String>()
+    private val activeSpeakerSids = ConcurrentHashMap.newKeySet<String>()
     private var selectedSpeakerId: String? = null
 
     // Reconexión automática ante caídas inesperadas de la señalización (ver
@@ -124,14 +128,16 @@ actual class ConferenceLiveKitManager actual constructor() {
     private val jsonParser = Json { ignoreUnknownKeys = true }
 
     // Tracking de participantes remotos (del signaling)
-    private val remoteParticipants = mutableMapOf<String, LkParticipant>()
-    private val raisedHands = mutableMapOf<String, Long>()
+    private val remoteParticipants = ConcurrentHashMap<String, LkParticipant>()
+    private val raisedHands = ConcurrentHashMap<String, Long>()
+    private val remoteMediaLock = Any()
+    private val remoteVideoRegistry = DesktopRemoteVideoRegistry()
     private var localHandRaised = false
 
     // Plataforma anunciada por cada participante remoto (identity -> marcador).
     // Se indexa por identity porque es lo unico que el sobre DataPacket del SFU
     // garantiza: el sid del emisor no viaja en el paquete de datos.
-    private val platformByIdentity = mutableMapOf<String, String>()
+    private val platformByIdentity = ConcurrentHashMap<String, String>()
 
     @OptIn(ExperimentalTime::class)
     private fun currentTimeMs(): Long = Clock.System.now().toEpochMilliseconds()
@@ -188,33 +194,6 @@ actual class ConferenceLiveKitManager actual constructor() {
             localIdentity = joinResponse?.participantIdentity ?: participantName
             if (localName.isEmpty()) localName = joinResponse?.participantName ?: participantName
             log.d(tag = TAG) { "Signaling listo (Identity: $localIdentity, name: $localName). Esperando publisher RTC..." }
-
-            // Cargar participantes que ya estaban en la sala
-            joinResponse?.otherParticipants?.forEach { info ->
-                if (info.state != 3) { // no DISCONNECTED
-                    val handFromState = handRaisedFromParticipant(info)
-                    if (handFromState == true) {
-                        raisedHands[info.identity] = raisedHands[info.identity] ?: currentTimeMs()
-                    } else if (handFromState == false) {
-                        raisedHands.remove(info.identity)
-                    }
-                    val remoteScreenSharing = info.tracks.any {
-                        it.source == LiveKitTrackSource.SCREEN_SHARE.value
-                    }
-                    remoteParticipants[info.identity] = LkParticipant(
-                        identity = info.identity,
-                        name = info.name.ifEmpty { info.identity },
-                        sid = info.sid,
-                        isLocal = false,
-                        isAudioEnabled = info.tracks.hasActive(LiveKitTrackSource.MICROPHONE),
-                        isVideoEnabled = info.tracks.hasActive(LiveKitTrackSource.CAMERA),
-                        isScreenSharing = remoteScreenSharing,
-                        isHandRaised = raisedHands.containsKey(info.identity),
-                        handRaisedAt = raisedHands[info.identity],
-                    )
-                    log.d(tag = TAG) { "Existing participant: ${info.name} (${info.identity})" }
-                }
-            }
 
             rebuildParticipantList()
 
@@ -353,12 +332,14 @@ actual class ConferenceLiveKitManager actual constructor() {
                 nativeTrack = videoTrack,
                 isScreenShare = false
             )
-            _videoTracks.value = _videoTracks.value + handle
+            _videoTracks.update { tracks ->
+                tracks.filterNot { it.participantIdentity == localIdentity && !it.isScreenShare } + handle
+            }
         } else {
             pub.removeLocalVideoTrack()
-            _videoTracks.value = _videoTracks.value.filter {
-                !(it.participantIdentity == localIdentity && !it.isScreenShare)
-            }
+            _videoTracks.update { tracks -> tracks.filterNot {
+                it.participantIdentity == localIdentity && !it.isScreenShare
+            } }
 
             // Renegociar para remover el video
             try {
@@ -430,16 +411,16 @@ actual class ConferenceLiveKitManager actual constructor() {
                 nativeTrack = screenTrack,
                 isScreenShare = true
             )
-            _videoTracks.value = _videoTracks.value.filter {
-                !(it.participantIdentity == localIdentity && it.isScreenShare)
-            } + handle
+            _videoTracks.update { tracks -> tracks.filterNot {
+                it.participantIdentity == localIdentity && it.isScreenShare
+            } + handle }
 
             log.d(tag = TAG) { "Screen share Desktop activado, offer renegociado" }
         } else {
             pub.removeLocalScreenShareTrack()
-            _videoTracks.value = _videoTracks.value.filter {
-                !(it.participantIdentity == localIdentity && it.isScreenShare)
-            }
+            _videoTracks.update { tracks -> tracks.filterNot {
+                it.participantIdentity == localIdentity && it.isScreenShare
+            } }
 
             try {
                 val offer = pub.createOffer()
@@ -655,7 +636,14 @@ actual class ConferenceLiveKitManager actual constructor() {
         signalingClient.listener = object : LiveKitSignalingListener {
 
             override fun onJoinResponse(jr: LiveKitJoinResponse) {
+                localIdentity = jr.participantIdentity
+                if (localName.isEmpty()) localName = jr.participantName
+                // El roster debe estar disponible ANTES de que lleguen callbacks nativos.
+                synchronized(remoteMediaLock) {
+                    jr.otherParticipants.forEach { updateRemoteParticipant(it) }
+                }
                 joinResponse = jr
+                rebuildParticipantList()
                 log.d(tag = TAG) { "JoinResponse: room=${jr.room?.name}, identity=${jr.participantIdentity}" }
                 scope.launch {
                     try {
@@ -678,9 +666,12 @@ actual class ConferenceLiveKitManager actual constructor() {
             }
 
             override fun onOffer(sdp: LiveKitSessionDescription) {
+                // Encolar en el hilo del signaling conserva el orden de llegada,
+                // aunque Dispatchers.Default ejecute los jobs en otro orden.
+                pendingOffers.add(sdp.sdp)
                 scope.launch {
                     try {
-                        setupSubscriberAndAnswer(sdp.sdp)
+                        drainSubscriberOffers()
                     } catch (e: Exception) {
                         log.e(tag = TAG) { "Error configurando subscriber: ${e.message}" }
                     }
@@ -702,49 +693,17 @@ actual class ConferenceLiveKitManager actual constructor() {
 
             override fun onParticipantUpdate(update: LiveKitParticipantUpdate) {
                 log.d(tag = TAG) { "ParticipantUpdate: ${update.participants.size} participants" }
-                update.participants.forEach { info ->
-                    if (info.identity == localIdentity) return@forEach // skip local
-                    if (info.state == 3) {
-                        // DISCONNECTED — remover
-                        remoteParticipants.remove(info.identity)
-                        raisedHands.remove(info.identity)
-                        platformByIdentity.remove(info.identity)
-                        log.d(tag = TAG) { "Participant left: ${info.name} (${info.identity})" }
-                    } else {
+                synchronized(remoteMediaLock) {
+                    update.participants.forEach { info ->
+                        if (info.identity == localIdentity) return@forEach
                         val isNewParticipant = !remoteParticipants.containsKey(info.identity)
-                        // JOINING/JOINED/ACTIVE — agregar/actualizar.
-                        // Mano por atributos/metadata (estado "pegajoso" del participante):
-                        // complementa el mensaje por data channel, que es transitorio y se
-                        // pierde si el desktop entró tarde a la sala.
-                        val handFromState = handRaisedFromParticipant(info)
-                        if (handFromState != null) {
-                            if (handFromState) {
-                                raisedHands[info.identity] = raisedHands[info.identity] ?: currentTimeMs()
-                            } else {
-                                raisedHands.remove(info.identity)
-                            }
+                        updateRemoteParticipant(info)
+                        if (info.state != 3) {
+                            publishLocalHandState()
+                            if (isNewParticipant) announcePlatform()
                         }
-                        val remoteScreenSharing = info.tracks.any {
-                            it.source == LiveKitTrackSource.SCREEN_SHARE.value
-                        }
-                        remoteParticipants[info.identity] = LkParticipant(
-                            identity = info.identity,
-                            name = info.name.ifEmpty { info.identity },
-                            sid = info.sid,
-                            isLocal = false,
-                            isAudioEnabled = info.tracks.hasActive(LiveKitTrackSource.MICROPHONE),
-                            isVideoEnabled = info.tracks.hasActive(LiveKitTrackSource.CAMERA),
-                            isScreenSharing = remoteScreenSharing,
-                            isHandRaised = raisedHands.containsKey(info.identity),
-                            handRaisedAt = raisedHands[info.identity],
-                        )
-                        log.d(tag = TAG) { "Participant updated: ${info.name} (${info.identity}, state=${info.state}, screen=$remoteScreenSharing)" }
-                        publishLocalHandState()
-                        // Equivalente a RoomEvent.ParticipantConnected: re-anunciar la
-                        // plataforma solo cuando el participante es nuevo (este callback
-                        // llega tambien por cualquier cambio de estado del participante).
-                        if (isNewParticipant) announcePlatform()
                     }
+                    publishRemoteVideoHandles()
                 }
                 rebuildParticipantList()
             }
@@ -917,35 +876,36 @@ actual class ConferenceLiveKitManager actual constructor() {
         // para que esté listo cuando llegue el offer real
         // Registrar listener para Data Channel (chat messages del SFU)
         sub.setDataChannelMessageListener { bytes ->
-            handleDataChannelMessage(bytes)
+            synchronized(remoteMediaLock) {
+                if (subscriberWebRtc === sub) handleDataChannelMessage(bytes)
+            }
         }
 
-        // Registrar listener para video tracks remotos
-        sub.setOnRemoteVideoTrack { videoTrack ->
-            log.d(tag = TAG) { "Video track remoto recibido" }
-            // Por ahora asignar al primer participante remoto que no tenga video
-            val remoteId = remoteParticipants.keys.firstOrNull() ?: "unknown"
-            val handle = LkVideoTrackHandle(
-                participantIdentity = remoteId,
-                trackSid = "remote-video-${currentTimeMs()}",
-                nativeTrack = videoTrack,
-                isScreenShare = false
-            )
-            _videoTracks.value = _videoTracks.value + handle
-            rebuildParticipantList()
-        }
+        // Conservar MSID/MID y retirar receptores: el SID lo asigna el SFU.
+        sub.setRemoteVideoTrackListeners(
+            added = { videoTrack, streamIds, mid ->
+                synchronized(remoteMediaLock) {
+                    if (subscriberWebRtc === sub) {
+                        remoteVideoRegistry.added(videoTrack, streamIds, mid)
+                        publishRemoteVideoHandles()
+                    }
+                }
+            },
+            removed = { nativeId ->
+                synchronized(remoteMediaLock) {
+                    if (subscriberWebRtc === sub) {
+                        remoteVideoRegistry.removed(nativeId)
+                        publishRemoteVideoHandles()
+                    }
+                }
+            },
+        )
 
         subscriberReady = true
         log.d(tag = TAG) { "Subscriber WebRTC listo (con data channel y video listeners)" }
 
         // Procesar offers que llegaron antes de que el subscriber estuviera listo
-        if (pendingOffers.isNotEmpty()) {
-            log.d(tag = TAG) { "Procesando ${pendingOffers.size} offers pendientes" }
-            pendingOffers.forEach { offerSdp ->
-                processSubscriberOffer(offerSdp)
-            }
-            pendingOffers.clear()
-        }
+        drainSubscriberOffers()
 
         // 2. Crear publisher
         val pub = DesktopWebRtcManager()
@@ -1028,13 +988,11 @@ actual class ConferenceLiveKitManager actual constructor() {
         log.d(tag = TAG) { "Publisher offer enviado" }
     }
 
-    private suspend fun setupSubscriberAndAnswer(offerSdp: String) {
-        if (!subscriberReady) {
-            log.d(tag = TAG) { "Subscriber no listo, encolando offer" }
-            pendingOffers.add(offerSdp)
-            return
+    private suspend fun drainSubscriberOffers() = subscriberOfferMutex.withLock {
+        while (subscriberReady) {
+            val offerSdp = pendingOffers.poll() ?: break
+            processSubscriberOffer(offerSdp)
         }
-        processSubscriberOffer(offerSdp)
     }
 
     private suspend fun processSubscriberOffer(offerSdp: String) {
@@ -1045,7 +1003,20 @@ actual class ConferenceLiveKitManager actual constructor() {
         log.d(tag = TAG) { "Procesando subscriber offer" }
         // createAnswer() internamente hace setRemoteDescription + createAnswer + setLocalDescription
         // NO llamar setRemoteDescription por separado (causa doble set y falla)
+        synchronized(remoteMediaLock) {
+            if (subscriberWebRtc !== sub) return
+            remoteVideoRegistry.updateOffer(offerSdp)
+            publishRemoteVideoHandles()
+        }
         val answer = sub.createAnswer(offerSdp)
+        if (subscriberWebRtc !== sub) return
+        // Una nueva publicación puede reutilizar el MID sin otro callback nativo.
+        val receivers = sub.remoteVideoReceivers()
+        synchronized(remoteMediaLock) {
+            if (subscriberWebRtc !== sub) return
+            receivers.forEach { (track, mid) -> remoteVideoRegistry.added(track, emptyList(), mid) }
+            publishRemoteVideoHandles()
+        }
         signalingClient.sendAnswer(answer)
         log.d(tag = TAG) { "Subscriber answer enviado" }
     }
@@ -1060,9 +1031,49 @@ actual class ConferenceLiveKitManager actual constructor() {
     private fun List<LiveKitTrackInfo>.hasActive(source: LiveKitTrackSource): Boolean =
         any { it.source == source.value && !it.muted }
 
+    /** Debe ejecutarse con remoteMediaLock tomado. */
+    private fun updateRemoteParticipant(info: LiveKitParticipantInfo) {
+        if (info.identity.isEmpty() || info.identity == localIdentity) return
+        val previous = remoteParticipants[info.identity]
+        // Un Leave antiguo no puede borrar una reconexión con el mismo identity.
+        if (info.state == 3 && previous?.sid != info.sid) return
+        remoteVideoRegistry.updateParticipant(info)
+        if (info.state == 3) {
+            remoteParticipants.remove(info.identity)
+            raisedHands.remove(info.identity)
+            platformByIdentity.remove(info.identity)
+            return
+        }
+        handRaisedFromParticipant(info)?.let { raised ->
+            if (raised) raisedHands.putIfAbsent(info.identity, currentTimeMs())
+            else raisedHands.remove(info.identity)
+        }
+        val camera = info.tracks.firstOrNull { it.type == 1 && it.source == LiveKitTrackSource.CAMERA.value && !it.muted }
+        val screen = info.tracks.firstOrNull { it.type == 1 && it.source == LiveKitTrackSource.SCREEN_SHARE.value && !it.muted }
+        remoteParticipants[info.identity] = LkParticipant(
+            identity = info.identity,
+            name = info.name.ifEmpty { info.identity },
+            sid = info.sid,
+            isLocal = false,
+            isAudioEnabled = info.tracks.hasActive(LiveKitTrackSource.MICROPHONE),
+            isVideoEnabled = camera != null,
+            isScreenSharing = screen != null,
+            videoTrackSid = camera?.sid,
+            screenShareTrackSid = screen?.sid,
+            isHandRaised = raisedHands.containsKey(info.identity),
+            handRaisedAt = raisedHands[info.identity],
+        )
+    }
+
+    /** Conserva pistas locales y reemplaza la instantánea remota completa. */
+    private fun publishRemoteVideoHandles() {
+        val remote = remoteVideoRegistry.handles()
+        _videoTracks.update { current -> current.filter { it.participantIdentity == localIdentity } + remote }
+    }
+
     // ==================== PARTICIPANT MANAGEMENT ====================
 
-    private fun rebuildParticipantList() {
+    private fun rebuildParticipantList() = synchronized(remoteMediaLock) {
         val list = mutableListOf<LkParticipant>()
 
         // Participante local
@@ -1345,9 +1356,16 @@ actual class ConferenceLiveKitManager actual constructor() {
         publisherWebRtc?.closePeerConnection()
         publisherWebRtc?.dispose()
         publisherWebRtc = null
-        subscriberWebRtc?.closePeerConnection()
-        subscriberWebRtc?.dispose()
-        subscriberWebRtc = null
+        val oldSubscriber = synchronized(remoteMediaLock) {
+            val current = subscriberWebRtc
+            subscriberWebRtc = null
+            current?.setRemoteVideoTrackListeners(null, null)
+            remoteVideoRegistry.clear()
+            _videoTracks.value = emptyList()
+            current
+        }
+        oldSubscriber?.closePeerConnection()
+        oldSubscriber?.dispose()
         subscriberReady = false
         pendingOffers.clear()
         joinResponse = null

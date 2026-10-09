@@ -88,6 +88,9 @@ class DesktopPeerConnectionController(
     private var screenSender: RTCRtpSender? = null
     // Callback para cuando llega un video track remoto
     var onRemoteVideoTrack: ((VideoTrack) -> Unit)? = null
+    // Conferencias necesitan el MSID/MID real para asociar cada pista a su publicación.
+    var onRemoteVideoTrackAdded: ((VideoTrack, List<String>, String?) -> Unit)? = null
+    var onRemoteVideoTrackRemoved: ((String) -> Unit)? = null
 
     // === DATA CHANNEL para conferencias ===
     private var publisherDataChannel: RTCDataChannel? = null
@@ -192,6 +195,15 @@ class DesktopPeerConnectionController(
 
     fun hasPeerConnection(): Boolean = peerConnection != null
 
+    /** También recupera receptores reutilizados que no generan otro evento OnTrack. */
+    fun remoteVideoReceivers(): List<Pair<VideoTrack, String?>> =
+        peerConnection?.transceivers.orEmpty().mapNotNull { transceiver ->
+            if (transceiver.stopped()) return@mapNotNull null
+            val track = transceiver.receiver?.track as? VideoTrack ?: return@mapNotNull null
+            if (track.state == MediaStreamTrackState.ENDED) return@mapNotNull null
+            track to transceiver.mid
+        }
+
     fun createNewPeerConnection() {
         log.d(TAG) { "Creating new PeerConnection" }
 
@@ -276,8 +288,19 @@ class DesktopPeerConnectionController(
                     (track as? VideoTrack)?.let { videoTrack ->
                         log.d(TAG) { "✅ Remote video track received" }
                         onRemoteVideoTrack?.invoke(videoTrack)
+                        onRemoteVideoTrackAdded?.invoke(videoTrack, emptyList(), transceiver.mid)
                     }
                 }
+            }
+
+            override fun onAddTrack(receiver: RTCRtpReceiver, streams: Array<MediaStream>) {
+                (receiver.track as? VideoTrack)?.let { track ->
+                    onRemoteVideoTrackAdded?.invoke(track, streams.map { it.id() }, null)
+                }
+            }
+
+            override fun onRemoveTrack(receiver: RTCRtpReceiver) {
+                (receiver.track as? VideoTrack)?.let { onRemoteVideoTrackRemoved?.invoke(it.id) }
             }
 
             override fun onSignalingChange(state: RTCSignalingState) {}
@@ -305,7 +328,9 @@ class DesktopPeerConnectionController(
             }
             override fun onRenegotiationNeeded() {}
             override fun onAddStream(stream: MediaStream) {}
-            override fun onRemoveStream(stream: MediaStream) {}
+            override fun onRemoveStream(stream: MediaStream) {
+                stream.videoTracks.forEach { onRemoteVideoTrackRemoved?.invoke(it.id) }
+            }
         }
     }
 

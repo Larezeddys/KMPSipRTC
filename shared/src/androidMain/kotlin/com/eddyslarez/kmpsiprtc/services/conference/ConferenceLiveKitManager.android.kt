@@ -499,9 +499,11 @@ actual class ConferenceLiveKitManager actual constructor() {
                     }
                     is RoomEvent.TrackMuted -> {
                         updateParticipants()
+                    updateVideoTracks()
                     }
                     is RoomEvent.TrackUnmuted -> {
                         updateParticipants()
+                    updateVideoTracks()
                     }
                     is RoomEvent.ActiveSpeakersChanged -> {
                         updateParticipants()
@@ -728,7 +730,8 @@ actual class ConferenceLiveKitManager actual constructor() {
         fun addTracksFrom(participant: Participant) {
             participant.trackPublications.values.forEach { pub ->
                 val track = pub.track
-                if (track is VideoTrack) {
+                if (track is VideoTrack && track.enabled && !pub.muted &&
+                    (pub.source == Track.Source.CAMERA || pub.source == Track.Source.SCREEN_SHARE)) {
                     val isScreen = pub.source == Track.Source.SCREEN_SHARE
                     tracks.add(
                         LkVideoTrackHandle(
@@ -757,16 +760,16 @@ actual class ConferenceLiveKitManager actual constructor() {
             it.source == Track.Source.MICROPHONE && it.track?.enabled == true && !it.muted
         }
         val hasVideo = trackPublications.values.any {
-            it.source == Track.Source.CAMERA && it.track != null && !it.muted
+            it.source == Track.Source.CAMERA && it.track is VideoTrack && it.track?.enabled == true && !it.muted
         }
         val hasScreenShare = trackPublications.values.any {
-            it.source == Track.Source.SCREEN_SHARE && it.track != null
+            it.source == Track.Source.SCREEN_SHARE && it.track is VideoTrack && it.track?.enabled == true && !it.muted
         }
         val videoSid = trackPublications.values.firstOrNull {
-            it.source == Track.Source.CAMERA && it.track is VideoTrack
+            it.source == Track.Source.CAMERA && it.track is VideoTrack && it.track?.enabled == true && !it.muted
         }?.sid
         val screenSid = trackPublications.values.firstOrNull {
-            it.source == Track.Source.SCREEN_SHARE && it.track is VideoTrack
+            it.source == Track.Source.SCREEN_SHARE && it.track is VideoTrack && it.track?.enabled == true && !it.muted
         }?.sid
 
         return LkParticipant(

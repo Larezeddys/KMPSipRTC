@@ -705,6 +705,8 @@ actual class ConferenceLiveKitManager actual constructor() {
         fun addTracksFrom(participant: Participant) {
             participant.trackPublications().values.forEach { publicationAny ->
                 val publication = publicationAny as? TrackPublication ?: return@forEach
+                if (publication.isMuted() || (publication.source() != TrackSourceCamera &&
+                    publication.source() != TrackSourceScreenShareVideo)) return@forEach
                 val track = publication.track() ?: return@forEach
                 val isVideoTrack = track is LocalVideoTrack || track is RemoteVideoTrack
                 if (!isVideoTrack) return@forEach
