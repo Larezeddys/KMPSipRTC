@@ -24,9 +24,13 @@ actual class ConferenceLiveKitManager actual constructor() {
 
     private val TAG = "ConferenceLkManager"
 
+    @Volatile
     private var room: Room? = null
+    // Connect y disconnect modifican este contador exclusivamente en Main.
+    private var roomEpoch = 0L
     private var applicationContext: Application? = null
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private var roomEventsJob: Job? = null
 
     // Estado interno
     private val _participants = MutableStateFlow<List<LkParticipant>>(emptyList())
@@ -78,22 +82,26 @@ actual class ConferenceLiveKitManager actual constructor() {
         applicationContext = context
     }
 
-    actual suspend fun connect(url: String, token: String, participantName: String) {
+    actual suspend fun connect(url: String, token: String, participantName: String): Unit = withContext(Dispatchers.Main.immediate) {
         val ctx = applicationContext
             ?: throw IllegalStateException("ApplicationContext no configurado. Llamar setApplicationContext() antes de connect()")
 
         if (_connectionState.value == LkConnectionState.CONNECTED) {
             log.w(tag = TAG) { "Ya conectado a conferencia" }
-            return
+            return@withContext
         }
 
+        roomEpoch += 1
+        val connectionEpoch = roomEpoch
         _connectionState.value = LkConnectionState.CONNECTING
         log.d(tag = TAG) { "Conectando a LiveKit: $url" }
 
+        var connectingRoom: Room? = null
         try {
             // Crear Room con el SDK oficial
             val lkRoom = LiveKit.create(ctx)
             room = lkRoom
+            connectingRoom = lkRoom
 
             // Observar eventos del room
             collectRoomEvents(lkRoom)
@@ -104,6 +112,7 @@ actual class ConferenceLiveKitManager actual constructor() {
                 token = token,
             )
 
+            if (roomEpoch != connectionEpoch || room !== lkRoom) throw CancellationException("La sala ya fue reemplazada")
             _connectionState.value = LkConnectionState.CONNECTED
             log.d(tag = TAG) { "Conectado exitosamente a LiveKit" }
 
@@ -115,30 +124,44 @@ actual class ConferenceLiveKitManager actual constructor() {
             scope.launch { announcePlatformRepeatedly(lkRoom) }
 
         } catch (e: Exception) {
-            log.e(tag = TAG) { "Error conectando a LiveKit: ${e.message}" }
-            _connectionState.value = LkConnectionState.ERROR
-            room?.disconnect()
-            room = null
+            if (roomEpoch == connectionEpoch && room === connectingRoom) {
+                room = null
+                roomEventsJob?.cancel()
+                roomEventsJob = null
+                if (e !is CancellationException) _connectionState.value = LkConnectionState.ERROR
+            }
+            runCatching { connectingRoom?.disconnect() }
+            if (e !is CancellationException) log.e(tag = TAG) { "Error conectando a LiveKit: ${e.message}" }
             throw e
         }
     }
 
-    actual suspend fun disconnect() {
+    actual suspend fun disconnect(): Unit = withContext(Dispatchers.Main.immediate) {
+        roomEpoch += 1
+        val disconnectEpoch = roomEpoch
         log.d(tag = TAG) { "Desconectando de conferencia" }
+        val disconnectingRoom = room
+        // Invalidar antes del SDK impide que sus últimos eventos modifiquen otra sesión.
+        room = null
+        roomEventsJob?.cancel()
+        roomEventsJob = null
         try {
-            room?.disconnect()
+            disconnectingRoom?.disconnect()
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             log.w(tag = TAG) { "Error en disconnect: ${e.message}" }
         } finally {
-            room = null
-            _connectionState.value = LkConnectionState.DISCONNECTED
-            _participants.value = emptyList()
-            _videoTracks.value = emptyList()
-            _mediaState.value = LkMediaState()
-            raisedHands.clear()
-            platformByIdentity.clear()
-            playbackVolumeByIdentity.clear()
-            localHandRaised = false
+            if (roomEpoch == disconnectEpoch) {
+                room = null
+                _connectionState.value = LkConnectionState.DISCONNECTED
+                _participants.value = emptyList()
+                _videoTracks.value = emptyList()
+                _mediaState.value = LkMediaState()
+                raisedHands.clear()
+                platformByIdentity.clear()
+                playbackVolumeByIdentity.clear()
+                localHandRaised = false
+            }
         }
     }
 
@@ -419,14 +442,17 @@ actual class ConferenceLiveKitManager actual constructor() {
     }
 
     private fun collectRoomEvents(lkRoom: Room) {
-        scope.launch {
+        roomEventsJob?.cancel()
+        roomEventsJob = scope.launch {
             lkRoom.events.collect { event ->
+                if (room !== lkRoom) return@collect
                 when (event) {
                     is RoomEvent.ParticipantConnected -> {
                         log.d(tag = TAG) { "Participante conectado: ${event.participant.identity}" }
                         applyParticipantHandAttributes(event.participant)
                         // Re-anunciar la plataforma para que quien acaba de entrar la reciba.
                         announcePlatform(lkRoom)
+                        if (room !== lkRoom) return@collect
                         updateParticipants()
                     }
                     is RoomEvent.ParticipantDisconnected -> {
@@ -444,7 +470,8 @@ actual class ConferenceLiveKitManager actual constructor() {
                         if (savedPercent != null) {
                             val audioTrack = event.track as? RemoteAudioTrack
                             if (audioTrack != null) {
-                                scope.launch(Dispatchers.IO) {
+                                launch(Dispatchers.IO) {
+                                    if (room !== lkRoom) return@launch
                                     runCatching {
                                         audioTrack.setVolume(savedPercent.coerceIn(0, 150) / 100.0)
                                     }
@@ -575,6 +602,7 @@ actual class ConferenceLiveKitManager actual constructor() {
                 reliability = DataPublishReliability.RELIABLE,
             ).getOrThrow()
         }.onFailure { error ->
+            if (error is CancellationException) throw error
             log.w(tag = TAG) { "Fallo anunciando plataforma: ${error.message}" }
         }
     }

@@ -30,6 +30,7 @@ import com.eddyslarez.kmpsiprtc.platform.log
 import platform.AVFAudio.*
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.ObjCSignatureOverride
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -67,8 +68,11 @@ actual class ConferenceLiveKitManager actual constructor() {
     private val tag = "ConferenceLkManager"
 
     private var room: Room? = null
+    // Connect y disconnect modifican este contador exclusivamente en Main.
+    private var roomEpoch = 0L
     private var roomDelegate: IosRoomDelegate? = null
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private var roomCallbacksJob: Job? = null
     private var stateRefreshJob: Job? = null
     private var broadcastPending = false
     private var broadcastTimeoutJob: Job? = null
@@ -102,10 +106,10 @@ actual class ConferenceLiveKitManager actual constructor() {
     private val _chatMessages = MutableStateFlow<List<LkChatMessage>>(emptyList())
     actual val chatMessages: StateFlow<List<LkChatMessage>> = _chatMessages.asStateFlow()
 
-    actual suspend fun connect(url: String, token: String, participantName: String) {
+    actual suspend fun connect(url: String, token: String, participantName: String): Unit = withContext(Dispatchers.Main.immediate) {
         if (_connectionState.value == LkConnectionState.CONNECTED) {
             log.w(tag = tag) { "Ya conectado a conferencia iOS" }
-            return
+            return@withContext
         }
 
         if (url.isBlank() || token.isBlank()) {
@@ -114,9 +118,13 @@ actual class ConferenceLiveKitManager actual constructor() {
             throw LiveKitIosException("LiveKit URL/token vacio para iOS")
         }
 
+        roomEpoch += 1
+        val connectionEpoch = roomEpoch
         _connectionState.value = LkConnectionState.CONNECTING
         log.d(tag = tag) { "Conectando a LiveKit iOS: $url, participant=$participantName" }
 
+        roomCallbacksJob?.cancel()
+        roomCallbacksJob = SupervisorJob(scope.coroutineContext[Job])
         val delegate = IosRoomDelegate(this)
         val lkRoom = Room(delegate = delegate, connectOptions = null, roomOptions = null)
         roomDelegate = delegate
@@ -132,25 +140,39 @@ actual class ConferenceLiveKitManager actual constructor() {
                     completionHandler = completion,
                 )
             }
+            if (roomEpoch != connectionEpoch || room !== lkRoom) throw CancellationException("La sala ya fue reemplazada")
             _connectionState.value = LkConnectionState.CONNECTED
             refreshRoomState()
             requestHandStateSync()
             announcePlatformRepeatedly()
+            if (roomEpoch != connectionEpoch || room !== lkRoom) throw CancellationException("La sala ya fue reemplazada")
             startStateRefreshLoop()
             log.d(tag = tag) { "Conectado exitosamente a LiveKit iOS" }
         } catch (error: Throwable) {
-            log.e(tag = tag) { "Error conectando a LiveKit iOS: ${error.message}" }
-            stopStateRefreshLoop()
-            _connectionState.value = LkConnectionState.ERROR
-            room?.disconnectWithCompletionHandler {}
-            room = null
-            roomDelegate = null
+            if (roomEpoch == connectionEpoch && room === lkRoom) {
+                room = null
+                roomDelegate = null
+                roomCallbacksJob?.cancel()
+                roomCallbacksJob = null
+                stopStateRefreshLoop()
+                if (error !is CancellationException) _connectionState.value = LkConnectionState.ERROR
+            }
+            lkRoom.removeAllDelegates()
+            lkRoom.disconnectWithCompletionHandler {}
+            if (error !is CancellationException) log.e(tag = tag) { "Error conectando a LiveKit iOS: ${error.message}" }
             throw error
         }
     }
 
-    actual suspend fun disconnect() {
+    actual suspend fun disconnect(): Unit = withContext(Dispatchers.Main.immediate) {
+        roomEpoch += 1
+        val disconnectEpoch = roomEpoch
         val lkRoom = room
+        // Los delegates pueden llegar al hilo principal después de completar la desconexión.
+        room = null
+        roomDelegate = null
+        roomCallbacksJob?.cancel()
+        roomCallbacksJob = null
         stopStateRefreshLoop()
         // El observador Darwin es global al proceso: si no se suelta aqui, sobrevive a la sala
         // y una transmision posterior le llegaria a un manager ya muerto.
@@ -159,26 +181,31 @@ actual class ConferenceLiveKitManager actual constructor() {
         broadcastTimeoutJob = null
         broadcastPending = false
         log.d(tag = tag) { "Desconectando de conferencia iOS" }
-        if (lkRoom != null) {
-            suspendCancellableCoroutine { continuation ->
-                lkRoom.disconnectWithCompletionHandler {
-                    if (continuation.isActive) continuation.resume(Unit)
+        try {
+            if (lkRoom != null) {
+                lkRoom.removeAllDelegates()
+                suspendCancellableCoroutine { continuation ->
+                    lkRoom.disconnectWithCompletionHandler {
+                        if (continuation.isActive) continuation.resume(Unit)
+                    }
                 }
             }
-            lkRoom.removeAllDelegates()
+        } finally {
+            if (roomEpoch == disconnectEpoch) {
+                room = null
+                roomDelegate = null
+                raisedHands.clear()
+                platformByIdentity.clear()
+                playbackVolumeByIdentity.clear()
+                localHandRaised = false
+                stopStateRefreshLoop()
+                _connectionState.value = LkConnectionState.DISCONNECTED
+                _participants.value = emptyList()
+                _videoTracks.value = emptyList()
+                _chatMessages.value = emptyList()
+                _mediaState.value = LkMediaState()
+            }
         }
-        room = null
-        roomDelegate = null
-        raisedHands.clear()
-        platformByIdentity.clear()
-        playbackVolumeByIdentity.clear()
-        localHandRaised = false
-        stopStateRefreshLoop()
-        _connectionState.value = LkConnectionState.DISCONNECTED
-        _participants.value = emptyList()
-        _videoTracks.value = emptyList()
-        _chatMessages.value = emptyList()
-        _mediaState.value = LkMediaState()
     }
 
     actual suspend fun setMicrophoneEnabled(enabled: Boolean) {
@@ -224,12 +251,12 @@ actual class ConferenceLiveKitManager actual constructor() {
      * paso 3. Si nunca llega, el timeout despublica para no dejar un rectangulo negro
      * colgado en la sala.
      */
-    actual suspend fun setScreenShareEnabled(enabled: Boolean) {
-        val lkRoom = room ?: return
+    actual suspend fun setScreenShareEnabled(enabled: Boolean): Unit = withContext(Dispatchers.Main.immediate) {
+        val lkRoom = room ?: return@withContext
 
         if (!enabled) {
             stopBroadcastScreenShare(lkRoom)
-            return
+            return@withContext
         }
 
         if (!LKBroadcastBridge.isConfigured()) {
@@ -239,7 +266,7 @@ actual class ConferenceLiveKitManager actual constructor() {
             )
         }
 
-        observeBroadcastLifecycle()
+        observeBroadcastLifecycle(lkRoom)
         broadcastPending = true
         _mediaState.value = _mediaState.value.copy(screenSharePending = true)
 
@@ -259,14 +286,15 @@ actual class ConferenceLiveKitManager actual constructor() {
             throw error
         }
 
+        if (room !== lkRoom) throw CancellationException("La sala ya fue reemplazada")
         armBroadcastTimeout(lkRoom)
         refreshRoomState()
     }
 
-    private fun observeBroadcastLifecycle() {
+    private fun observeBroadcastLifecycle(lkRoom: Room) {
         LKBroadcastBridge.startObservingWithOnStarted(
             started = {
-                scope.launch {
+                launchRoomCallback(lkRoom) {
                     broadcastTimeoutJob?.cancel()
                     broadcastTimeoutJob = null
                     broadcastPending = false
@@ -281,15 +309,16 @@ actual class ConferenceLiveKitManager actual constructor() {
             onStopped = {
                 // El usuario paro desde la pildora roja o el Centro de Control. Sin esto el
                 // boton se quedaria encendido y el track publicado en negro.
-                scope.launch {
+                launchRoomCallback(lkRoom) {
                     log.d(tag = tag) { "Broadcast detenido desde el sistema" }
-                    room?.let { stopBroadcastScreenShare(it) }
+                    stopBroadcastScreenShare(lkRoom)
                 }
             },
         )
     }
 
     private suspend fun stopBroadcastScreenShare(lkRoom: Room) {
+        if (room !== lkRoom) return
         broadcastTimeoutJob?.cancel()
         broadcastTimeoutJob = null
         broadcastPending = false
@@ -309,8 +338,13 @@ actual class ConferenceLiveKitManager actual constructor() {
                     completion = completion,
                 )
             }
-        }.onFailure { log.w(tag = tag) { "Error despublicando broadcast: ${it.message}" } }
+        }.onFailure { error ->
+            if (error is CancellationException) throw error
+            log.w(tag = tag) { "Error despublicando broadcast: ${error.message}" }
+        }
 
+        // La espera nativa pudo completar después de abandonar o reemplazar la sala.
+        if (room !== lkRoom) return
         _mediaState.value = _mediaState.value.copy(
             screenShareEnabled = false,
             screenSharePending = false,
@@ -322,9 +356,12 @@ actual class ConferenceLiveKitManager actual constructor() {
      *  quedaria publicado en negro. */
     private fun armBroadcastTimeout(lkRoom: Room) {
         broadcastTimeoutJob?.cancel()
-        broadcastTimeoutJob = scope.launch {
+        broadcastTimeoutJob = launchRoomCallback(lkRoom) {
             delay(BROADCAST_START_TIMEOUT_MS)
+            if (room !== lkRoom) return@launchRoomCallback
             if (broadcastPending) {
+                // El timeout no debe cancelarse a sí mismo antes del await de despublicación.
+                broadcastTimeoutJob = null
                 log.w(tag = tag) { "El broadcast no arranco en $BROADCAST_START_TIMEOUT_MS ms" }
                 stopBroadcastScreenShare(lkRoom)
             }
@@ -492,8 +529,18 @@ actual class ConferenceLiveKitManager actual constructor() {
         _chatMessages.value = _chatMessages.value + msg
     }
 
-    fun onConnectionStateChanged(state: Long) {
-        scope.launch {
+    /** Valida al recibir el delegate y otra vez al ejecutar su corrutina. */
+    private fun launchRoomCallback(sourceRoom: Room, action: suspend () -> Unit): Job? {
+        if (room !== sourceRoom) return null
+        val callbackJob = roomCallbacksJob ?: return null
+        return scope.launch(callbackJob) {
+            if (room !== sourceRoom || !callbackJob.isActive) return@launch
+            action()
+        }
+    }
+
+    fun onConnectionStateChanged(sourceRoom: Room, state: Long) {
+        launchRoomCallback(sourceRoom) {
             _connectionState.value = when (state) {
                 ConnectionStateConnecting -> LkConnectionState.CONNECTING
                 ConnectionStateReconnecting -> LkConnectionState.RECONNECTING
@@ -510,20 +557,21 @@ actual class ConferenceLiveKitManager actual constructor() {
         }
     }
 
-    fun onRoomContentChanged() {
-        scope.launch { refreshRoomState() }
+    fun onRoomContentChanged(sourceRoom: Room) {
+        launchRoomCallback(sourceRoom) { refreshRoomState() }
     }
 
     /** Un remoto acaba de entrar: re-anunciamos la plataforma para que la reciba. */
-    fun onRemoteParticipantConnected() {
-        scope.launch {
+    fun onRemoteParticipantConnected(sourceRoom: Room) {
+        launchRoomCallback(sourceRoom) {
             announcePlatform()
+            if (room !== sourceRoom) return@launchRoomCallback
             refreshRoomState()
         }
     }
 
-    fun onRemoteParticipantDisconnected(participant: RemoteParticipant?) {
-        scope.launch {
+    fun onRemoteParticipantDisconnected(sourceRoom: Room, participant: RemoteParticipant?) {
+        launchRoomCallback(sourceRoom) {
             participant?.identity()?.stringValue()?.let {
                 platformByIdentity.remove(it)
                 playbackVolumeByIdentity.remove(it)
@@ -532,10 +580,11 @@ actual class ConferenceLiveKitManager actual constructor() {
         }
     }
 
-    fun onRemotePlaybackTrackSubscribed(participant: RemoteParticipant) {
-        scope.launch {
-            val identity = participant.identity()?.stringValue() ?: return@launch
+    fun onRemotePlaybackTrackSubscribed(sourceRoom: Room, participant: RemoteParticipant) {
+        launchRoomCallback(sourceRoom) {
+            val identity = participant.identity()?.stringValue() ?: return@launchRoomCallback
             playbackVolumeByIdentity[identity]?.let { applyRemotePlaybackVolume(participant, it) }
+            if (room !== sourceRoom) return@launchRoomCallback
             refreshRoomState()
         }
     }
@@ -561,8 +610,8 @@ actual class ConferenceLiveKitManager actual constructor() {
         }
     }
 
-    fun onRoomDisconnected(error: NSError?) {
-        scope.launch {
+    fun onRoomDisconnected(sourceRoom: Room, error: NSError?) {
+        launchRoomCallback(sourceRoom) {
             if (error != null) {
                 log.w(tag = tag) { "LiveKit iOS desconectado: ${error.localizedDescription}" }
             }
@@ -575,17 +624,18 @@ actual class ConferenceLiveKitManager actual constructor() {
         }
     }
 
-    fun onRoomFailed(error: NSError?) {
-        scope.launch {
+    fun onRoomFailed(sourceRoom: Room, error: NSError?) {
+        launchRoomCallback(sourceRoom) {
             log.e(tag = tag) { "LiveKit iOS fallo de conexion: ${error?.localizedDescription}" }
             stopStateRefreshLoop()
             _connectionState.value = LkConnectionState.ERROR
         }
     }
 
-    fun onDataReceived(data: NSData, participant: RemoteParticipant?) {
+    fun onDataReceived(sourceRoom: Room, data: NSData, participant: RemoteParticipant?) {
+        if (room !== sourceRoom) return
         val text = NSString.create(data = data, encoding = NSUTF8StringEncoding)?.toString() ?: return
-        scope.launch { handleDataReceived(text, participant) }
+        launchRoomCallback(sourceRoom) { handleDataReceived(text, participant) }
     }
 
     private suspend fun publishData(text: String) {
@@ -616,8 +666,10 @@ actual class ConferenceLiveKitManager actual constructor() {
 
     private fun startStateRefreshLoop() {
         if (stateRefreshJob?.isActive == true) return
-        stateRefreshJob = scope.launch {
-            while (room != null && _connectionState.value == LkConnectionState.CONNECTED) {
+        val sourceRoom = room ?: return
+        val callbackJob = roomCallbacksJob ?: return
+        stateRefreshJob = scope.launch(callbackJob) {
+            while (room === sourceRoom && _connectionState.value == LkConnectionState.CONNECTED) {
                 refreshRoomState()
                 delay(500)
             }
@@ -813,7 +865,8 @@ actual class ConferenceLiveKitManager actual constructor() {
         val isFirstMarker = platformByIdentity.put(senderIdentity, marker) == null
         log.d(tag = tag) { "Plataforma de $senderIdentity: $marker (primera=$isFirstMarker)" }
         if (isFirstMarker) {
-            scope.launch { announcePlatform() }
+            val sourceRoom = room ?: return
+            launchRoomCallback(sourceRoom) { announcePlatform() }
         }
         refreshRoomState()
     }
@@ -822,7 +875,10 @@ actual class ConferenceLiveKitManager actual constructor() {
     private suspend fun announcePlatform() {
         // No debe tumbar el flujo que lo invoca si el canal aun no esta listo.
         runCatching { publishData(buildPlatformDataMessagePayload()) }
-            .onFailure { error -> log.w(tag = tag) { "Fallo anunciando plataforma: ${error.message}" } }
+            .onFailure { error ->
+                if (error is CancellationException) throw error
+                log.w(tag = tag) { "Fallo anunciando plataforma: ${error.message}" }
+            }
     }
 
     /**
@@ -830,9 +886,10 @@ actual class ConferenceLiveKitManager actual constructor() {
      * el anuncio unas pocas veces con intervalo en vez de perderlo.
      */
     private fun announcePlatformRepeatedly() {
-        scope.launch {
+        val sourceRoom = room ?: return
+        launchRoomCallback(sourceRoom) {
             repeat(PLATFORM_ANNOUNCE_ATTEMPTS) {
-                if (room == null || _connectionState.value != LkConnectionState.CONNECTED) return@launch
+                if (room !== sourceRoom || _connectionState.value != LkConnectionState.CONNECTED) return@launchRoomCallback
                 announcePlatform()
                 delay(PLATFORM_ANNOUNCE_RETRY_INTERVAL_MS)
             }
@@ -840,17 +897,20 @@ actual class ConferenceLiveKitManager actual constructor() {
     }
 
     private fun requestHandStateSync() {
-        scope.launch {
-            val identity = room?.localParticipant()?.identity()?.stringValue() ?: return@launch
+        val sourceRoom = room ?: return
+        launchRoomCallback(sourceRoom) {
+            val identity = sourceRoom.localParticipant().identity()?.stringValue() ?: return@launchRoomCallback
             publishData("""{"type":"hand/sync/request","at":${nowMs()},"participantIdentity":"$identity"}""")
+            if (room !== sourceRoom) return@launchRoomCallback
             publishLocalHandState()
         }
     }
 
     private fun publishLocalHandState() {
-        scope.launch {
-            val lp = room?.localParticipant() ?: return@launch
-            val identity = lp.identity()?.stringValue() ?: return@launch
+        val sourceRoom = room ?: return
+        launchRoomCallback(sourceRoom) {
+            val lp = sourceRoom.localParticipant()
+            val identity = lp.identity()?.stringValue() ?: return@launchRoomCallback
             val name = (lp.name() ?: identity).replace("\"", "\\\"")
             val at = raisedHands[identity] ?: nowMs()
             publishData("""{"type":"hand/sync/state","raised":$localHandRaised,"at":$at,"participantIdentity":"$identity","author":"$name"}""")
@@ -899,97 +959,97 @@ private class IosRoomDelegate(
     
     @ObjCSignatureOverride
     override fun room(room: Room, didUpdateConnectionState: Long, from: Long) {
-        manager.onConnectionStateChanged(didUpdateConnectionState)
+        manager.onConnectionStateChanged(room, didUpdateConnectionState)
     }
 
     override fun roomDidConnect(room: Room) {
-        manager.onConnectionStateChanged(ConnectionStateConnected)
+        manager.onConnectionStateChanged(room, ConnectionStateConnected)
     }
 
     override fun roomIsReconnecting(room: Room) {
-        manager.onConnectionStateChanged(ConnectionStateReconnecting)
+        manager.onConnectionStateChanged(room, ConnectionStateReconnecting)
     }
 
     override fun roomDidReconnect(room: Room) {
-        manager.onConnectionStateChanged(ConnectionStateConnected)
+        manager.onConnectionStateChanged(room, ConnectionStateConnected)
     }
 
     
     @ObjCSignatureOverride
     override fun room(room: Room, didFailToConnectWithError: cocoapods.LiveKitClient.LiveKitError?) {
-        manager.onRoomFailed(didFailToConnectWithError)
+        manager.onRoomFailed(room, didFailToConnectWithError)
     }
 
     
     @ObjCSignatureOverride
     override fun room(room: Room, didDisconnectWithError: cocoapods.LiveKitClient.LiveKitError?) {
-        manager.onRoomDisconnected(didDisconnectWithError)
+        manager.onRoomDisconnected(room, didDisconnectWithError)
     }
 
     
     @ObjCSignatureOverride
     override fun room(room: Room, participantDidConnect: RemoteParticipant) {
-        manager.onRemoteParticipantConnected()
+        manager.onRemoteParticipantConnected(room)
     }
 
 
     @ObjCSignatureOverride
     override fun room(room: Room, participantDidDisconnect: RemoteParticipant) {
-        manager.onRemoteParticipantDisconnected(participantDidDisconnect)
+        manager.onRemoteParticipantDisconnected(room, participantDidDisconnect)
     }
 
     
     @ObjCSignatureOverride
     override fun room(room: Room, didUpdateSpeakingParticipants: List<*>) {
-        manager.onRoomContentChanged()
+        manager.onRoomContentChanged(room)
     }
 
     
     @ObjCSignatureOverride
     override fun room(room: Room, localParticipant: LocalParticipant, didPublishTrack: LocalTrackPublication) {
-        manager.onRoomContentChanged()
+        manager.onRoomContentChanged(room)
     }
 
     
     @ObjCSignatureOverride
     override fun room(room: Room, localParticipant: LocalParticipant, didUnpublishTrack: LocalTrackPublication) {
-        manager.onRoomContentChanged()
+        manager.onRoomContentChanged(room)
     }
 
     
     @ObjCSignatureOverride
     override fun room(room: Room, remoteParticipant: RemoteParticipant, didPublishTrack: RemoteTrackPublication) {
-        manager.onRoomContentChanged()
+        manager.onRoomContentChanged(room)
     }
 
     
     @ObjCSignatureOverride
     override fun room(room: Room, remoteParticipant: RemoteParticipant, didUnpublishTrack: RemoteTrackPublication) {
-        manager.onRoomContentChanged()
+        manager.onRoomContentChanged(room)
     }
 
     
     @ObjCSignatureOverride
     override fun room(room: Room, participant: RemoteParticipant, didSubscribeTrack: RemoteTrackPublication) {
-        manager.onRemotePlaybackTrackSubscribed(participant)
+        manager.onRemotePlaybackTrackSubscribed(room, participant)
     }
 
     
     @ObjCSignatureOverride
     override fun room(room: Room, participant: RemoteParticipant, didUnsubscribeTrack: RemoteTrackPublication) {
-        manager.onRoomContentChanged()
+        manager.onRoomContentChanged(room)
     }
 
     
     @ObjCSignatureOverride
     override fun room(room: Room, participant: Participant, trackPublication: TrackPublication, didUpdateIsMuted: Boolean) {
-        manager.onRoomContentChanged()
+        manager.onRoomContentChanged(room)
     }
 
     
     @ObjCSignatureOverride
     override fun room(room: Room, participant: RemoteParticipant?, didReceiveData: NSData, forTopic: String) {
-        manager.onDataReceived(didReceiveData, participant)
+        manager.onDataReceived(room, didReceiveData, participant)
     }
 }
 
