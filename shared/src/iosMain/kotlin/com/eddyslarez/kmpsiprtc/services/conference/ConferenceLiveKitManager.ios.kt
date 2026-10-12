@@ -564,7 +564,7 @@ actual class ConferenceLiveKitManager actual constructor() {
     /** Un remoto acaba de entrar: re-anunciamos la plataforma para que la reciba. */
     fun onRemoteParticipantConnected(sourceRoom: Room) {
         launchRoomCallback(sourceRoom) {
-            announcePlatform()
+            announcePlatformRepeatedly()
             if (room !== sourceRoom) return@launchRoomCallback
             refreshRoomState()
         }
@@ -576,6 +576,10 @@ actual class ConferenceLiveKitManager actual constructor() {
                 platformByIdentity.remove(it)
                 playbackVolumeByIdentity.remove(it)
             }
+            // Los clientes que permanecen en la sala vuelven a anunciar su plataforma;
+            // asi el estado de presencia se resincroniza despues de cada salida.
+            announcePlatformRepeatedly()
+            if (room !== sourceRoom) return@launchRoomCallback
             refreshRoomState()
         }
     }

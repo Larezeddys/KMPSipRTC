@@ -696,11 +696,17 @@ actual class ConferenceLiveKitManager actual constructor() {
                 synchronized(remoteMediaLock) {
                     update.participants.forEach { info ->
                         if (info.identity == localIdentity) return@forEach
-                        val isNewParticipant = !remoteParticipants.containsKey(info.identity)
+                        val wasParticipantPresent = remoteParticipants.containsKey(info.identity)
                         updateRemoteParticipant(info)
-                        if (info.state != 3) {
+                        if (info.state != 3 && !wasParticipantPresent) {
                             publishLocalHandState()
-                            if (isNewParticipant) announcePlatform()
+                            // Un participante acaba de entrar: cada miembro anuncia
+                            // su plataforma varias veces mientras abre su data channel.
+                            announcePlatformRepeatedly()
+                        } else if (info.state == 3 && wasParticipantPresent) {
+                            // Un participante salio: se reanuncia la presencia restante
+                            // y se reintenta mientras se propaga el cambio de sala.
+                            announcePlatformRepeatedly()
                         }
                     }
                     publishRemoteVideoHandles()

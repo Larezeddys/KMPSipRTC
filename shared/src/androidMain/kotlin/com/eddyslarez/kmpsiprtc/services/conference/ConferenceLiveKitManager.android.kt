@@ -450,8 +450,9 @@ actual class ConferenceLiveKitManager actual constructor() {
                     is RoomEvent.ParticipantConnected -> {
                         log.d(tag = TAG) { "Participante conectado: ${event.participant.identity}" }
                         applyParticipantHandAttributes(event.participant)
-                        // Re-anunciar la plataforma para que quien acaba de entrar la reciba.
-                        announcePlatform(lkRoom)
+                        // El canal de datos puede abrirse después del evento de sala.
+                        // Reintenta para que el participante nuevo reciba las plataformas.
+                        scope.launch { announcePlatformRepeatedly(lkRoom) }
                         if (room !== lkRoom) return@collect
                         updateParticipants()
                     }
@@ -461,6 +462,10 @@ actual class ConferenceLiveKitManager actual constructor() {
                             platformByIdentity.remove(it)
                             playbackVolumeByIdentity.remove(it)
                         }
+                        // Los clientes restantes vuelven a anunciarse y reintentan mientras
+                        // se propaga el evento de salida al resto de la sala.
+                        scope.launch { announcePlatformRepeatedly(lkRoom) }
+                        if (room !== lkRoom) return@collect
                         updateParticipants()
                         updateVideoTracks()
                     }
