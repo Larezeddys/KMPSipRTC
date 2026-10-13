@@ -1546,7 +1546,8 @@ class KmpSipRtc private constructor() {
         phoneNumber: String,
         recordCall: Boolean = false,
         username: String? = null,
-        domain: String? = null
+        domain: String? = null,
+        onCallCreated: ((String) -> Unit)? = null,
     ) {
         checkInitialized()
 
@@ -1561,7 +1562,7 @@ class KmpSipRtc private constructor() {
         }
 
         log.d(tag = TAG) { "Making call to $phoneNumber from $finalUsername@$finalDomain (record=$recordCall)" }
-        sipCoreManager?.makeCall(phoneNumber, finalUsername, finalDomain, recordCall)
+        sipCoreManager?.makeCall(phoneNumber, finalUsername, finalDomain, recordCall, onCallCreated)
     }
 
     /**
@@ -2102,6 +2103,17 @@ class KmpSipRtc private constructor() {
     /**
      * Envía tono DTMF
      */
+    /** Envía un tono solamente a la llamada indicada y sin una cola que sobreviva a un cambio. */
+    fun clearDtmfSenderForCall(callId: String) {
+        // La limpieza es segura durante el cierre, sin exigir core inicializado.
+        sipCoreManager?.clearDtmfSenderForCall(callId)
+    }
+
+    fun sendDtmfForCall(callId: String, digit: Char, duration: Int = 160): Boolean {
+        checkInitialized()
+        return sipCoreManager?.sendDtmfForCall(callId, digit, duration) ?: false
+    }
+
     fun sendDtmf(digit: Char, duration: Int = 160): Boolean {
         checkInitialized()
         return sipCoreManager?.sendDtmf(digit, duration) ?: false

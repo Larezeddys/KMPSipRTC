@@ -1295,7 +1295,13 @@ class SipCoreManager private constructor(
     }
 
     // Métodos de llamadas (delegados a CallManager)
-    fun makeCall(phoneNumber: String, sipName: String, domain: String, recordCall: Boolean = false) {
+    fun makeCall(
+        phoneNumber: String,
+        sipName: String,
+        domain: String,
+        recordCall: Boolean = false,
+        onCallCreated: ((String) -> Unit)? = null,
+    ) {
         val accountKey = "$sipName@$domain"
         val accountInfo = activeAccounts[accountKey] ?: run {
             log.e(tag = TAG) { "Account not found: $accountKey" }
@@ -1308,7 +1314,7 @@ class SipCoreManager private constructor(
         scope.launch {
             runCatching { applyAccountRingtoneUris(sipName, domain, preferGlobal = false) }
         }
-        callManager?.makeCall(phoneNumber, accountInfo, recordCall = recordCall)
+        callManager?.makeCall(phoneNumber, accountInfo, recordCall = recordCall, onCallCreated = onCallCreated)
     }
 
     fun endCall(callId: String? = null) = callManager?.endCall(callId)
@@ -1367,6 +1373,11 @@ class SipCoreManager private constructor(
     }
 
     // Métodos DTMF (delegados a CallManager)
+    fun clearDtmfSenderForCall(callId: String) = callManager?.clearDtmfSenderForCall(callId)
+
+    fun sendDtmfForCall(callId: String, digit: Char, duration: Int = 160) =
+        callManager?.sendDtmfForCall(callId, digit, duration) ?: false
+
     fun sendDtmf(digit: Char, duration: Int = 160) = callManager?.sendDtmf(digit, duration)
     fun sendDtmfSequence(digits: String, duration: Int = 160) =
         callManager?.sendDtmfSequence(digits, duration)

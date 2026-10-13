@@ -926,6 +926,19 @@ class PeerConnectionController(
 
     // ==================== DTMF ====================
 
+    /** El sender local permanece ligado a esta PeerConnection. */
+    fun captureDtmfSender(): ((String, Int, Int) -> Boolean)? {
+        val originalConnection = peerConnection ?: return null
+        val sender = originalConnection.senders.firstOrNull { it.track()?.kind() == "audio" }?.dtmf()
+            ?: return null
+        return { tones, duration, gap ->
+            try {
+                peerConnection === originalConnection &&
+                    sender.canInsertDtmf() && sender.insertDtmf(tones, duration, gap)
+            } catch (_: Exception) { false }
+        }
+    }
+
     fun sendDtmf(tones: String, duration: Int, gap: Int): Boolean {
         if (peerConnection == null) return false
 
@@ -951,11 +964,11 @@ class PeerConnectionController(
             }
             val success = dtmfSender.insertDtmf(tones, duration, gap)
             if (success) {
-                log.d(TAG) { "✅ DTMF sent: $tones (duration: ${duration}ms, gap: ${gap}ms)" }
+                log.d(TAG) { "DTMF enviado (duración: ${duration}ms, intervalo: ${gap}ms)" }
             } else {
                 log.e(TAG) { "Failed to insert DTMF" }
             }
-            log.d(TAG) { "Sending DTMF: $tones" }
+            log.d(TAG) { "Envío DTMF procesado" }
             return success
         } catch (e: Exception) {
             log.e(TAG) { "Error sending DTMF: ${e.message}" }

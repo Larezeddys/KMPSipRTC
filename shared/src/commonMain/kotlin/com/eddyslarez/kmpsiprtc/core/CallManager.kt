@@ -28,6 +28,10 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.atomicfu.atomic
+import kotlinx.atomicfu.locks.SynchronizedObject
+import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -47,6 +51,16 @@ class CallManager(
     private val dtmfQueue = mutableListOf<DtmfRequest>()
     private var isDtmfProcessing = false
     private val dtmfMutex = Mutex()
+    private data class CapturedDtmfSender(val callId: String, val generation: Long, val send: (String, Int, Int) -> Boolean)
+    private val outgoingDtmfSender = MutableStateFlow<CapturedDtmfSender?>(null)
+    private val outgoingDtmfGeneration = atomic(0L)
+    private val outgoingDtmfLock = SynchronizedObject()
+
+    private fun invalidateOutgoingDtmfSender(): Long = synchronized(outgoingDtmfLock) {
+        val generation = outgoingDtmfGeneration.incrementAndGet()
+        outgoingDtmfSender.value = null
+        generation
+    }
     private var matrixManager: MatrixManager? = null
 
     // Flag para suprimir handleWebRtcClosed/Connected durante recreación intencional
@@ -151,7 +165,9 @@ class CallManager(
         accountInfo: AccountInfo,
         enableTranslation: Boolean = false,
         recordCall: Boolean = false,
+        onCallCreated: ((String) -> Unit)? = null,
     ) {
+        val dtmfGeneration = invalidateOutgoingDtmfSender()
         if (!accountInfo.isRegistered.value) {
             log.d(tag = TAG) { "Error: Not registered with SIP server" }
             sipCoreManager.sipCallbacks?.onCallFailed("Not registered with SIP server")
@@ -205,6 +221,17 @@ class CallManager(
                 )
 
                 accountInfo.currentCallData.value = callData
+                if (onCallCreated != null && outgoingDtmfGeneration.value == dtmfGeneration) {
+                    val sender = webRtcManager.captureDtmfSender()
+                    synchronized(outgoingDtmfLock) {
+                        if (outgoingDtmfGeneration.value == dtmfGeneration) {
+                            outgoingDtmfSender.value = sender?.let { CapturedDtmfSender(callId, dtmfGeneration, it) }
+                        }
+                    }
+                }
+                // Identidad exacta de esta petición; nunca deducirla por el número marcado.
+                runCatching { onCallCreated?.invoke(callId) }
+                    .onFailure { log.w(TAG) { "No se pudo informar la identidad de la llamada" } }
                 CallStateManager.startOutgoingCall(callId, phoneNumber, callData)
                 sipCoreManager.notifyCallStateChanged(CallState.OUTGOING_INIT)
 
@@ -238,6 +265,7 @@ class CallManager(
      * Finaliza una llamada activa - despacha por callType
      */
     fun endCall(callId: String? = null) {
+        invalidateOutgoingDtmfSender()
         val accountInfo = sipCoreManager.currentAccountInfo
 
         // Resolver callData desde AccountInfo o MultiCallManager
@@ -394,6 +422,7 @@ class CallManager(
      * Acepta una llamada entrante - despacha por callType
      */
     fun acceptCall(callId: String? = null, recordCall: Boolean = false) {
+        invalidateOutgoingDtmfSender()
 
         // Resolver callData desde AccountInfo o MultiCallManager
         val accountInfo = sipCoreManager.currentAccountInfo
@@ -683,6 +712,7 @@ class CallManager(
     fun isMuted(): Boolean = audioManager.isMuted()
 
     fun holdCall(callId: String? = null) {
+        invalidateOutgoingDtmfSender()
         val accountInfo = sipCoreManager.currentAccountInfo ?: return
         val targetCallData = if (callId != null) {
             MultiCallManager.getCall(callId)
@@ -724,6 +754,7 @@ class CallManager(
     }
 
     fun resumeCall(callId: String? = null) {
+        invalidateOutgoingDtmfSender()
         val accountInfo = sipCoreManager.currentAccountInfo ?: return
         val targetCallData = if (callId != null) {
             MultiCallManager.getCall(callId)
@@ -820,6 +851,39 @@ class CallManager(
         }
     }
 
+    /**
+     * Envío directo por identidad, utilizado por secuencias de pausas.
+     * Se verifica al consumir el tono y no se guarda en la cola de la llamada actual.
+     */
+    fun clearDtmfSenderForCall(callId: String) = synchronized(outgoingDtmfLock) {
+        if (outgoingDtmfSender.value?.callId == callId) {
+            outgoingDtmfSender.value = null
+            outgoingDtmfGeneration.incrementAndGet()
+        }
+    }
+
+    fun sendDtmfForCall(callId: String, digit: Char, duration: Int = 160): Boolean =
+        synchronized(outgoingDtmfLock) {
+            if (digit !in "0123456789*#ABCDabcd") return@synchronized false
+            val captured = outgoingDtmfSender.value?.takeIf {
+                it.callId == callId && it.generation == outgoingDtmfGeneration.value
+            } ?: return@synchronized false
+            val currentCall = sipCoreManager.currentAccountInfo?.currentCallData?.value
+                ?: return@synchronized false
+            val callState = CallStateManager.getStateForCall(callId)
+            val connectedCalls = MultiCallManager.getActiveCalls().filter {
+                CallStateManager.getStateForCall(it.callId)?.isConnected() == true
+            }
+            if (currentCall.callId != callId || callState?.isConnected() != true ||
+                connectedCalls.size != 1 || connectedCalls.single().callId != callId ||
+                currentCall.isOnHold == true || isResettingPeerConnection
+            ) return@synchronized false
+
+            // No se suspende: el envío y la invalidación pertenecen a la misma sección breve.
+            try { captured.send(digit.uppercaseChar().toString(), duration, 100) }
+            catch (_: Exception) { false }
+        }
+
     fun sendDtmf(digit: Char, duration: Int = 160): Boolean {
         val validDigits = setOf(
             '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
@@ -845,11 +909,15 @@ class CallManager(
         return true
     }
 
-    private suspend fun processDtmfQueue() = withContext(Dispatchers.IO) {
-        dtmfMutex.withLock {
-            if (isDtmfProcessing || dtmfQueue.isEmpty()) return@withLock
-            isDtmfProcessing = true
+    private suspend fun processDtmfQueue(): Unit = withContext(Dispatchers.IO) {
+        val shouldProcess = dtmfMutex.withLock {
+            if (isDtmfProcessing || dtmfQueue.isEmpty()) false
+            else {
+                isDtmfProcessing = true
+                true
+            }
         }
+        if (!shouldProcess) return@withContext
 
         try {
             while (true) {
@@ -863,9 +931,12 @@ class CallManager(
                 if (success) delay(150)
             }
         } finally {
-            dtmfMutex.withLock {
+            val hasRemaining = dtmfMutex.withLock {
                 isDtmfProcessing = false
+                dtmfQueue.isNotEmpty()
             }
+            // Un tono pudo llegar después de observar la cola vacía y antes de liberar al dueño.
+            if (hasRemaining) scope.launch { processDtmfQueue() }
         }
     }
 
@@ -894,7 +965,7 @@ class CallManager(
         scope.launch {
             dtmfMutex.withLock {
                 dtmfQueue.clear()
-                isDtmfProcessing = false
+                // El consumidor anterior conserva la propiedad hasta su bloque finally.
             }
         }
     }
@@ -905,6 +976,7 @@ class CallManager(
     fun hasConnectedCall(): Boolean = CallStateManager.getCurrentState().isConnected()
 
     fun dispose() {
+        invalidateOutgoingDtmfSender()
         scope.cancel()
     }
 
@@ -943,6 +1015,7 @@ class CallManager(
      * Solo para llamadas YA conectadas. Para llamadas perdidas, el registro ya se hizo en endCall/declineCall
      */
     fun handleWebRtcClosed() {
+        invalidateOutgoingDtmfSender()
         // Guard: ignorar eventos durante recreación intencional de PeerConnection.
         // En multi-llamada cerramos la PC explícitamente para recrearla con ICE frescos;
         // ese evento CLOSED NO debe tratarse como fin de llamada.

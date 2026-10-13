@@ -554,6 +554,9 @@ class DesktopWebRtcManager : WebRtcManager {
 
     // ==================== DTMF & MEDIA DIRECTION ====================
 
+    override fun captureDtmfSender(): ((String, Int, Int) -> Boolean)? =
+        if (::peerConnectionController.isInitialized) peerConnectionController.captureDtmfSender() else null
+
     override fun sendDtmfTones(tones: String, duration: Int, gap: Int): Boolean {
         return if (::peerConnectionController.isInitialized) {
             peerConnectionController.sendDtmf(tones, duration, gap)

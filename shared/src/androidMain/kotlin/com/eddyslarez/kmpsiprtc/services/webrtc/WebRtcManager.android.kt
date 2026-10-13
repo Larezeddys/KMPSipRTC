@@ -443,6 +443,9 @@ class AndroidWebRtcManager : WebRtcManager {
 
     // ==================== DTMF & MEDIA DIRECTION ====================
 
+    override fun captureDtmfSender(): ((String, Int, Int) -> Boolean)? =
+        peerConnectionController.captureDtmfSender()
+
     override fun sendDtmfTones(tones: String, duration: Int, gap: Int): Boolean {
         return peerConnectionController.sendDtmf(tones, duration, gap)
     }

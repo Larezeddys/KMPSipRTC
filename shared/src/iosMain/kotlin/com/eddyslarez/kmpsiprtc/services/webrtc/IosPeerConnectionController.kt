@@ -544,11 +544,22 @@ class IosPeerConnectionController(
 
     // ==================== DTMF ====================
 
+    /** El sender capturado no cambia de destino al recrear la conexión. */
+    fun captureDtmfSender(): ((String, Int, Int) -> Boolean)? {
+        val sender = dtmfSender ?: return null
+        return { tones, duration, gap ->
+            try {
+                if (dtmfSender !== sender) false
+                else { sender.insertDtmf(tones, duration, gap); true }
+            } catch (_: Exception) { false }
+        }
+    }
+
     fun sendDtmf(tones: String, duration: Int, gap: Int): Boolean {
         return try {
             val sender = dtmfSender ?: return false
             sender.insertDtmf(tones, duration, gap)
-            log.d(TAG) { "✅ DTMF sent: $tones" }
+            log.d(TAG) { "DTMF enviado" }
             true
         } catch (e: Exception) {
             log.e(TAG) { "Error sending DTMF: ${e.message}" }

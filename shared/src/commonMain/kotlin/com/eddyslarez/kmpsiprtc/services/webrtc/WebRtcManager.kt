@@ -137,6 +137,9 @@ interface WebRtcManager {
      */
     fun sendDtmfTones(tones: String, duration: Int = 100, gap: Int = 70): Boolean
 
+    /** Captura el emisor de la conexión actual sin resolver otra conexión al enviar. */
+    fun captureDtmfSender(): ((String, Int, Int) -> Boolean)?
+
     /**
      * Seleccionar dispositivo de entrada de audio por nombre (solo Desktop)
      * @param deviceName Nombre del dispositivo de entrada
