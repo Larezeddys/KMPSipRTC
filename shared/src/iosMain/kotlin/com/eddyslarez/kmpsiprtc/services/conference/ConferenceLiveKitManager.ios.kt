@@ -125,7 +125,7 @@ actual class ConferenceLiveKitManager actual constructor() {
 
         roomCallbacksJob?.cancel()
         roomCallbacksJob = SupervisorJob(scope.coroutineContext[Job])
-        val delegate = IosRoomDelegate(this)
+        val delegate = IosRoomDelegate(this@ConferenceLiveKitManager)
         val lkRoom = Room(delegate = delegate, connectOptions = null, roomOptions = null)
         roomDelegate = delegate
         room = lkRoom
