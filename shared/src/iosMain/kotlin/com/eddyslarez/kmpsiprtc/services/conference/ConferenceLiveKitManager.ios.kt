@@ -91,9 +91,8 @@ actual class ConferenceLiveKitManager actual constructor() {
     private val _connectionState = MutableStateFlow(LkConnectionState.IDLE)
     actual val connectionState: StateFlow<LkConnectionState> = _connectionState.asStateFlow()
 
-    // El wrapper CocoaPod LiveKitClient no expone el DisconnectReason
-    // estructurado del protocolo (solo NSError), asi que aqui unicamente
-    // distinguimos "hubo un error" de "sin motivo conocido".
+    // El wrapper expone NSError. La cancelación tiene dominio y código propios;
+    // el resto conserva UNKNOWN mientras no haya una razón estructurada disponible.
     private val _lastDisconnectReason = MutableStateFlow<LkDisconnectReason?>(null)
     actual val lastDisconnectReason: StateFlow<LkDisconnectReason?> = _lastDisconnectReason.asStateFlow()
 
@@ -155,7 +154,27 @@ actual class ConferenceLiveKitManager actual constructor() {
                 roomCallbacksJob?.cancel()
                 roomCallbacksJob = null
                 stopStateRefreshLoop()
-                if (error !is CancellationException) _connectionState.value = LkConnectionState.ERROR
+                LKBroadcastBridge.stopObserving()
+                broadcastTimeoutJob?.cancel()
+                broadcastTimeoutJob = null
+                broadcastPending = false
+                raisedHands.clear()
+                platformByIdentity.clear()
+                playbackVolumeByIdentity.clear()
+                localHandRaised = false
+                _participants.value = emptyList()
+                _videoTracks.value = emptyList()
+                _chatMessages.value = emptyList()
+                _mediaState.value = LkMediaState()
+                // LiveKit puede cancelar su operación sin cancelar el Job llamador.
+                // La sala ya está cerrándose: nunca debe conservar CONNECTING.
+                if (error is CancellationException) {
+                    _lastDisconnectReason.value = LkDisconnectReason.CLIENT_INITIATED
+                    _connectionState.value = LkConnectionState.DISCONNECTED
+                } else {
+                    _lastDisconnectReason.value = LkDisconnectReason.UNKNOWN
+                    _connectionState.value = LkConnectionState.ERROR
+                }
             }
             lkRoom.removeAllDelegates()
             lkRoom.disconnectWithCompletionHandler {}
@@ -616,10 +635,11 @@ actual class ConferenceLiveKitManager actual constructor() {
 
     fun onRoomDisconnected(sourceRoom: Room, error: NSError?) {
         launchRoomCallback(sourceRoom) {
-            if (error != null) {
-                log.w(tag = tag) { "LiveKit iOS desconectado: ${error.localizedDescription}" }
+            val cancelled = error?.isLiveKitCancellation() == true
+            if (error != null && !cancelled) {
+                log.w(tag = tag) { "LiveKit iOS desconectado: ${error.localizedDescription} [${error.domain}/${error.code}]" }
             }
-            _lastDisconnectReason.value = if (error != null) LkDisconnectReason.UNKNOWN else LkDisconnectReason.CLIENT_INITIATED
+            _lastDisconnectReason.value = if (error != null && !cancelled) LkDisconnectReason.UNKNOWN else LkDisconnectReason.CLIENT_INITIATED
             stopStateRefreshLoop()
             _connectionState.value = LkConnectionState.DISCONNECTED
             playbackVolumeByIdentity.clear()
@@ -630,9 +650,15 @@ actual class ConferenceLiveKitManager actual constructor() {
 
     fun onRoomFailed(sourceRoom: Room, error: NSError?) {
         launchRoomCallback(sourceRoom) {
-            log.e(tag = tag) { "LiveKit iOS fallo de conexion: ${error?.localizedDescription}" }
             stopStateRefreshLoop()
-            _connectionState.value = LkConnectionState.ERROR
+            if (error?.isLiveKitCancellation() == true) {
+                _lastDisconnectReason.value = LkDisconnectReason.CLIENT_INITIATED
+                _connectionState.value = LkConnectionState.DISCONNECTED
+            } else {
+                log.e(tag = tag) { "LiveKit iOS fallo de conexion: ${error?.localizedDescription} [${error?.domain}/${error?.code}]" }
+                _lastDisconnectReason.value = LkDisconnectReason.UNKNOWN
+                _connectionState.value = LkConnectionState.ERROR
+            }
         }
     }
 
@@ -930,7 +956,7 @@ actual class ConferenceLiveKitManager actual constructor() {
             block { error ->
                 if (!continuation.isActive) return@block
                 if (error != null) {
-                    continuation.resumeWithException(LiveKitIosException(error.localizedDescription))
+                    continuation.resumeWithException(error.toConferenceException())
                 } else {
                     continuation.resume(Unit)
                 }
@@ -944,18 +970,31 @@ actual class ConferenceLiveKitManager actual constructor() {
         block { publication, error ->
             if (!continuation.isActive) return@block
             if (error != null) {
-                continuation.resumeWithException(LiveKitIosException(error.localizedDescription))
+                continuation.resumeWithException(error.toConferenceException())
             } else {
                 continuation.resume(publication)
             }
         }
     }
 
+    /** Errors.swift de LiveKit: LiveKitErrorType.cancelled es 100 en este dominio. */
+    private fun NSError.isLiveKitCancellation(): Boolean =
+        domain == LIVEKIT_ERROR_DOMAIN && code == LIVEKIT_CANCELLED_ERROR_CODE
+
+    private fun NSError.toConferenceException(): Throwable =
+        if (isLiveKitCancellation()) {
+            CancellationException(localizedDescription)
+        } else {
+            LiveKitIosException(localizedDescription, domain = domain, code = code)
+        }
+
     private fun nowMs(): Long = (NSDate().timeIntervalSince1970 * 1000).toLong()
 }
 
 private const val PLATFORM_ANNOUNCE_ATTEMPTS = 4
 private const val PLATFORM_ANNOUNCE_RETRY_INTERVAL_MS = 1500L
+private const val LIVEKIT_ERROR_DOMAIN = "io.livekit.swift-sdk"
+private const val LIVEKIT_CANCELLED_ERROR_CODE = 100L
 
 @OptIn(ExperimentalForeignApi::class)
 private class IosRoomDelegate(
@@ -1059,6 +1098,12 @@ private class IosRoomDelegate(
     }
 }
 
-private class LiveKitIosException(message: String) : RuntimeException(message)
+private class LiveKitIosException(
+    message: String,
+    val domain: String? = null,
+    val code: Long? = null,
+) : RuntimeException(
+    if (domain != null && code != null) "$message [$domain/$code]" else message,
+)
 
 private class ScreenShareUnavailableException(message: String) : RuntimeException(message)
