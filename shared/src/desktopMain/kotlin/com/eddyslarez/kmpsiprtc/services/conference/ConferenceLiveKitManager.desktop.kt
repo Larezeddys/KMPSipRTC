@@ -53,13 +53,21 @@ actual class ConferenceLiveKitManager actual constructor() {
     // WebRTC PeerConnections
     private var publisherWebRtc: DesktopWebRtcManager? = null
     @Volatile private var subscriberWebRtc: DesktopWebRtcManager? = null
+    // Reutiliza como publisher la factory creada para el selector de dispositivos.
+    private var deviceDiscoveryWebRtc: DesktopWebRtcManager? = null
 
-    private var joinResponse: LiveKitJoinResponse? = null
+    @Volatile private var joinResponse: LiveKitJoinResponse? = null
     private var localIdentity: String = ""
     private var localName: String = ""
     @Volatile private var subscriberReady = false
     private val pendingOffers = ConcurrentLinkedQueue<String>()
     private val subscriberOfferMutex = Mutex()
+    private val publisherSdpMutex = Mutex()
+    private val rtcLifecycleMutex = Mutex()
+    private val pendingPublisherTrickles = ConcurrentLinkedQueue<LiveKitTrickle>()
+    private val pendingSubscriberTrickles = ConcurrentLinkedQueue<LiveKitTrickle>()
+    @Volatile private var publisherIceReady = false
+    @Volatile private var subscriberIceReady = false
     private var selectedScreenShareSourceId: String? = null
     private var selectedCameraId: String? = null
     private var selectedMicrophoneId: String? = null
@@ -321,8 +329,7 @@ actual class ConferenceLiveKitManager actual constructor() {
             )
 
             // Renegociar SDP para incluir el video track
-            val offer = pub.createOffer()
-            signalingClient.sendOffer(offer)
+            renegotiatePublisher(pub)
             log.d(tag = TAG) { "Cámara activada, offer renegociado" }
 
             // Actualizar video tracks
@@ -343,8 +350,7 @@ actual class ConferenceLiveKitManager actual constructor() {
 
             // Renegociar para remover el video
             try {
-                val offer = pub.createOffer()
-                signalingClient.sendOffer(offer)
+                renegotiatePublisher(pub)
             } catch (e: Exception) {
                 log.w(tag = TAG) { "Error renegociando sin video: ${e.message}" }
             }
@@ -402,8 +408,7 @@ actual class ConferenceLiveKitManager actual constructor() {
                 source = LiveKitTrackSource.SCREEN_SHARE.value
             )
 
-            val offer = pub.createOffer()
-            signalingClient.sendOffer(offer)
+            renegotiatePublisher(pub)
 
             val handle = LkVideoTrackHandle(
                 participantIdentity = localIdentity,
@@ -423,8 +428,7 @@ actual class ConferenceLiveKitManager actual constructor() {
             } }
 
             try {
-                val offer = pub.createOffer()
-                signalingClient.sendOffer(offer)
+                renegotiatePublisher(pub)
             } catch (e: Exception) {
                 log.w(tag = TAG) { "Error renegociando sin screen share: ${e.message}" }
             }
@@ -435,14 +439,17 @@ actual class ConferenceLiveKitManager actual constructor() {
         rebuildParticipantList()
     }
 
-    actual suspend fun loadDevices(): LkDevices {
+    actual suspend fun loadDevices(): LkDevices = rtcLifecycleMutex.withLock {
         val cameras = mutableListOf<LkDevice>()
         val microphones = mutableListOf<LkDevice>()
         val speakers = mutableListOf<LkDevice>()
         val screenShareSources = mutableListOf<LkDevice>()
 
         // Obtener dispositivos de audio via WebRtcManager
-        val webRtc = publisherWebRtc ?: DesktopWebRtcManager().also { it.initialize() }
+        val webRtc = publisherWebRtc ?: deviceDiscoveryWebRtc ?: DesktopWebRtcManager().also { manager ->
+            manager.initialize()
+            deviceDiscoveryWebRtc = manager
+        }
         try {
             val (inputs, outputs) = webRtc.getAllAudioDevices()
 
@@ -515,7 +522,7 @@ actual class ConferenceLiveKitManager actual constructor() {
             log.w(tag = TAG) { "Error enumerando pantallas: ${e.message}" }
         }
 
-        return LkDevices(
+        LkDevices(
             cameras = cameras,
             microphones = microphones,
             speakers = speakers,
@@ -657,10 +664,15 @@ actual class ConferenceLiveKitManager actual constructor() {
 
             override fun onAnswer(sdp: LiveKitSessionDescription) {
                 scope.launch {
-                    try {
-                        publisherWebRtc?.setRemoteDescription(sdp.sdp, SdpType.ANSWER)
-                    } catch (e: Exception) {
-                        log.e(tag = TAG) { "Error aplicando answer: ${e.message}" }
+                    publisherSdpMutex.withLock {
+                        val publisher = publisherWebRtc ?: return@withLock
+                        try {
+                            publisher.setRemoteDescription(sdp.sdp, SdpType.ANSWER)
+                            publisherIceReady = true
+                            flushPendingTrickles(isPublisher = true, target = publisher)
+                        } catch (e: Exception) {
+                            log.e(tag = TAG) { "Error aplicando answer: ${e.message}" }
+                        }
                     }
                 }
             }
@@ -680,13 +692,18 @@ actual class ConferenceLiveKitManager actual constructor() {
 
             override fun onTrickle(trickle: LiveKitTrickle) {
                 scope.launch {
-                    val target = if (trickle.target == LiveKitSignalTarget.PUBLISHER.value)
-                        publisherWebRtc else subscriberWebRtc
-                    if (target != null) {
-                        val candidate = extractJsonField(trickle.candidateInit, "candidate") ?: ""
-                        val sdpMid = extractJsonField(trickle.candidateInit, "sdpMid")
-                        val sdpMLineIndex = extractJsonField(trickle.candidateInit, "sdpMLineIndex")?.toIntOrNull()
-                        target.addIceCandidate(candidate, sdpMid, sdpMLineIndex)
+                    val isPublisher = trickle.target == LiveKitSignalTarget.PUBLISHER.value
+                    val mutex = if (isPublisher) publisherSdpMutex else subscriberOfferMutex
+                    mutex.withLock {
+                        if (joinResponse == null) return@withLock
+                        val target = if (isPublisher) publisherWebRtc else subscriberWebRtc
+                        val ready = if (isPublisher) publisherIceReady else subscriberIceReady
+                        if (target == null || !ready) {
+                            val queue = if (isPublisher) pendingPublisherTrickles else pendingSubscriberTrickles
+                            queue.add(trickle)
+                            return@withLock
+                        }
+                        applyTrickle(target, trickle)
                     }
                 }
             }
@@ -838,7 +855,8 @@ actual class ConferenceLiveKitManager actual constructor() {
         }
     }
 
-    private suspend fun setupPublisher() {
+    private suspend fun setupPublisher() = rtcLifecycleMutex.withLock {
+        if (publisherWebRtc != null || subscriberWebRtc != null) return@withLock
         log.d(tag = TAG) { "Inicializando publisher + subscriber WebRTC" }
 
         // CRÍTICO: extraer ICE servers (STUN + TURN con credenciales) del JoinResponse.
@@ -861,6 +879,7 @@ actual class ConferenceLiveKitManager actual constructor() {
         // 1. Crear subscriber PRIMERO (el offer puede llegar durante setupPublisher)
         val sub = DesktopWebRtcManager()
         subscriberWebRtc = sub
+        subscriberIceReady = false
         sub.initialize()
         if (iceServersTriples.isNotEmpty()) sub.setIceServers(iceServersTriples)
         sub.setListener(object : WebRtcEventListener {
@@ -914,9 +933,10 @@ actual class ConferenceLiveKitManager actual constructor() {
         drainSubscriberOffers()
 
         // 2. Crear publisher
-        val pub = DesktopWebRtcManager()
+        val pub = deviceDiscoveryWebRtc ?: DesktopWebRtcManager().also { it.initialize() }
+        deviceDiscoveryWebRtc = null
         publisherWebRtc = pub
-        pub.initialize()
+        publisherIceReady = false
         // ICE servers también para publisher — DEBE estar antes de createOffer.
         if (iceServersTriples.isNotEmpty()) pub.setIceServers(iceServersTriples)
         pub.setAudioEnabled(true)
@@ -989,8 +1009,7 @@ actual class ConferenceLiveKitManager actual constructor() {
             serverKnownMicMuted = null
         }
 
-        val offer = pub.createOffer()
-        signalingClient.sendOffer(offer)
+        renegotiatePublisher(pub)
         log.d(tag = TAG) { "Publisher offer enviado" }
     }
 
@@ -1014,8 +1033,11 @@ actual class ConferenceLiveKitManager actual constructor() {
             remoteVideoRegistry.updateOffer(offerSdp)
             publishRemoteVideoHandles()
         }
+        subscriberIceReady = false
         val answer = sub.createAnswer(offerSdp)
         if (subscriberWebRtc !== sub) return
+        subscriberIceReady = true
+        flushPendingTrickles(isPublisher = false, target = sub)
         // Una nueva publicación puede reutilizar el MID sin otro callback nativo.
         val receivers = sub.remoteVideoReceivers()
         synchronized(remoteMediaLock) {
@@ -1351,38 +1373,72 @@ actual class ConferenceLiveKitManager actual constructor() {
 
     // ==================== CLEANUP ====================
 
-    private fun cleanup() {
-        // Tras reconectar, setupPublisher republica el audio y el SFU asigna un SID nuevo:
-        // conservar el viejo mandaria mutes a un track que ya no existe.
-        localAudioCid = null
-        localAudioTrackSid = null
-        serverKnownMicMuted = null
-        activeSpeakerSids.clear()
+    private suspend fun cleanup() = rtcLifecycleMutex.withLock {
+        publisherSdpMutex.withLock {
+            subscriberOfferMutex.withLock {
+                localAudioCid = null
+                localAudioTrackSid = null
+                serverKnownMicMuted = null
+                activeSpeakerSids.clear()
 
-        publisherWebRtc?.closePeerConnection()
-        publisherWebRtc?.dispose()
-        publisherWebRtc = null
-        val oldSubscriber = synchronized(remoteMediaLock) {
-            val current = subscriberWebRtc
-            subscriberWebRtc = null
-            current?.setRemoteVideoTrackListeners(null, null)
-            remoteVideoRegistry.clear()
-            _videoTracks.value = emptyList()
-            current
+                publisherWebRtc?.closePeerConnection()
+                publisherWebRtc?.dispose()
+                publisherWebRtc = null
+                val oldSubscriber = synchronized(remoteMediaLock) {
+                    val current = subscriberWebRtc
+                    subscriberWebRtc = null
+                    current?.setRemoteVideoTrackListeners(null, null)
+                    remoteVideoRegistry.clear()
+                    _videoTracks.value = emptyList()
+                    current
+                }
+                oldSubscriber?.closePeerConnection()
+                oldSubscriber?.dispose()
+                deviceDiscoveryWebRtc?.dispose()
+                deviceDiscoveryWebRtc = null
+                publisherIceReady = false
+                subscriberIceReady = false
+                subscriberReady = false
+                pendingPublisherTrickles.clear()
+                pendingSubscriberTrickles.clear()
+                pendingOffers.clear()
+                joinResponse = null
+                remoteParticipants.clear()
+                raisedHands.clear()
+                platformByIdentity.clear()
+                localHandRaised = false
+                // Se conservan las preferencias de cámara, micrófono, altavoz y pantalla entre reconexiones.
+            }
         }
-        oldSubscriber?.closePeerConnection()
-        oldSubscriber?.dispose()
-        subscriberReady = false
-        pendingOffers.clear()
-        joinResponse = null
-        remoteParticipants.clear()
-        raisedHands.clear()
-        platformByIdentity.clear()
-        localHandRaised = false
-        // No reseteamos las preferencias de dispositivos (camera/mic/speaker/screen):
-        // se conservan entre reconexiones para no obligar al usuario a re-seleccionar.
     }
 
+    private suspend fun renegotiatePublisher(publisher: DesktopWebRtcManager) {
+        publisherSdpMutex.withLock {
+            publisherIceReady = false
+            signalingClient.sendOffer(publisher.createOffer())
+        }
+    }
+
+    /** Requiere el lock de señalizacion correspondiente. */
+    private suspend fun flushPendingTrickles(isPublisher: Boolean, target: DesktopWebRtcManager) {
+        val pending = if (isPublisher) pendingPublisherTrickles else pendingSubscriberTrickles
+        while (true) {
+            val trickle = pending.poll() ?: break
+            applyTrickle(target, trickle)
+        }
+    }
+
+    private suspend fun applyTrickle(target: DesktopWebRtcManager, trickle: LiveKitTrickle) {
+        val candidate = extractJsonField(trickle.candidateInit, "candidate")
+        if (candidate.isNullOrEmpty()) return
+        val sdpMid = extractJsonField(trickle.candidateInit, "sdpMid")
+        val sdpMLineIndex = extractJsonField(trickle.candidateInit, "sdpMLineIndex")?.toIntOrNull()
+        try {
+            target.addIceCandidate(candidate, sdpMid, sdpMLineIndex)
+        } catch (e: Exception) {
+            log.w(tag = TAG) { "Error aplicando candidato ICE (${trickle.target}): ${e.message}" }
+        }
+    }
     private fun extractJsonField(json: String, field: String): String? {
         val regex = Regex("\"$field\"\\s*:\\s*\"([^\"]*)\"")
         return regex.find(json)?.groupValues?.get(1)
