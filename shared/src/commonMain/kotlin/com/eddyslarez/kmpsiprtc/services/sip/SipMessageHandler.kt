@@ -672,15 +672,13 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             // 486 Busy Here. Asi el segundo llamante recibe tono de ocupado y NO se reproduce
             // ringtone que interfiera con la conversacion en curso. La comprobacion por callId
             // evita rechazar un re-INVITE in-dialog (mismo Call-ID).
-            if (!sipCoreManager.callWaitingEnabled) {
-                val hasOtherActiveCall = MultiCallManager.getActiveCalls()
-                    .any { it.callId != callData.callId }
-                if (hasOtherActiveCall) {
-                    log.d(tag = TAG) { "[INVITE] Call waiting disabled — rejecting incoming call ${callData.callId} with 486 Busy Here" }
-                    val busyResponse = SipMessageBuilder.buildBusyHereResponse(accountInfo, callData)
-                    sendViaSharedWebSocket(busyResponse)
-                    return
-                }
+            val isCallWaitingIncoming = MultiCallManager.getActiveCalls()
+                .any { it.callId != callData.callId }
+            if (!sipCoreManager.callWaitingEnabled && isCallWaitingIncoming) {
+                log.d(tag = TAG) { "[INVITE] Call waiting disabled — rejecting incoming call ${callData.callId} with 486 Busy Here" }
+                val busyResponse = SipMessageBuilder.buildBusyHereResponse(accountInfo, callData)
+                sendViaSharedWebSocket(busyResponse)
+                return
             }
 
             // Normalizar para callbacks (To con .invalid / transport=ws)
@@ -729,7 +727,11 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 // Solo reproducir ringtone en-app si la llamada NO viene de push.
                 // Cuando viene de push, CallKit ya presenta la UI con el ringtone del sistema.
                 if (!sipCoreManager.isIncomingPushCallPending) {
-                    sipCoreManager.audioManager.playIncomingRingtone(syncVibration = true)
+                    if (isCallWaitingIncoming) {
+                        sipCoreManager.audioManager.playCallWaitingTone()
+                    } else {
+                        sipCoreManager.audioManager.playIncomingRingtone(syncVibration = true)
+                    }
                 } else {
                     log.d(tag = TAG) { "Push call — skipping in-app ringtone (CallKit managing audio)" }
                 }

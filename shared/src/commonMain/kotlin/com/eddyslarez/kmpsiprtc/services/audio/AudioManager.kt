@@ -5,6 +5,13 @@ interface AudioManager {
     fun setIncomingRingtone(path: String)
     fun setOutgoingRingtone(path: String)
     fun playRingtone(syncVibration: Boolean = true)
+    /**
+     * Aviso de llamada en espera. Android conserva su comportamiento actual; iOS delega el aviso
+     * a CallKit y Desktop lo sustituye por un beep corto y atenuado.
+     */
+    fun playCallWaitingTone() {
+        playRingtone(syncVibration = false)
+    }
     fun playOutgoingRingtone()
     fun stopRingtone()
     fun stopOutgoingRingtone()

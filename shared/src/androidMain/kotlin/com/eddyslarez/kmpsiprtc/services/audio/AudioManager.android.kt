@@ -7,6 +7,7 @@ import android.content.Context
 import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.media.RingtoneManager
+import android.media.ToneGenerator
 import android.net.Uri
 import android.os.Build
 import android.os.VibrationEffect
@@ -95,6 +96,32 @@ class AndroidAudioManagerImpl : AudioManager {
      override fun setOutgoingRingtone(path: String) {
         outgoingRingtonePath = path
         println("$TAG: Outgoing ringtone path set: $path")
+    }
+
+    /** Reproduce un beep breve de espera por el canal de voz de la llamada activa. */
+    override fun playCallWaitingTone() {
+        if (isTelecomActiveAndEnabled()) {
+            println("$TAG: Telecom gestiona el aviso de llamada en espera")
+            return
+        }
+
+        audioScope.launch {
+            val tone = runCatching {
+                ToneGenerator(android.media.AudioManager.STREAM_VOICE_CALL, 35)
+            }.getOrElse { error ->
+                println("$TAG: No se pudo crear el tono de llamada en espera: ${error.message}")
+                return@launch
+            }
+            try {
+                tone.startTone(ToneGenerator.TONE_SUP_CALL_WAITING, 180)
+                delay(220)
+            } catch (error: Exception) {
+                println("$TAG: No se pudo reproducir el tono de llamada en espera: ${error.message}")
+            } finally {
+                runCatching { tone.stopTone() }
+                tone.release()
+            }
+        }
     }
 
     /**

@@ -33,6 +33,11 @@ class IosAudioManagerImpl : AudioManager {
 
     private var currentVibrationPattern = "default"
 
+    /** CallKit presenta la segunda llamada y gestiona el aviso del sistema en iOS. */
+    override fun playCallWaitingTone() {
+        println("CallKit gestiona el aviso de llamada en espera en iOS")
+    }
+
     init {
         val resourceUtils = createResourceUtils()
         incomingRingtonePath = resourceUtils.getDefaultIncomingRingtonePath()

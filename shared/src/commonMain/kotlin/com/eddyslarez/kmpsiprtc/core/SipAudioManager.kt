@@ -194,6 +194,11 @@ class SipAudioManager(
         audioManager.playRingtone(syncVibration)
     }
 
+    /** Reproduce el aviso breve de una llamada entrante mientras ya hay otra activa. */
+    fun playCallWaitingTone() {
+        audioManager.playCallWaitingTone()
+    }
+
     /**
      * Reproducir ringtone de llamada saliente
      */

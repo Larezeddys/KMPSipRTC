@@ -220,6 +220,55 @@ class DesktopAudioManagerImpl : AudioManager {
         }
     }
 
+    /**
+     * Emite un solo aviso corto a volumen digital bajo para que la segunda llamada no tape
+     * la conversación activa.
+     */
+    override fun playCallWaitingTone() {
+        audioScope.launch {
+            val sampleRate = 48_000
+            val durationMs = 150
+            val sampleCount = sampleRate * durationMs / 1_000
+            val fadeSamples = sampleRate / 200
+            val amplitude = (Short.MAX_VALUE * 0.12).toInt()
+            val samples = ByteArray(sampleCount * 2)
+            for (index in 0 until sampleCount) {
+                val envelope = when {
+                    index < fadeSamples -> index.toDouble() / fadeSamples
+                    index >= sampleCount - fadeSamples ->
+                        (sampleCount - index).toDouble() / fadeSamples
+                    else -> 1.0
+                }.coerceIn(0.0, 1.0)
+                val value = (
+                    kotlin.math.sin(2.0 * kotlin.math.PI * 425.0 * index / sampleRate) *
+                        amplitude * envelope
+                    ).toInt()
+                samples[index * 2] = value.toByte()
+                samples[index * 2 + 1] = (value shr 8).toByte()
+            }
+
+            val format = AudioFormat(sampleRate.toFloat(), 16, 1, true, false)
+            val lineInfo = DataLine.Info(SourceDataLine::class.java, format)
+            var line: SourceDataLine? = null
+            try {
+                if (!AudioSystem.isLineSupported(lineInfo)) {
+                    println("AudioManager: La línea de audio no admite el aviso de llamada en espera")
+                    return@launch
+                }
+                line = AudioSystem.getLine(lineInfo) as SourceDataLine
+                line.open(format)
+                line.start()
+                line.write(samples, 0, samples.size)
+                line.drain()
+            } catch (error: Exception) {
+                println("AudioManager: No se pudo reproducir el aviso de llamada en espera: ${error.message}")
+            } finally {
+                runCatching { line?.stop() }
+                runCatching { line?.close() }
+            }
+        }
+    }
+
     override fun playRingtone(syncVibration: Boolean) {
         val path = incomingRingtonePath ?: run {
             println("AudioManager: No incoming ringtone path set")
