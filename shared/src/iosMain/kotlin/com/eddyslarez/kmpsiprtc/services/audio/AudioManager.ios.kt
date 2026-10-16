@@ -9,6 +9,8 @@ import platform.AVFAudio.setActive
 import platform.AudioToolbox.*
 import platform.Foundation.*
 import kotlin.concurrent.Volatile
+import kotlin.math.PI
+import kotlin.math.sin
 
 actual fun createAudioManager(): AudioManager = IosAudioManagerImpl()
 
@@ -16,6 +18,8 @@ actual fun createAudioManager(): AudioManager = IosAudioManagerImpl()
 class IosAudioManagerImpl : AudioManager {
     private var incomingPlayer: AVAudioPlayer? = null
     private var outgoingPlayer: AVAudioPlayer? = null
+    private var callWaitingPlayer: AVAudioPlayer? = null
+    private var callWaitingJob: Job? = null
     private var incomingRingtoneJob: Job? = null
     private var outgoingRingtoneJob: Job? = null
     private var vibrationJob: Job? = null
@@ -33,9 +37,76 @@ class IosAudioManagerImpl : AudioManager {
 
     private var currentVibrationPattern = "default"
 
-    /** CallKit presenta la segunda llamada y gestiona el aviso del sistema en iOS. */
+    /** Aviso breve para una entrante por socket; los pushes usan el aviso de CallKit. */
     override fun playCallWaitingTone() {
-        println("CallKit gestiona el aviso de llamada en espera en iOS")
+        stopCallWaitingTone()
+        callWaitingJob = audioScope.launch {
+            var player: AVAudioPlayer? = null
+            try {
+                val bytes = createCallWaitingWave()
+                val data = bytes.usePinned { pinned ->
+                    NSData.create(bytes = pinned.addressOf(0), length = bytes.size.toULong())
+                }
+                player = AVAudioPlayer(data, null)
+                callWaitingPlayer = player
+                // Mantener la sesion y ruta de audio de la conversacion en curso.
+                player.volume = 0.12f
+                player.numberOfLoops = 0
+                if (player.play()) delay(200)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                println("Error reproduciendo aviso de llamada en espera: ${error.message}")
+            } finally {
+                player?.stop()
+                if (callWaitingPlayer === player) callWaitingPlayer = null
+            }
+        }
+    }
+
+    private fun stopCallWaitingTone() {
+        callWaitingJob?.cancel()
+        callWaitingJob = null
+        callWaitingPlayer?.stop()
+        callWaitingPlayer = null
+    }
+
+    /** PCM mono de 150 ms a 425 Hz, con rampas que evitan chasquidos. */
+    private fun createCallWaitingWave(): ByteArray {
+        val sampleRate = 8_000
+        val sampleCount = sampleRate * 150 / 1_000
+        val dataSize = sampleCount * 2
+        val wave = ByteArray(44 + dataSize)
+        fun write16(offset: Int, value: Int) {
+            wave[offset] = value.toByte()
+            wave[offset + 1] = (value ushr 8).toByte()
+        }
+        fun write32(offset: Int, value: Int) {
+            repeat(4) { byte -> wave[offset + byte] = (value ushr (byte * 8)).toByte() }
+        }
+        fun writeText(offset: Int, text: String) {
+            text.forEachIndexed { index, char -> wave[offset + index] = char.code.toByte() }
+        }
+        writeText(0, "RIFF")
+        write32(4, 36 + dataSize)
+        writeText(8, "WAVE")
+        writeText(12, "fmt ")
+        write32(16, 16)
+        write16(20, 1)
+        write16(22, 1)
+        write32(24, sampleRate)
+        write32(28, sampleRate * 2)
+        write16(32, 2)
+        write16(34, 16)
+        writeText(36, "data")
+        write32(40, dataSize)
+        val fadeSamples = sampleRate * 5 / 1_000
+        repeat(sampleCount) { index ->
+            val envelope = minOf(index, sampleCount - 1 - index, fadeSamples).toDouble() / fadeSamples
+            val sample = (sin(2.0 * PI * 425.0 * index / sampleRate) * Short.MAX_VALUE * envelope).toInt()
+            write16(44 + index * 2, sample)
+        }
+        return wave
     }
 
     init {
@@ -274,6 +345,7 @@ class IosAudioManagerImpl : AudioManager {
     }
 
      override fun stopRingtone() {
+        stopCallWaitingTone()
         shouldStopIncoming = true
         isIncomingRingtonePlaying = false
         stopVibration()
@@ -303,6 +375,7 @@ class IosAudioManagerImpl : AudioManager {
     }
 
      override fun stopAllRingtones() {
+        stopCallWaitingTone()
         shouldStopIncoming = true
         shouldStopOutgoing = true
         isIncomingRingtonePlaying = false
@@ -354,6 +427,7 @@ class IosAudioManagerImpl : AudioManager {
             appendLine("Current vibration pattern: $currentVibrationPattern")
             appendLine("Incoming player: ${incomingPlayer != null}")
             appendLine("Outgoing player: ${outgoingPlayer != null}")
+            appendLine("Call waiting player: ${callWaitingPlayer != null}")
         }
     }
 
