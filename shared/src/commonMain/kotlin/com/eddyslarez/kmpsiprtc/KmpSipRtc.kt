@@ -692,6 +692,7 @@ class KmpSipRtc private constructor() {
                             CallState.OUTGOING_INIT -> notifyCallInitiated(info)
                             CallState.INCOMING_RECEIVED -> handleIncomingCall()
                             CallState.ENDED -> {
+                                incomingCallSystemAudio.set(info.callId, managed = false)
                                 val reason = mapErrorReasonToCallEndReason(stateInfo.errorReason)
                                 notifyCallEnded(info, reason)
                                 // Limpiar flag de llamada push pendiente
@@ -715,6 +716,7 @@ class KmpSipRtc private constructor() {
                             CallState.PAUSED -> notifyCallHeld(info)
                             CallState.STREAMS_RUNNING -> notifyCallResumed(info)
                             CallState.ERROR -> {
+                                incomingCallSystemAudio.set(info.callId, managed = false)
                                 val reason = mapErrorReasonToCallEndReason(stateInfo.errorReason)
                                 notifyCallEnded(info, reason)
                             }
@@ -1237,6 +1239,41 @@ class KmpSipRtc private constructor() {
         // Mantener ambos estados sincronizados tambien al limpiar una llamada fallida.
         pushModeManager?.setCallActive(isPending)
     }
+
+    /** Registra audio nativo por llamada, incluso antes de inicializar el motor SIP. */
+    fun setIncomingCallSystemAudio(
+        callId: String,
+        managed: Boolean,
+        callerNumber: String? = null,
+        account: String? = null,
+    ) {
+        incomingCallSystemAudio.set(callId, managed, callerNumber, account)
+        if (!managed || callerNumber == null) return
+
+        // El INVITE puede adelantarse al push. Recuperar solo entrantes que siguen
+        // sonando, con cuenta propia, sin fallback al ultimo usuario registrado.
+        val incoming = MultiCallManager.getIncomingCalls().filter {
+            MultiCallManager.getCallState(it.callId)?.state == CallState.INCOMING_RECEIVED
+        }.map {
+            IncomingCallSystemAudioRegistry.IncomingCall(
+                it.callId, it.from, it.sipName.ifBlank { it.to },
+            )
+        }
+        val resolvedId = incomingCallSystemAudio.bindPendingToExisting(callId, incoming) ?: return
+        if (incoming.size == 1 &&
+            MultiCallManager.getCallState(resolvedId)?.state == CallState.INCOMING_RECEIVED
+        ) {
+            // Solo hay un aviso entrante posible: CallKit toma ese mismo sonido.
+            // No se toca WebRTC, el audio de conversacion ni el tono saliente.
+            stopIncomingRingtone()
+        }
+    }
+
+    fun isIncomingCallSystemAudioManaged(callId: String): Boolean =
+        incomingCallSystemAudio.isManaged(callId)
+
+    fun getIncomingCallSystemAudioOwner(callId: String): String? =
+        incomingCallSystemAudio.getOwner(callId)
 
     /**
      * Crea información de llamada entrante desde la llamada actual
@@ -2943,6 +2980,7 @@ class KmpSipRtc private constructor() {
      */
     /** Cierra recursos y permite inicializar otra sesión en el mismo singleton. */
     suspend fun disposeSuspend(): Unit = withContext(Dispatchers.Main + NonCancellable) {
+        incomingCallSystemAudio.clear()
         internalScope.coroutineContext.cancelChildren()
         initMutex.withLock {
             var firstError: Throwable? = null

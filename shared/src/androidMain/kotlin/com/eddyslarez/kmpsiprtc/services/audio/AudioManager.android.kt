@@ -100,11 +100,8 @@ class AndroidAudioManagerImpl : AudioManager {
 
     /** Reproduce un beep breve de espera por el canal de voz de la llamada activa. */
     override fun playCallWaitingTone() {
-        if (isTelecomActiveAndEnabled()) {
-            println("$TAG: Telecom gestiona el aviso de llamada en espera")
-            return
-        }
-
+        // SipMessageHandler comprueba el reporte nativo de esta llamada concreta.
+        // La primera conexion Telecom no debe silenciar una segunda entrante in-app.
         audioScope.launch {
             val tone = runCatching {
                 ToneGenerator(android.media.AudioManager.STREAM_VOICE_CALL, 35)

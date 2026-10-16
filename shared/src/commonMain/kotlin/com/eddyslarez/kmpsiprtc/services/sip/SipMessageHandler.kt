@@ -18,6 +18,7 @@ import com.eddyslarez.kmpsiprtc.utils.generateId
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.services.calls.CallStateManager
 import com.eddyslarez.kmpsiprtc.services.calls.MultiCallManager
+import com.eddyslarez.kmpsiprtc.services.calls.incomingCallSystemAudio
 import kotlinx.coroutines.IO
 import kotlin.time.ExperimentalTime
 
@@ -647,6 +648,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 callId = callIdHeader,
                 from = fromUser,
                 to = accountInfo.username,
+                sipName = "${accountInfo.username}@${accountInfo.domain}",
                 direction = CallDirections.INCOMING,
                 startTime = kotlin.time.Clock.System.now().toEpochMilliseconds(),
                 fromTag = fromTag,
@@ -672,8 +674,14 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
             // 486 Busy Here. Asi el segundo llamante recibe tono de ocupado y NO se reproduce
             // ringtone que interfiera con la conversacion en curso. La comprobacion por callId
             // evita rechazar un re-INVITE in-dialog (mismo Call-ID).
-            val isCallWaitingIncoming = MultiCallManager.getActiveCalls()
-                .any { it.callId != callData.callId }
+            val existingOtherCalls = MultiCallManager.getActiveCalls()
+                .filter { it.callId != callData.callId }
+            val isCallWaitingIncoming = existingOtherCalls.any {
+                MultiCallManager.getCallState(it.callId)?.state in setOf(
+                    CallState.CONNECTED, CallState.STREAMS_RUNNING,
+                    CallState.PAUSING, CallState.PAUSED, CallState.RESUMING,
+                )
+            }
             if (!sipCoreManager.callWaitingEnabled && isCallWaitingIncoming) {
                 log.d(tag = TAG) { "[INVITE] Call waiting disabled — rejecting incoming call ${callData.callId} with 486 Busy Here" }
                 val busyResponse = SipMessageBuilder.buildBusyHereResponse(accountInfo, callData)
@@ -683,6 +691,12 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
 
             // Normalizar para callbacks (To con .invalid / transport=ws)
             val normalizedCallData = CallDataNormalizer.normalize(callData)
+            // Resolver el reporte nativo antes de callbacks/UI, sin depender del flag
+            // global que puede seguir activo por una llamada push anterior.
+            incomingCallSystemAudio.bindIncomingCall(
+                normalizedCallData.callId, normalizedCallData.from, "${accountInfo.username}@${accountInfo.domain}",
+                allowSinglePendingFallback = existingOtherCalls.isEmpty(),
+            )
 
             // [OK] GUARDAR EN UN SOLO LUGAR
             accountInfo.currentCallData.value = normalizedCallData
@@ -724,16 +738,19 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
 
             scope.launch {
                 delay(200)
-                // Solo reproducir ringtone en-app si la llamada NO viene de push.
-                // Cuando viene de push, CallKit ya presenta la UI con el ringtone del sistema.
-                if (!sipCoreManager.isIncomingPushCallPending) {
+                // El usuario pudo responder o rechazar antes de arrancar este aviso.
+                if (MultiCallManager.getCallState(normalizedCallData.callId)?.state !=
+                    CallState.INCOMING_RECEIVED) return@launch
+                // Solo esta llamada puede ceder su audio a CallKit. El flag de
+                // registro push de otra llamada no debe silenciar una nueva entrante.
+                if (!incomingCallSystemAudio.isManaged(normalizedCallData.callId)) {
                     if (isCallWaitingIncoming) {
                         sipCoreManager.audioManager.playCallWaitingTone()
                     } else {
                         sipCoreManager.audioManager.playIncomingRingtone(syncVibration = true)
                     }
                 } else {
-                    log.d(tag = TAG) { "Push call — skipping in-app ringtone (CallKit managing audio)" }
+                    log.d(tag = TAG) { "CallKit gestiona el audio de ${normalizedCallData.callId}" }
                 }
             }
 
