@@ -9,6 +9,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.random.Random
+import okio.ByteString.Companion.encodeUtf8
 import kotlinx.atomicfu.atomic
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -208,10 +209,12 @@ class AccountInfo(
     private val accountMutex = Mutex()
     private val cseqMutex = Mutex()
 
-    // ✅ NUEVO: Identificadores locales para el Contact header WebSocket
-    // Se generan una vez por sesión y NO cambian hasta reconexión
-    val localContactHost: String = generateLocalHost()
-    val localContactId: String = generateShortId()
+    // Identidad estable por cuenta/dispositivo para actualizar el mismo binding
+    // de OpenSIPS al reiniciar la app.
+    var localContactHost: String = generateLocalHost()
+        private set
+    var localContactId: String = generateShortId()
+        private set
 
     // 🔁 Reemplazo de atomic por MutableStateFlow
     val reconnectCount = MutableStateFlow(0)
@@ -249,12 +252,28 @@ class AccountInfo(
     val lastChallengeType = MutableStateFlow(com.eddyslarez.kmpsiprtc.services.sip.AuthenticationHandler.ChallengeType.WWW_AUTHENTICATE)
 
     /**
-     * Identificador unico de instancia para RFC 5626 (outbound) y RFC 5627 (GRUU).
-     * Persiste durante toda la vida de la aplicacion para permitir a OpenSIPS
-     * identificar este dispositivo de forma unica y reemplazar Contact correctamente
-     * cuando max_contacts=1.
+     * Identificador de instancia RFC 5626/5627; se hace estable con el id persistido
+     * de la cuenta en este dispositivo para que el servidor reemplace su binding.
      */
-    val instanceId: String = "\"<urn:uuid:${generateUUID()}>\"" 
+    var instanceId: String = "\"<urn:uuid:${generateUUID()}>\""
+        private set
+
+    fun usePersistentRegistrationIdentity(persistedAccountId: String) {
+        if (persistedAccountId.isBlank()) return
+
+        val uuidHex = persistedAccountId.encodeUtf8().sha256().hex().take(32).toCharArray()
+        uuidHex[12] = '8'
+        val variantNibble = (uuidHex[16].digitToInt(16) and 0x03) or 0x08
+        uuidHex[16] = "0123456789abcdef"[variantNibble]
+        val compactUuid = uuidHex.concatToString()
+        val stableUuid = "${compactUuid.substring(0, 8)}-${compactUuid.substring(8, 12)}-" +
+            "${compactUuid.substring(12, 16)}-${compactUuid.substring(16, 20)}-" +
+            "${compactUuid.substring(20, 32)}"
+
+        localContactId = compactUuid.take(8)
+        localContactHost = "${compactUuid.substring(8, 20)}.invalid"
+        instanceId = "\"<urn:uuid:${stableUuid}>\""
+    }
 
     val useWebRTCFormat = MutableStateFlow(false)
     val remoteSdp = MutableStateFlow<String?>(null)

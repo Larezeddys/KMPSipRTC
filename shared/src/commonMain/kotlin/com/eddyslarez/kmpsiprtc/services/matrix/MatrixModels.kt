@@ -133,6 +133,10 @@ data class MatrixMessage(
     val deliveryState: MessageDelivery = MessageDelivery.SENT,
     /** userIds que enviaron read receipt sobre este mensaje (estilo "visto por"). */
     val readBy: List<String> = emptyList(),
+    /** MXID incluidos explícitamente en m.mentions.user_ids. */
+    val mentionedUserIds: Set<String> = emptySet(),
+    /** true si Matrix marca m.mentions.room. */
+    val mentionsRoom: Boolean = false,
 )
 
 enum class MessageType {

@@ -103,6 +103,7 @@ class BootRegistrationManager(
                         password = dbAccount.password,
                         domain = dbAccount.domain
                     ).apply {
+                        usePersistentRegistrationIdentity(dbAccount.id)
                         token.value = dbAccount.pushToken ?: ""
                         provider.value = dbAccount.pushProvider ?: "fcm"
                         userAgent.value = sipCoreManager.userAgent() + " Push"

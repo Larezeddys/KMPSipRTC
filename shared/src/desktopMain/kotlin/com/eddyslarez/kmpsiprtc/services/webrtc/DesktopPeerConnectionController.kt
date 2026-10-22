@@ -294,8 +294,21 @@ class DesktopPeerConnectionController(
             }
 
             override fun onAddTrack(receiver: RTCRtpReceiver, streams: Array<MediaStream>) {
-                (receiver.track as? VideoTrack)?.let { track ->
-                    onRemoteVideoTrackAdded?.invoke(track, streams.map { it.id() }, null)
+                try {
+                    val track = receiver.track as? VideoTrack ?: return
+                    // LiveKit puede crear transceivers sin stream id (MSID vacío).
+                    // No permitir que un valor nulo de Java llegue al registro Kotlin.
+                    val streamIds = streams.mapNotNull { stream ->
+                        try {
+                            stream.id()?.takeIf { it.isNotBlank() }
+                        } catch (_: Exception) {
+                            null
+                        }
+                    }
+                    onRemoteVideoTrackAdded?.invoke(track, streamIds, null)
+                } catch (error: Exception) {
+                    // Las excepciones no deben cruzar el callback JNI de WebRTC.
+                    log.e(tag = TAG) { "Error procesando OnAddTrack: ${error.message}" }
                 }
             }
 

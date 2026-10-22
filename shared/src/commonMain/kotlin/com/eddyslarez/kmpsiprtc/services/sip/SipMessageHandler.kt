@@ -115,14 +115,26 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
 
                     sipCoreManager.handleRegistrationSuccess(accountInfo)
 
-                    // Extraer tiempo de expiracion y programar renovacion per-account
+                    // Extraer el plazo concedido. Para push no planificar una renovacion
+                    // mas alla del maximo solicitado por politica (dos dias).
                     val expiresValue = SipMessageParser.extractExpiresValue(fullResponse)
+                    val renewalExpires = if (accountInfo.registrationUsesPush.value) {
+                        minOf(expiresValue, SipMessageBuilder.MAX_PUSH_REGISTRATION_EXPIRES_SECONDS)
+                    } else {
+                        expiresValue
+                    }
+                    if (renewalExpires != expiresValue) {
+                        log.w(tag = TAG) {
+                            "Push registration expiry from server (${expiresValue}s) exceeds client maximum; " +
+                                "renewal is capped at ${renewalExpires}s for $accountKey"
+                        }
+                    }
                     log.d(tag = TAG) { "Registration expires in ${expiresValue}s for $accountKey" }
 
                     // Programar re-REGISTER automatico antes del vencimiento
                     sipCoreManager.sharedWebSocketManager.scheduleRegistrationRenewal(
                         accountKey,
-                        expiresValue
+                        renewalExpires
                     )
                 }
             }
@@ -153,6 +165,23 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                     }?.substringAfter(":")?.trim()?.toIntOrNull()
 
                     if (minExpiresHeader != null && minExpiresHeader > 0) {
+                        if (
+                            accountInfo.registrationUsesPush.value &&
+                            minExpiresHeader > SipMessageBuilder.MAX_PUSH_REGISTRATION_EXPIRES_SECONDS
+                        ) {
+                            val maximum = SipMessageBuilder.MAX_PUSH_REGISTRATION_EXPIRES_SECONDS
+                            log.e(tag = TAG) {
+                                "Push registration rejected: OpenSIPS requires Min-Expires=${minExpiresHeader}s, " +
+                                    "above the configured maximum ${maximum}s for $accountKey"
+                            }
+                            accountInfo.authRetryCount.value = 0
+                            sipCoreManager.handleRegistrationError(
+                                accountInfo,
+                                "Push registration requires ${minExpiresHeader}s but maximum is ${maximum}s"
+                            )
+                            return@launch
+                        }
+
                         log.w(tag = TAG) {
                             "423 Interval Too Brief: server requires Min-Expires=$minExpiresHeader for $accountKey. " +
                             "Re-registering (server will enforce the value in 200 OK)."

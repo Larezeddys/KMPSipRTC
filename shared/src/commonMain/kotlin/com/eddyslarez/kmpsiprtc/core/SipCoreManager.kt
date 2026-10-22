@@ -554,6 +554,7 @@ class SipCoreManager private constructor(
                             password = dbAccount.password,
                             domain = dbAccount.domain
                         ).apply {
+                            usePersistentRegistrationIdentity(dbAccount.id)
                             token.value = dbAccount.pushToken ?: ""
                             provider.value = dbAccount.pushProvider ?: "fcm"
                             userAgent.value = userAgent()
@@ -609,6 +610,7 @@ class SipCoreManager private constructor(
                         password = dbAccount.password,
                         domain = dbAccount.domain
                     ).apply {
+                        usePersistentRegistrationIdentity(dbAccount.id)
                         token.value = dbAccount.pushToken ?: ""
                         provider.value = dbAccount.pushProvider ?: "fcm"
                         userAgent.value = userAgent()
@@ -1110,6 +1112,8 @@ class SipCoreManager private constructor(
                             incomingRingtoneUri = incomingRingtoneUri,
                             outgoingRingtoneUri = outgoingRingtoneUri
                         )
+                        accountInfo.usePersistentRegistrationIdentity(dbAccount.id)
+
 
                         log.d(tag = TAG) { "[OK] Account created in DB with ID: ${dbAccount.id}" }
                     }
@@ -1829,6 +1833,7 @@ fun handleRegistrationSuccess(accountInfo: AccountInfo) {
                                 password = dbAccount.password,
                                 domain = dbAccount.domain
                             ).apply {
+                                usePersistentRegistrationIdentity(dbAccount.id)
                                 token.value = dbAccount.pushToken ?: ""
                                 provider.value = dbAccount.pushProvider ?: "fcm"
                                 userAgent.value = "${userAgent()} Push"

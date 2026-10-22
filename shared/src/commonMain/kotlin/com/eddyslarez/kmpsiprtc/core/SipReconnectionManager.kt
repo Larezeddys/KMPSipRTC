@@ -262,7 +262,10 @@ class SipReconnectionManager(
                             username = dbAccount.username,
                             password = dbAccount.password,
                             domain = dbAccount.domain
-                        ).apply { isRegistered.value = false }
+                        ).apply {
+                            usePersistentRegistrationIdentity(dbAccount.id)
+                            isRegistered.value = false
+                        }
 
                         val accountKey = "${accountInfo.username}@${accountInfo.domain}"
                         cachedAccounts.put(accountKey, accountInfo)

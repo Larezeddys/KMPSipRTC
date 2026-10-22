@@ -10,14 +10,12 @@ object SipMessageBuilder {
     private const val SIP_VERSION = "SIP/2.0"
     private const val SIP_TRANSPORT = "WS"
     private const val MAX_FORWARDS = 70
-    // Mantener registro largo para compatibilidad con modelos legacy y OpenSIPS.
+    // Mantener el registro de primer plano para compatibilidad con el servidor.
     // 259200s = 3 dias.
     private const val DEFAULT_EXPIRES = 259200
-    // Registro en modo PUSH (con pn-prid): 30 dias. El binding debe sobrevivir
-    // largos periodos sin abrir la app — iOS no permite refrescarlo en background;
-    // el refresh solo ocurre al recibir un push o al volver a foreground. Si el
-    // servidor acorta el valor en el 200 OK, el cliente respeta ese Expires.
-    private const val PUSH_EXPIRES = 2592000
+    // Politica del producto: ningun REGISTER con push solicita mas de 2 dias.
+    const val MAX_PUSH_REGISTRATION_EXPIRES_SECONDS = 172800
+    private const val PUSH_EXPIRES = MAX_PUSH_REGISTRATION_EXPIRES_SECONDS
     private const val UNREGISTER_EXPIRES = 0
     private const val TAG = "SipMessageBuilder"
 

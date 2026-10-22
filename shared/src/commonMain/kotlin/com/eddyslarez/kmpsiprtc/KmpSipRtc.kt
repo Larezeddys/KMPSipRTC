@@ -3265,17 +3265,40 @@ class KmpSipRtc private constructor() {
     // ==================== MENSAJERÍA RICA MATRIX (tipo Element) ====================
 
     /** Enviar un mensaje con cuerpo HTML formateado (markdown/código/links). */
-    fun sendMatrixFormattedMessage(roomId: String, body: String, html: String, onComplete: ((Result<Unit>) -> Unit)? = null) {
+    fun sendMatrixFormattedMessage(
+        roomId: String,
+        body: String,
+        html: String,
+        onComplete: ((Result<Unit>) -> Unit)? = null,
+        mentionedUserIds: Set<String> = emptySet(),
+        mentionsRoom: Boolean = false,
+    ) {
         checkInitialized()
         val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
-        internalScope.launch { onComplete?.invoke(matrix.sendFormattedMessage(roomId, body, html)) }
+        internalScope.launch {
+            onComplete?.invoke(
+                matrix.sendFormattedMessage(roomId, body, html, mentionedUserIds, mentionsRoom)
+            )
+        }
     }
 
     /** Responder con cuerpo HTML formateado. */
-    fun replyMatrixFormatted(roomId: String, replyToEventId: String, body: String, html: String, onComplete: ((Result<Unit>) -> Unit)? = null) {
+    fun replyMatrixFormatted(
+        roomId: String,
+        replyToEventId: String,
+        body: String,
+        html: String,
+        onComplete: ((Result<Unit>) -> Unit)? = null,
+        mentionedUserIds: Set<String> = emptySet(),
+        mentionsRoom: Boolean = false,
+    ) {
         checkInitialized()
         val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
-        internalScope.launch { onComplete?.invoke(matrix.sendFormattedReply(roomId, replyToEventId, body, html)) }
+        internalScope.launch {
+            onComplete?.invoke(
+                matrix.sendFormattedReply(roomId, replyToEventId, body, html, mentionedUserIds, mentionsRoom)
+            )
+        }
     }
 
     /** Editar con cuerpo HTML formateado. */

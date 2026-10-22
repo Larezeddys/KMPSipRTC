@@ -10,7 +10,7 @@ import dev.onvoid.webrtc.media.video.VideoTrack
  * Lo llaman tanto el hilo nativo de WebRTC como el lector del WebSocket.
  */
 internal class DesktopRemoteVideoRegistry {
-    private data class Receiver(val track: VideoTrack, val streams: List<String>, val mid: String?)
+    private data class Receiver(val track: VideoTrack, val streams: List<String>, val mid: String?, val nativeId: String)
     private data class Binding(val mid: String?, val stream: String, val nativeId: String) {
         val participantSid: String? get() = stream.substringBefore('|').takeIf { it.startsWith("PA_") }
         val trackSid: String? get() = stream.substringAfter('|', "").takeIf { it.startsWith("TR_") }
@@ -40,9 +40,17 @@ internal class DesktopRemoteVideoRegistry {
     }
 
     @Synchronized fun added(track: VideoTrack, streams: List<String>, mid: String?) {
-        val previous = receivers[track.id]
-        val receiver = Receiver(track, streams.ifEmpty { previous?.streams.orEmpty() }, mid ?: previous?.mid)
-        if (!hasOffer || findBinding(receiver) != null) receivers[track.id] = receiver
+        val nativeId = try { track.id } catch (_: Exception) { null } ?: return
+        if (nativeId.isBlank()) return
+        val safeStreams = streams.filterNot { it.isNullOrBlank() }
+        val previous = receivers[nativeId]
+        val receiver = Receiver(
+            track = track,
+            streams = safeStreams.ifEmpty { previous?.streams.orEmpty() },
+            mid = mid ?: previous?.mid,
+            nativeId = nativeId,
+        )
+        if (!hasOffer || findBinding(receiver) != null) receivers[nativeId] = receiver
     }
 
     @Synchronized fun removed(nativeId: String) { receivers.remove(nativeId) }
@@ -64,14 +72,14 @@ internal class DesktopRemoteVideoRegistry {
 
     private fun findBinding(receiver: Receiver): Binding? =
         bindings.firstOrNull { receiver.mid != null && it.mid == receiver.mid } ?:
-        bindings.firstOrNull { it.nativeId == receiver.track.id } ?:
+        bindings.firstOrNull { it.nativeId == receiver.nativeId } ?:
         bindings.firstOrNull { it.stream in receiver.streams }
 
     private fun resolve(receiver: Receiver): Pair<LiveKitParticipantInfo, com.eddyslarez.kmpsiprtc.services.livekit.LiveKitTrackInfo>? {
         val binding = findBinding(receiver)
         val stream = receiver.streams.firstOrNull { it.contains('|') }
         val trackSid = binding?.trackSid ?: stream?.substringAfter('|')?.takeIf { it.startsWith("TR_") }
-            ?: receiver.track.id.takeIf { it.startsWith("TR_") } ?: return null
+            ?: receiver.nativeId.takeIf { it.startsWith("TR_") } ?: return null
         val participantSid = binding?.participantSid ?: stream?.substringBefore('|')?.takeIf { it.startsWith("PA_") }
         participants.values.forEach { participant ->
             if (participantSid != null && participant.sid != participantSid) return@forEach

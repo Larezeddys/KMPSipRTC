@@ -16,6 +16,7 @@ import net.folivo.trixnity.client.*
 import net.folivo.trixnity.client.room.message.audio
 import net.folivo.trixnity.client.room.message.file
 import net.folivo.trixnity.client.room.message.image
+import net.folivo.trixnity.client.room.message.mentions
 import net.folivo.trixnity.client.room.message.react
 import net.folivo.trixnity.client.room.message.reply
 import net.folivo.trixnity.client.room.message.replace
@@ -263,6 +264,38 @@ class MatrixManager(
     }
 
     /**
+     * Cierra el cliente Matrix en memoria antes de crear otro sobre el store.
+     * No envía logout al servidor ni borra el almacén; así un re-login de la misma
+     * cuenta puede reutilizarlo y un cambio de identidad puede limpiarlo después.
+     */
+    private suspend fun closeActiveClientForReplacement() {
+        wantSync = false
+        syncWatchdogJob?.cancel()
+        syncWatchdogJob = null
+        syncConnectionJob?.cancel()
+        syncConnectionJob = null
+        followJob?.cancel()
+        followJob = null
+        followedRoom = null
+        spaceChildJobs.values.forEach { it.cancel() }
+        spaceChildJobs.clear()
+
+        runCatching { matrixClient?.close() }
+            .onFailure { log.w(TAG) { "No se pudo cerrar el cliente Matrix anterior: ${it.message}" } }
+        matrixClient = null
+        storedAccessToken = null
+        storedUserId = null
+
+        _connectionState.value = MatrixConnectionState.Disconnected
+        _rooms.value = emptyList()
+        _activeCall.value = null
+        _messages.value = emptyMap()
+        _spaceChildren.value = emptyMap()
+        historicalLoaded.clear()
+        oldestLoaded.clear()
+    }
+
+    /**
      * Login con password. homeserverOverride permite cambiar el servidor sin
      * recrear el MatrixManager (util cuando el usuario escribe su propio homeserver).
      */
@@ -438,9 +471,23 @@ class MatrixManager(
             val resolvedUserId = who.first
             val resolvedDeviceId = who.second?.takeIf { it.isNotBlank() } ?: "MCN_${generateId()}"
 
-            // Si el store local es de OTRA cuenta, limpiarlo antes de levantar.
+            // El userId de /auth y la identidad del token deben describir la misma
+            // cuenta. No tocar el cliente ni el store local si no coinciden.
+            if (':' in userId && userId != resolvedUserId) {
+                val error = IllegalStateException(
+                    "Matrix auth userId no coincide con whoami (auth=$userId, whoami=$resolvedUserId)"
+                )
+                log.e(TAG) { error.message ?: "Matrix userId mismatch" }
+                return Result.failure(error)
+            }
+
+            // Cerrar primero cualquier cliente en memoria para no borrar o abrir
+            // simultáneamente la base Trixnity. Una misma cuenta conserva su store;
+            // una identidad distinta recibe un almacén limpio.
             val prev = readLastUser()
-            if (prev != null && prev != resolvedUserId.lowercase()) {
+            val accountChanged = prev != null && prev != resolvedUserId.lowercase()
+            if (matrixClient != null) closeActiveClientForReplacement()
+            if (accountChanged) {
                 log.d(TAG) { "Store previo de otra cuenta ($prev); limpiando antes del login con token" }
                 clearLocalStore()
             }
@@ -1198,6 +1245,10 @@ class MatrixManager(
                                             content = preview,
                                             timestamp = event.originTimestamp,
                                             type = MessageType.TEXT,
+                                            formattedBody = (content as? RoomMessageEventContent.TextBased)?.formattedBody,
+                                            format = (content as? RoomMessageEventContent.TextBased)?.format,
+                                            mentionedUserIds = (content as? RoomMessageEventContent.TextBased)?.mentions?.users.orEmpty().map { it.full }.toSet(),
+                                            mentionsRoom = (content as? RoomMessageEventContent.TextBased)?.mentions?.room == true,
                                         )
                                     )
                                 }
@@ -2199,7 +2250,13 @@ class MatrixManager(
      * clientes lo renderizan. Inserta optimista con el formato para feedback inmediato.
      */
     @OptIn(kotlin.time.ExperimentalTime::class)
-    suspend fun sendFormattedMessage(roomId: String, body: String, html: String): Result<Unit> {
+    suspend fun sendFormattedMessage(
+        roomId: String,
+        body: String,
+        html: String,
+        mentionedUserIds: Set<String> = emptySet(),
+        mentionsRoom: Boolean = false,
+    ): Result<Unit> {
         return try {
             val client = matrixClient ?: throw Exception("Not logged in")
             val myUserId = client.userId.full
@@ -2215,6 +2272,8 @@ class MatrixManager(
                 type = MessageType.TEXT,
                 formattedBody = html,
                 format = HTML_FORMAT,
+                mentionedUserIds = mentionedUserIds,
+                mentionsRoom = mentionsRoom,
             )
             val current = _messages.value[roomId] ?: emptyList()
             _messages.value = _messages.value + (roomId to (current + optimistic))
@@ -2223,6 +2282,12 @@ class MatrixManager(
 
             client.room.sendMessage(RoomId(roomId)) {
                 text(body = body, format = HTML_FORMAT, formattedBody = html)
+                if (mentionedUserIds.isNotEmpty() || mentionsRoom) {
+                    mentions(
+                        users = mentionedUserIds.mapTo(mutableSetOf()) { UserId(it) }.takeIf { it.isNotEmpty() },
+                        room = mentionsRoom.takeIf { it },
+                    )
+                }
             }
             Result.success(Unit)
         } catch (e: Exception) {
@@ -2234,12 +2299,25 @@ class MatrixManager(
     /**
      * Responder con cuerpo formateado HTML.
      */
-    suspend fun sendFormattedReply(roomId: String, replyToEventId: String, body: String, html: String): Result<Unit> {
+    suspend fun sendFormattedReply(
+        roomId: String,
+        replyToEventId: String,
+        body: String,
+        html: String,
+        mentionedUserIds: Set<String> = emptySet(),
+        mentionsRoom: Boolean = false,
+    ): Result<Unit> {
         return try {
             val client = matrixClient ?: throw Exception("Not logged in")
             client.room.sendMessage(RoomId(roomId)) {
                 reply(EventId(replyToEventId), null)
                 text(body = body, format = HTML_FORMAT, formattedBody = html)
+                if (mentionedUserIds.isNotEmpty() || mentionsRoom) {
+                    mentions(
+                        users = mentionedUserIds.mapTo(mutableSetOf()) { UserId(it) }.takeIf { it.isNotEmpty() },
+                        room = mentionsRoom.takeIf { it },
+                    )
+                }
             }
             Result.success(Unit)
         } catch (e: Exception) {
