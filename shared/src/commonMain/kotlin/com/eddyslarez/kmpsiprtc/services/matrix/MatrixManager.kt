@@ -127,7 +127,10 @@ private fun backofficeTextContent(
     reactionRequiredDue: String? = null,
     dutyAgentId: String? = null,
 ): RoomMessageEventContent.Unknown {
-    val users = (mentionedUserIds + listOfNotNull(dutyAgentId)).filter { it.startsWith("@") && ':' in it }.toSortedSet()
+    val users = (mentionedUserIds + listOfNotNull(dutyAgentId))
+        .filter { it.startsWith("@") && ':' in it }
+        .distinct()
+        .sorted()
     val raw = kotlinx.serialization.json.buildJsonObject {
         put("msgtype", "m.text")
         put("body", body)
