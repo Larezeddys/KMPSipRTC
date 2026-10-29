@@ -40,6 +40,18 @@ object MatrixModuleFactory {
         )
     }
 
+    /** Borra credenciales de Matrix guardadas por versiones antiguas, sin borrar el cache de chats. */
+    suspend fun clearPersistedAccountCredentials(basePath: String) {
+        val database = matrixRoomDatabaseBuilder(basePath)
+            .setDriver(BundledSQLiteDriver())
+            .build()
+        try {
+            database.account().deleteAll()
+        } finally {
+            database.close()
+        }
+    }
+
     /**
      * Módulos persistentes (Room KMP para state + Okio para media).
      *

@@ -137,6 +137,14 @@ data class MatrixMessage(
     val mentionedUserIds: Set<String> = emptySet(),
     /** true si Matrix marca m.mentions.room. */
     val mentionsRoom: Boolean = false,
+    /** Raíz de cadena plana de BackOffice; no equivale a m.thread. */
+    val backofficeChainRoot: String? = null,
+    /** Plazo de confirmación de una reacción requerida, si existe. */
+    val reactionRequiredTerm: String? = null,
+    /** Fecha límite ISO-8601 de una reacción requerida, si existe. */
+    val reactionRequiredDue: String? = null,
+    /** true si el mensaje fue enviado como solicitud de guardia. */
+    val isDutyMessage: Boolean = false,
 )
 
 enum class MessageType {

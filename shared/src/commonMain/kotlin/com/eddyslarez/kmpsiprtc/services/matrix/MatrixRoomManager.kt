@@ -71,11 +71,7 @@ class MatrixRoomManager(
     suspend fun markRead(roomId: String, eventId: String): Result<Unit> {
         val client = clientProvider() ?: return Result.failure(IllegalStateException("Not logged in"))
         return try {
-            client.api.room.setReadMarkers(
-                roomId = RoomId(roomId),
-                fullyRead = EventId(eventId),
-                read = EventId(eventId),
-            )
+            client.api.room.setReceipt(RoomId(roomId), EventId(eventId), ReceiptType.Read)
         } catch (e: Exception) {
             log.e(TAG) { "markRead failed for room=$roomId event=$eventId: ${e.message}" }
             Result.failure(e)

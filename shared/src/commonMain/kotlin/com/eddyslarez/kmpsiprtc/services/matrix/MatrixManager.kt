@@ -69,6 +69,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import net.folivo.trixnity.clientserverapi.client.SyncState
 import net.folivo.trixnity.clientserverapi.model.authentication.IdentifierType
 import net.folivo.trixnity.clientserverapi.model.media.Media
@@ -112,6 +113,82 @@ private val SkipMatrixKeyUpload = createClientPlugin("SkipMatrixKeyUpload") {
                 callContext = request.executionContext,
             )
         )
+    }
+}
+
+private fun backofficeTextContent(
+    body: String,
+    html: String,
+    mentionedUserIds: Set<String>,
+    mentionsRoom: Boolean,
+    replyToEventId: String? = null,
+    chainRootId: String? = null,
+    reactionRequiredTerm: String? = null,
+    reactionRequiredDue: String? = null,
+    dutyAgentId: String? = null,
+): RoomMessageEventContent.Unknown {
+    val users = (mentionedUserIds + listOfNotNull(dutyAgentId)).filter { it.startsWith("@") && ':' in it }.toSortedSet()
+    val raw = kotlinx.serialization.json.buildJsonObject {
+        put("msgtype", "m.text")
+        put("body", body)
+        put("format", "org.matrix.custom.html")
+        put("formatted_body", html)
+        if (users.isNotEmpty() || mentionsRoom) {
+            put("m.mentions", kotlinx.serialization.json.buildJsonObject {
+                if (users.isNotEmpty()) {
+                    put("user_ids", kotlinx.serialization.json.buildJsonArray {
+                        users.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) }
+                    })
+                }
+                if (mentionsRoom) put("room", true)
+            })
+        }
+        if (!chainRootId.isNullOrBlank()) {
+            put("com.backoffice.chain", kotlinx.serialization.json.buildJsonObject {
+                put("root", chainRootId)
+            })
+        }
+        if (!reactionRequiredTerm.isNullOrBlank()) {
+            put("com.backoffice.reaction_required", kotlinx.serialization.json.buildJsonObject {
+                put("term", reactionRequiredTerm)
+                if (reactionRequiredDue == null) put("due", kotlinx.serialization.json.JsonNull)
+                else put("due", reactionRequiredDue)
+            })
+        }
+        if (!dutyAgentId.isNullOrBlank()) put("com.backoffice.duty", true)
+        if (!replyToEventId.isNullOrBlank()) {
+            put("m.relates_to", kotlinx.serialization.json.buildJsonObject {
+                put("m.in_reply_to", kotlinx.serialization.json.buildJsonObject {
+                    put("event_id", replyToEventId)
+                })
+            })
+        }
+    }
+    return RoomMessageEventContent.Unknown(
+        type = "m.text",
+        body = body,
+        raw = raw,
+        format = "org.matrix.custom.html",
+        formattedBody = html,
+    )
+}
+
+private fun MatrixClientConfiguration.installBackofficeMessageSerialization() {
+    val factories = createTrixnityDefaultModuleFactories().toMutableList()
+    // La fábrica de mappings de eventos es la tercera del conjunto por defecto.
+    factories[2] = ::createBackofficeEventContentSerializerMappingsModule
+    // Se carga después de los repositorios Room para evitar persistir tokens Matrix.
+    factories += ::createBackofficeInMemoryAccountRepositoryModule
+    modulesFactories = factories
+}
+
+private suspend fun MatrixManager.clearPersistedMatrixCredentials() {
+    try {
+        MatrixModuleFactory.clearPersistedAccountCredentials(matrixStoragePath())
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Exception) {
+        log.w("MatrixManager") { "No se pudieron limpiar credenciales Matrix heredadas (${error::class.simpleName})" }
     }
 }
 
@@ -315,6 +392,8 @@ class MatrixManager(
                 clearLocalStore()
             }
 
+            // La sesión Matrix no persiste tokens; el cache de salas y eventos sí.
+            clearPersistedMatrixCredentials()
             // Persistencia real: Room KMP para state + Okio para media.
             val (reposModule, mediaModule) = MatrixModuleFactory.createPersistentModules(
                 matrixStoragePath()
@@ -335,6 +414,7 @@ class MatrixManager(
                 mediaStoreModule = mediaModule,
                 configuration = {
                     syncLoopTimeout = config.syncTimeout.seconds
+                    installBackofficeMessageSerialization()
                 }
             )
 
@@ -397,6 +477,7 @@ class MatrixManager(
                 mediaStoreModule = mediaModule,
                 configuration = {
                     syncLoopTimeout = config.syncTimeout.seconds
+                    installBackofficeMessageSerialization()
                     // La sesión guardada viene del backoffice y su token no tiene device:
                     // sin esto el sync intentaría subir one-time keys y Synapse las rechaza.
                     httpClientConfig = { install(SkipMatrixKeyUpload) }
@@ -450,6 +531,7 @@ class MatrixManager(
         accessToken: String,
         refreshToken: String? = null,
         homeserverUrl: String? = null,
+        deviceId: String? = null,
     ): Result<Unit> {
         return try {
             if (accessToken.isBlank()) {
@@ -469,7 +551,9 @@ class MatrixManager(
                     IllegalStateException("Matrix whoami falló (token inválido o sin acceso al homeserver)")
                 )
             val resolvedUserId = who.first
-            val resolvedDeviceId = who.second?.takeIf { it.isNotBlank() } ?: "MCN_${generateId()}"
+            val resolvedDeviceId = who.second?.takeIf { it.isNotBlank() }
+                ?: deviceId?.takeIf { it.isNotBlank() }
+                ?: return Result.failure(IllegalStateException("Matrix token has no verifiable deviceId"))
 
             // El userId de /auth y la identidad del token deben describir la misma
             // cuenta. No tocar el cliente ni el store local si no coinciden.
@@ -492,6 +576,9 @@ class MatrixManager(
                 clearLocalStore()
             }
 
+            // Eliminar una vez la cuenta persistida por versiones anteriores y
+            // conservar únicamente la cache de salas/eventos para esta cuenta.
+            clearPersistedMatrixCredentials()
             val (reposModule, mediaModule) = MatrixModuleFactory.createPersistentModules(
                 matrixStoragePath()
             )
@@ -512,6 +599,7 @@ class MatrixManager(
                 },
                 configuration = {
                     syncLoopTimeout = config.syncTimeout.seconds
+                    installBackofficeMessageSerialization()
                     httpClientConfig = { install(SkipMatrixKeyUpload) }
                 },
             )
@@ -1567,12 +1655,25 @@ class MatrixManager(
         }
 
         // 2) Relaciones reply / thread para el modelo.
+        val rawContent = (content as? RoomMessageEventContent.Unknown)?.raw
+        val rawRelation = rawContent?.get("m.relates_to") as? kotlinx.serialization.json.JsonObject
+        val rawReplyTo = ((rawRelation?.get("m.in_reply_to") as? kotlinx.serialization.json.JsonObject)
+            ?.get("event_id") as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
         val replyToEventId = when (relatesTo) {
             is RelatesTo.Reply -> relatesTo.replyTo.eventId.full
             is RelatesTo.Thread -> relatesTo.replyTo?.eventId?.full
-            else -> null
+            else -> rawReplyTo
         }
         val threadRootId = (relatesTo as? RelatesTo.Thread)?.eventId?.full
+        val chainRoot = ((rawContent?.get("com.backoffice.chain") as? kotlinx.serialization.json.JsonObject)
+            ?.get("root") as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
+        val reactionRequired = rawContent?.get("com.backoffice.reaction_required") as? kotlinx.serialization.json.JsonObject
+        val reactionRequiredTerm = (reactionRequired?.get("term") as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
+        val reactionRequiredDue = (reactionRequired?.get("due") as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
+        val isDutyMessage = (rawContent?.get("com.backoffice.duty") as? kotlinx.serialization.json.JsonPrimitive)
+            ?.booleanOrNull == true
+        val mentionedUsers = content.mentions?.users?.mapTo(mutableSetOf()) { it.full }.orEmpty()
+        val mentionsRoom = content.mentions?.room == true
 
         val msgType = when (content.type) {
             "m.image" -> MessageType.IMAGE
@@ -1594,8 +1695,14 @@ class MatrixManager(
                 type = msgType,
                 replyToEventId = replyToEventId,
                 threadRootId = threadRootId,
-                formattedBody = textBased?.formattedBody,
-                format = textBased?.format,
+                formattedBody = textBased?.formattedBody ?: (content as? RoomMessageEventContent.Unknown)?.formattedBody,
+                format = textBased?.format ?: (content as? RoomMessageEventContent.Unknown)?.format,
+                mentionedUserIds = mentionedUsers,
+                mentionsRoom = mentionsRoom,
+                backofficeChainRoot = chainRoot,
+                reactionRequiredTerm = reactionRequiredTerm,
+                reactionRequiredDue = reactionRequiredDue,
+                isDutyMessage = isDutyMessage,
             )
         } else {
             // Resolver el mxc:// real de la media (FileBased) para descarga/preview.
@@ -1766,6 +1873,12 @@ class MatrixManager(
         threadRootId: String? = null,
         formattedBody: String? = null,
         format: String? = null,
+        mentionedUserIds: Set<String> = emptySet(),
+        mentionsRoom: Boolean = false,
+        backofficeChainRoot: String? = null,
+        reactionRequiredTerm: String? = null,
+        reactionRequiredDue: String? = null,
+        isDutyMessage: Boolean = false,
     ) {
         val current = _messages.value[roomId] ?: emptyList()
 
@@ -1784,6 +1897,12 @@ class MatrixManager(
             threadRootId = threadRootId,
             formattedBody = formattedBody,
             format = format,
+            mentionedUserIds = mentionedUserIds,
+            mentionsRoom = mentionsRoom,
+            backofficeChainRoot = backofficeChainRoot,
+            reactionRequiredTerm = reactionRequiredTerm,
+            reactionRequiredDue = reactionRequiredDue,
+            isDutyMessage = isDutyMessage,
         )
 
         // 2) Buscar optimista local del mismo sender+content+timestamp cercano
@@ -2256,7 +2375,10 @@ class MatrixManager(
         html: String,
         mentionedUserIds: Set<String> = emptySet(),
         mentionsRoom: Boolean = false,
-    ): Result<Unit> {
+        reactionRequiredTerm: String? = null,
+        reactionRequiredDue: String? = null,
+        dutyAgentId: String? = null,
+    ): Result<String?> {
         return try {
             val client = matrixClient ?: throw Exception("Not logged in")
             val myUserId = client.userId.full
@@ -2274,24 +2396,32 @@ class MatrixManager(
                 format = HTML_FORMAT,
                 mentionedUserIds = mentionedUserIds,
                 mentionsRoom = mentionsRoom,
+                reactionRequiredTerm = reactionRequiredTerm,
+                reactionRequiredDue = reactionRequiredDue,
+                isDutyMessage = !dutyAgentId.isNullOrBlank(),
             )
             val current = _messages.value[roomId] ?: emptyList()
             _messages.value = _messages.value + (roomId to (current + optimistic))
 
             ensureJoinedBeforeSend(roomId)
 
-            client.room.sendMessage(RoomId(roomId)) {
-                text(body = body, format = HTML_FORMAT, formattedBody = html)
-                if (mentionedUserIds.isNotEmpty() || mentionsRoom) {
-                    mentions(
-                        users = mentionedUserIds.mapTo(mutableSetOf()) { UserId(it) }.takeIf { it.isNotEmpty() },
-                        room = mentionsRoom.takeIf { it },
-                    )
-                }
+            val transactionId = client.room.sendMessage(RoomId(roomId)) {
+                content(backofficeTextContent(
+                    body,
+                    html,
+                    mentionedUserIds,
+                    mentionsRoom,
+                    reactionRequiredTerm = reactionRequiredTerm,
+                    reactionRequiredDue = reactionRequiredDue,
+                    dutyAgentId = dutyAgentId,
+                ))
             }
-            Result.success(Unit)
+            val sent = withTimeoutOrNull(60_000) {
+                client.room.getOutbox(RoomId(roomId), transactionId).first { it?.eventId != null }
+            }
+            Result.success(sent?.eventId?.full)
         } catch (e: Exception) {
-            log.e(TAG) { "sendFormattedMessage failed: ${e.message}" }
+            log.e(TAG) { "sendFormattedMessage failed: ${e::class.simpleName}" }
             Result.failure(e)
         }
     }
@@ -2306,22 +2436,30 @@ class MatrixManager(
         html: String,
         mentionedUserIds: Set<String> = emptySet(),
         mentionsRoom: Boolean = false,
-    ): Result<Unit> {
+        chainRootId: String? = null,
+        reactionRequiredTerm: String? = null,
+        reactionRequiredDue: String? = null,
+    ): Result<String?> {
         return try {
             val client = matrixClient ?: throw Exception("Not logged in")
-            client.room.sendMessage(RoomId(roomId)) {
-                reply(EventId(replyToEventId), null)
-                text(body = body, format = HTML_FORMAT, formattedBody = html)
-                if (mentionedUserIds.isNotEmpty() || mentionsRoom) {
-                    mentions(
-                        users = mentionedUserIds.mapTo(mutableSetOf()) { UserId(it) }.takeIf { it.isNotEmpty() },
-                        room = mentionsRoom.takeIf { it },
-                    )
-                }
+            val transactionId = client.room.sendMessage(RoomId(roomId)) {
+                content(backofficeTextContent(
+                    body,
+                    html,
+                    mentionedUserIds,
+                    mentionsRoom,
+                    replyToEventId,
+                    chainRootId,
+                    reactionRequiredTerm,
+                    reactionRequiredDue,
+                ))
             }
-            Result.success(Unit)
+            val sent = withTimeoutOrNull(60_000) {
+                client.room.getOutbox(RoomId(roomId), transactionId).first { it?.eventId != null }
+            }
+            Result.success(sent?.eventId?.full)
         } catch (e: Exception) {
-            log.e(TAG) { "sendFormattedReply failed: ${e.message}" }
+            log.e(TAG) { "sendFormattedReply failed: ${e::class.simpleName}" }
             Result.failure(e)
         }
     }

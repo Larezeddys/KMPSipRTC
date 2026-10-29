@@ -3269,15 +3269,21 @@ class KmpSipRtc private constructor() {
         roomId: String,
         body: String,
         html: String,
-        onComplete: ((Result<Unit>) -> Unit)? = null,
+        onComplete: ((Result<String?>) -> Unit)? = null,
         mentionedUserIds: Set<String> = emptySet(),
         mentionsRoom: Boolean = false,
+        reactionRequiredTerm: String? = null,
+        reactionRequiredDue: String? = null,
+        dutyAgentId: String? = null,
     ) {
         checkInitialized()
         val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
         internalScope.launch {
             onComplete?.invoke(
-                matrix.sendFormattedMessage(roomId, body, html, mentionedUserIds, mentionsRoom)
+                matrix.sendFormattedMessage(
+                    roomId, body, html, mentionedUserIds, mentionsRoom,
+                    reactionRequiredTerm, reactionRequiredDue, dutyAgentId,
+                )
             )
         }
     }
@@ -3288,15 +3294,21 @@ class KmpSipRtc private constructor() {
         replyToEventId: String,
         body: String,
         html: String,
-        onComplete: ((Result<Unit>) -> Unit)? = null,
+        onComplete: ((Result<String?>) -> Unit)? = null,
         mentionedUserIds: Set<String> = emptySet(),
         mentionsRoom: Boolean = false,
+        chainRootId: String? = null,
+        reactionRequiredTerm: String? = null,
+        reactionRequiredDue: String? = null,
     ) {
         checkInitialized()
         val matrix = matrixManager ?: run { onComplete?.invoke(Result.failure(SipLibraryException("Matrix not initialized"))); return }
         internalScope.launch {
             onComplete?.invoke(
-                matrix.sendFormattedReply(roomId, replyToEventId, body, html, mentionedUserIds, mentionsRoom)
+                matrix.sendFormattedReply(
+                    roomId, replyToEventId, body, html, mentionedUserIds, mentionsRoom, chainRootId,
+                    reactionRequiredTerm, reactionRequiredDue,
+                )
             )
         }
     }
@@ -3680,6 +3692,7 @@ class KmpSipRtc private constructor() {
         accessToken: String,
         refreshToken: String? = null,
         homeserverUrl: String? = null,
+        deviceId: String? = null,
         onComplete: ((Result<Unit>) -> Unit)? = null
     ) {
         checkInitialized()
@@ -3689,7 +3702,7 @@ class KmpSipRtc private constructor() {
         }
 
         internalScope.launch {
-            val result = matrix.loginWithToken(userId, accessToken, refreshToken, homeserverUrl)
+            val result = matrix.loginWithToken(userId, accessToken, refreshToken, homeserverUrl, deviceId)
             if (result.isSuccess) {
                 val token = matrix.getAccessToken()
                 if (token != null) {
@@ -3708,8 +3721,9 @@ class KmpSipRtc private constructor() {
         accessToken: String,
         refreshToken: String? = null,
         homeserverUrl: String? = null,
+        deviceId: String? = null,
     ): Result<Unit> = suspendCancellableCoroutine { cont ->
-        loginMatrixWithToken(userId, accessToken, refreshToken, homeserverUrl) { result ->
+        loginMatrixWithToken(userId, accessToken, refreshToken, homeserverUrl, deviceId) { result ->
             cont.resume(result) {}
         }
     }
