@@ -31,7 +31,8 @@ import kotlin.time.ExperimentalTime
 
 class SipReconnectionManager(
     private val messageHandler: SipMessageHandler,
-    private val sipCoreManager: SipCoreManager
+    private val sipCoreManager: SipCoreManager,
+    sharedNetworkManager: NetworkManager? = null
 ) {
     companion object {
         private const val TAG = "SipReconnectionManager"
@@ -42,7 +43,7 @@ class SipReconnectionManager(
         private const val ACCOUNT_RECOVERY_TIMEOUT = 10000L
     }
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val networkManager = createNetworkManager()
+    private val networkManager = sharedNetworkManager ?: createNetworkManager()
     private var reconnectionJob: Job? = null
     private var networkStabilityJob: Job? = null
     private var isNetworkAvailable = false

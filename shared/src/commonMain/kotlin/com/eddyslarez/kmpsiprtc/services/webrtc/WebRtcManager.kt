@@ -6,6 +6,7 @@ import com.eddyslarez.kmpsiprtc.data.models.AudioUnitTypes
 import com.eddyslarez.kmpsiprtc.data.models.IceServerInfo
 import com.eddyslarez.kmpsiprtc.data.models.RecordingResult
 import com.eddyslarez.kmpsiprtc.data.models.SdpType
+import com.eddyslarez.kmpsiprtc.data.models.SipEngineInitError
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
 import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 
@@ -28,6 +29,17 @@ interface WebRtcManager {
      * Clean up and release WebRTC resources
      */
     fun dispose()
+
+    /**
+     * Libera lo que ocupa una llamada terminada. Por defecto equivale a [dispose]; escritorio solo
+     * cierra la conexión y conserva factoría y módulo de audio para la siguiente llamada.
+     */
+    fun releaseCallResources() {
+        dispose()
+    }
+
+    /** Último fallo de arranque del motor de medios, o `null`. */
+    fun getEngineInitError(): SipEngineInitError? = null
 
     /**
      * Create an SDP offer for starting a call
@@ -153,6 +165,15 @@ interface WebRtcManager {
      * @return true si se seleccionó correctamente
      */
     fun selectAudioOutputDeviceByName(deviceName: String): Boolean
+
+    /**
+     * Selecciona la entrada por id estable ([AudioDevice.descriptor]); si no hay coincidencia se
+     * interpreta como nombre, para aceptar selecciones guardadas por versiones anteriores.
+     */
+    fun selectAudioInputDeviceById(deviceId: String): Boolean = selectAudioInputDeviceByName(deviceId)
+
+    /** Como [selectAudioInputDeviceById], para la salida. */
+    fun selectAudioOutputDeviceById(deviceId: String): Boolean = selectAudioOutputDeviceByName(deviceId)
 
     // ==================== STREAMING EN TIEMPO REAL ====================
 

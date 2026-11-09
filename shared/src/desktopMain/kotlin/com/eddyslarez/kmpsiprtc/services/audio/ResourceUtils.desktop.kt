@@ -1,5 +1,7 @@
 package com.eddyslarez.kmpsiprtc.services.audio
 
+import com.eddyslarez.kmpsiprtc.platform.log
+
 
 actual fun createResourceUtils(): ResourceUtils =  DesktopResourceUtils()
 
@@ -9,7 +11,7 @@ class DesktopResourceUtils():ResourceUtils {
         val resource = this::class.java.getResource("/call.wav")
             ?: this::class.java.getResource("/call.mp3")
         return resource?.toString() ?: run {
-            println("Warning: call.wav/call.mp3 not found in resources")
+            log.w(tag = "ResourceUtils") { "Warning: call.wav/call.mp3 not found in resources" }
             null
         }
     }
@@ -18,7 +20,7 @@ class DesktopResourceUtils():ResourceUtils {
         val resource = this::class.java.getResource("/ringback.wav")
             ?: this::class.java.getResource("/ringback.mp3")
         return resource?.toString() ?: run {
-            println("Warning: ringback.wav/ringback.mp3 not found in resources")
+            log.w(tag = "ResourceUtils") { "Warning: ringback.wav/ringback.mp3 not found in resources" }
             null
         }
     }

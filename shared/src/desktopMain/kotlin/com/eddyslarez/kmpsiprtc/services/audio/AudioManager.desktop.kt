@@ -1,5 +1,6 @@
 package com.eddyslarez.kmpsiprtc.services.audio
 
+import com.eddyslarez.kmpsiprtc.platform.log
 import kotlinx.coroutines.*
 import java.io.BufferedInputStream
 import java.io.File
@@ -8,6 +9,7 @@ import javax.sound.sampled.*
 actual fun createAudioManager(): AudioManager = DesktopAudioManagerImpl()
 
 class DesktopAudioManagerImpl : AudioManager {
+    private val TAG = "DesktopAudioManager"
     private var incomingRingtoneJob: Job? = null
     private var outgoingRingtoneJob: Job? = null
     private var vibrationJob: Job? = null
@@ -53,9 +55,9 @@ class DesktopAudioManagerImpl : AudioManager {
         incomingRingtonePath = resourceUtils.getDefaultIncomingRingtonePath()
         outgoingRingtonePath = resourceUtils.getDefaultOutgoingRingtonePath()
 
-        println("AudioManager initialized - Desktop")
-        println("Incoming path: $incomingRingtonePath")
-        println("Outgoing path: $outgoingRingtonePath")
+        log.d(tag = TAG) { "AudioManager initialized - Desktop" }
+        log.d(tag = TAG) { "Incoming path: $incomingRingtonePath" }
+        log.d(tag = TAG) { "Outgoing path: $outgoingRingtonePath" }
     }
 
     override fun setVibrationPattern(patternName: String) {
@@ -71,7 +73,7 @@ class DesktopAudioManagerImpl : AudioManager {
         // cuenta: cuando la app resuelve que esta llamada va con otro tono, el reproductor ya
         // arranco con el global; sin reinicio se seguiria oyendo aquel hasta el final.
         if (cambio && isIncomingRingtonePlaying) {
-            println("AudioManager: tono entrante cambiado en caliente -> $path")
+            log.d(tag = TAG) { "tono entrante cambiado en caliente -> $path" }
             playRingtone(lastSyncVibration)
         }
     }
@@ -94,13 +96,12 @@ class DesktopAudioManagerImpl : AudioManager {
             // Abrir el audio input stream según el tipo de path
             audioStream = openAudioInputStream(path)
             if (audioStream == null) {
-                println("AudioManager: No se pudo abrir audio stream para: $path")
+                log.w(tag = TAG) { "No se pudo abrir audio stream para: $path" }
                 return false
             }
 
             val baseFormat = audioStream.format
-            println("AudioManager: Formato original: $baseFormat")
-
+            log.d(tag = TAG) { "Formato original: $baseFormat" }
             // Convertir a formato reproducible (PCM_SIGNED, 16-bit)
             val playableFormat = AudioFormat(
                 AudioFormat.Encoding.PCM_SIGNED,
@@ -115,10 +116,10 @@ class DesktopAudioManagerImpl : AudioManager {
             convertedStream = if (baseFormat.encoding != AudioFormat.Encoding.PCM_SIGNED ||
                 baseFormat.sampleSizeInBits != 16) {
                 if (AudioSystem.isConversionSupported(playableFormat, baseFormat)) {
-                    println("AudioManager: Convirtiendo formato a: $playableFormat")
+                    log.d(tag = TAG) { "Convirtiendo formato a: $playableFormat" }
                     AudioSystem.getAudioInputStream(playableFormat, audioStream)
                 } else {
-                    println("AudioManager: Conversión no soportada, usando formato original")
+                    log.w(tag = TAG) { "Conversión no soportada, usando formato original" }
                     audioStream
                 }
             } else {
@@ -126,22 +127,13 @@ class DesktopAudioManagerImpl : AudioManager {
             }
 
             val formatToUse = convertedStream.format
-            println("AudioManager: Formato final: $formatToUse")
-
-            // Abrir SourceDataLine
-            val dataLineInfo = DataLine.Info(SourceDataLine::class.java, formatToUse)
-            if (!AudioSystem.isLineSupported(dataLineInfo)) {
-                println("AudioManager: Línea de audio no soportada para formato: $formatToUse")
-                return false
-            }
-
-            line = AudioSystem.getLine(dataLineInfo) as SourceDataLine
+            log.d(tag = TAG) { "Formato final: $formatToUse" }
+            line = JavaSoundDevices.openSourceLine(formatToUse)
             line.open(formatToUse)
             lineRef(line)
             line.start()
 
-            println("AudioManager: Reproduciendo audio...")
-
+            log.d(tag = TAG) { "Reproduciendo audio..." }
             // Streaming: leer y escribir en bloques
             val buffer = ByteArray(4096)
             var bytesRead: Int
@@ -156,18 +148,16 @@ class DesktopAudioManagerImpl : AudioManager {
                 line.drain()
             }
 
-            println("AudioManager: Reproducción completada")
+            log.d(tag = TAG) { "Reproducción completada" }
             return !shouldStop()
 
         } catch (e: UnsupportedAudioFileException) {
-            println("AudioManager: Formato de audio no soportado: ${e.message}")
-            e.printStackTrace()
+            log.w(tag = TAG) { "Formato de audio no soportado: ${e.message}" }
             return false
         } catch (e: Exception) {
             if (!shouldStop()) {
-                println("AudioManager: Error reproduciendo audio: ${e.message}")
-                e.printStackTrace()
-            }
+                log.w(tag = TAG) { "Error reproduciendo audio: ${e.message}" }
+                }
             return false
         } finally {
             lineRef(null)
@@ -214,8 +204,7 @@ class DesktopAudioManagerImpl : AudioManager {
                 }
             }
         } catch (e: Exception) {
-            println("AudioManager: Error abriendo audio stream: ${e.message}")
-            e.printStackTrace()
+            log.w(tag = TAG) { "Error abriendo audio stream: ${e.message}" }
             null
         }
     }
@@ -248,20 +237,15 @@ class DesktopAudioManagerImpl : AudioManager {
             }
 
             val format = AudioFormat(sampleRate.toFloat(), 16, 1, true, false)
-            val lineInfo = DataLine.Info(SourceDataLine::class.java, format)
             var line: SourceDataLine? = null
             try {
-                if (!AudioSystem.isLineSupported(lineInfo)) {
-                    println("AudioManager: La línea de audio no admite el aviso de llamada en espera")
-                    return@launch
-                }
-                line = AudioSystem.getLine(lineInfo) as SourceDataLine
+                line = JavaSoundDevices.openSourceLine(format)
                 line.open(format)
                 line.start()
                 line.write(samples, 0, samples.size)
                 line.drain()
             } catch (error: Exception) {
-                println("AudioManager: No se pudo reproducir el aviso de llamada en espera: ${error.message}")
+                log.w(tag = TAG) { "No se pudo reproducir el aviso de llamada en espera: ${error.message}" }
             } finally {
                 runCatching { line?.stop() }
                 runCatching { line?.close() }
@@ -271,7 +255,7 @@ class DesktopAudioManagerImpl : AudioManager {
 
     override fun playRingtone(syncVibration: Boolean) {
         val path = incomingRingtonePath ?: run {
-            println("AudioManager: No incoming ringtone path set")
+            log.d(tag = TAG) { "No incoming ringtone path set" }
             return
         }
 
@@ -281,7 +265,7 @@ class DesktopAudioManagerImpl : AudioManager {
         // del todo tampoco vale: la app llama a stop+play despues de fijar el tono, asi que cada
         // llamada entrante cortaba el audio a media reproduccion y volvia a empezar con un clic.
         if (isIncomingRingtonePlaying && pathEnCurso == path) {
-            println("AudioManager: ringtone entrante ya sonando con $path, no se reinicia")
+            log.d(tag = TAG) { "ringtone entrante ya sonando con $path, no se reinicia" }
             return
         }
 
@@ -294,8 +278,7 @@ class DesktopAudioManagerImpl : AudioManager {
         isIncomingRingtonePlaying = true
         shouldStopIncoming = false
 
-        println("AudioManager: Iniciando ringtone entrante: $path (gen $generacion)")
-
+        log.d(tag = TAG) { "Iniciando ringtone entrante: $path (gen $generacion)" }
         // Solo sigue viva la reproduccion mas reciente: cualquier otra se apaga sola aunque su
         // cancelacion tarde en llegar.
         fun vigente() = incomingGeneration.get() == generacion && !shouldStopIncoming
@@ -311,8 +294,7 @@ class DesktopAudioManagerImpl : AudioManager {
                 var loopCount = 0
                 while (vigente()) {
                     loopCount++
-                    println("AudioManager: Ringtone entrante iteración: $loopCount")
-
+                    log.d(tag = TAG) { "Ringtone entrante iteración: $loopCount" }
                     // Se relee en cada vuelta: si el tono cambia entre repeticiones, la
                     // siguiente ya suena con el nuevo.
                     val pathVuelta = incomingRingtonePath ?: path
@@ -324,7 +306,7 @@ class DesktopAudioManagerImpl : AudioManager {
                     )
 
                     if (!played && vigente()) {
-                        println("AudioManager: Fallo reproducción, deteniendo loop")
+                        log.w(tag = TAG) { "Fallo reproducción, deteniendo loop" }
                         break
                     }
 
@@ -336,7 +318,7 @@ class DesktopAudioManagerImpl : AudioManager {
             } catch (e: CancellationException) {
                 // Cancelación normal
             } catch (e: Exception) {
-                println("AudioManager: Error en coroutine de ringtone: ${e.message}")
+                log.w(tag = TAG) { "Error en coroutine de ringtone: ${e.message}" }
             } finally {
                 // Solo si nadie ha arrancado otra reproducción mientras tanto: si no, esta
                 // corrutina moribunda apagaria la que acaba de empezar.
@@ -356,22 +338,20 @@ class DesktopAudioManagerImpl : AudioManager {
         stopRingtone()
 
         val path = outgoingRingtonePath ?: run {
-            println("AudioManager: No outgoing ringtone path set")
+            log.d(tag = TAG) { "No outgoing ringtone path set" }
             return
         }
 
         isOutgoingRingtonePlaying = true
         shouldStopOutgoing = false
 
-        println("AudioManager: Iniciando ringback: $path")
-
+        log.d(tag = TAG) { "Iniciando ringback: $path" }
         outgoingRingtoneJob = audioScope.launch {
             try {
                 var loopCount = 0
                 while (!shouldStopOutgoing && isOutgoingRingtonePlaying) {
                     loopCount++
-                    println("AudioManager: Ringback iteración: $loopCount")
-
+                    log.d(tag = TAG) { "Ringback iteración: $loopCount" }
                     val played = playAudioStreaming(
                         path,
                         shouldStop = { shouldStopOutgoing || !isOutgoingRingtonePlaying },
@@ -379,7 +359,7 @@ class DesktopAudioManagerImpl : AudioManager {
                     )
 
                     if (!played && !shouldStopOutgoing) {
-                        println("AudioManager: Fallo reproducción ringback, deteniendo loop")
+                        log.w(tag = TAG) { "Fallo reproducción ringback, deteniendo loop" }
                         break
                     }
 
@@ -390,7 +370,7 @@ class DesktopAudioManagerImpl : AudioManager {
             } catch (e: CancellationException) {
                 // Cancelación normal
             } catch (e: Exception) {
-                println("AudioManager: Error en coroutine de ringback: ${e.message}")
+                log.w(tag = TAG) { "Error en coroutine de ringback: ${e.message}" }
             } finally {
                 // Mismo cuidado que en el tono de entrada: no apagar una reproducción posterior.
                 if (outgoingRingtoneJob == coroutineContext[Job]) {
@@ -420,7 +400,7 @@ class DesktopAudioManagerImpl : AudioManager {
             incomingRingtoneJob?.cancel()
             incomingRingtoneJob = null
         } catch (e: Exception) {
-            println("AudioManager: Error deteniendo ringtone: ${e.message}")
+            log.w(tag = TAG) { "Error deteniendo ringtone: ${e.message}" }
         }
     }
 
@@ -438,7 +418,7 @@ class DesktopAudioManagerImpl : AudioManager {
             outgoingRingtoneJob?.cancel()
             outgoingRingtoneJob = null
         } catch (e: Exception) {
-            println("AudioManager: Error deteniendo ringback: ${e.message}")
+            log.w(tag = TAG) { "Error deteniendo ringback: ${e.message}" }
         }
     }
 
@@ -467,7 +447,7 @@ class DesktopAudioManagerImpl : AudioManager {
             incomingRingtoneJob = null
             outgoingRingtoneJob = null
         } catch (e: Exception) {
-            println("AudioManager: Error en stopAllRingtones: ${e.message}")
+            log.w(tag = TAG) { "Error en stopAllRingtones: ${e.message}" }
         }
     }
 
@@ -525,7 +505,7 @@ class DesktopAudioManagerImpl : AudioManager {
                 }
             } catch (_: CancellationException) {
             } catch (e: Exception) {
-                println("AudioManager: Error en vibración: ${e.message}")
+                log.w(tag = TAG) { "Error en vibración: ${e.message}" }
             } finally {
                 isVibrating = false
             }
@@ -545,7 +525,7 @@ class DesktopAudioManagerImpl : AudioManager {
                 }
             } catch (_: CancellationException) {
             } catch (e: Exception) {
-                println("AudioManager: Error en vibración: ${e.message}")
+                log.w(tag = TAG) { "Error en vibración: ${e.message}" }
             } finally {
                 isVibrating = false
             }

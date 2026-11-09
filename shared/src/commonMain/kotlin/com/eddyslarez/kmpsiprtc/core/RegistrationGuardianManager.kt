@@ -28,7 +28,8 @@ import kotlin.time.ExperimentalTime
 
 class RegistrationGuardianManager(
     private val sipCoreManager: SipCoreManager,
-    private val databaseManager: DatabaseManager
+    private val databaseManager: DatabaseManager,
+    sharedNetworkManager: NetworkManager? = null
 ) {
     companion object {
         private const val TAG = "RegistrationGuardian"
@@ -40,7 +41,8 @@ class RegistrationGuardianManager(
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val networkManager = createNetworkManager()
+    private val networkManager = sharedNetworkManager ?: createNetworkManager()
+    private val ownsNetworkManager = sharedNetworkManager == null
     private var healthCheckJob: Job? = null
     private val accountMonitorJobs = ConcurrentMap<String, Job>()
     private val retryCounters = ConcurrentMap<String, Int>()
@@ -54,7 +56,7 @@ class RegistrationGuardianManager(
 
     fun initialize() {
         log.d(tag = TAG) { "ðŸ›¡ï¸ Initializing Registration Guardian" }
-        networkManager.initialize()
+        if (ownsNetworkManager) networkManager.initialize()
         isActive = true
         startHealthCheckMonitor()
         // Recuperacion inicial deshabilitada: el registro se maneja desde Main
@@ -543,7 +545,7 @@ class RegistrationGuardianManager(
             log.e(tag = TAG) { "Error during dispose cleanup: ${e.message}" }
         }
 
-        networkManager.dispose()
+        if (ownsNetworkManager) networkManager.dispose()
         scope.cancel()
     }
 }

@@ -1,7 +1,9 @@
 package com.eddyslarez.kmpsiprtc.services.recording
 
 import com.eddyslarez.kmpsiprtc.data.models.RecordingResult
+import com.eddyslarez.kmpsiprtc.platform.DesktopDataDirs
 import com.eddyslarez.kmpsiprtc.platform.log
+import com.eddyslarez.kmpsiprtc.services.audio.JavaSoundDevices
 import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 import kotlinx.coroutines.*
 import java.io.File
@@ -11,7 +13,12 @@ import java.nio.ByteOrder
 import javax.sound.sampled.*
 
 /**
- * Implementación de CallRecorder para Desktop (JVM)
+ * Implementación de CallRecorder para Desktop (JVM).
+ *
+ * El audio local se captura con JavaSound en el mezclador que corresponde a la entrada elegida en
+ * WebRTC (ver [JavaSoundDevices]); webrtc-java no ofrece un punto de escucha del micro que no
+ * sustituya el transporte de audio de la llamada. Con el micro silenciado se escribe silencio para
+ * no desalinear local y remoto.
  */
 class DesktopCallRecorder : CallRecorder {
     private val TAG = "DesktopCallRecorder"
@@ -47,6 +54,8 @@ class DesktopCallRecorder : CallRecorder {
     private var isRecording = false
     @Volatile
     private var isStreamingActive = false
+    @Volatile
+    private var localMuted = false
     private var recordingJob: Job? = null
     private val recordingScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -87,11 +96,10 @@ class DesktopCallRecorder : CallRecorder {
     }
 
     // Directorio de salida
-    private val outputDir: File by lazy {
-        val userHome = System.getProperty("user.home")
-        File("$userHome/CallRecordings").apply {
-            if (!exists()) mkdirs()
-        }
+    private val outputDir: File by lazy { DesktopDataDirs.recordingsDir() }
+
+    fun setLocalMuted(muted: Boolean) {
+        localMuted = muted
     }
 
     override fun startRecording(callId: String, localNumber: String, remoteNumber: String) {
@@ -126,14 +134,7 @@ class DesktopCallRecorder : CallRecorder {
     private fun startMicrophoneCapture() {
         recordingJob = recordingScope.launch {
             try {
-                val dataLineInfo = DataLine.Info(TargetDataLine::class.java, audioFormat)
-
-                if (!AudioSystem.isLineSupported(dataLineInfo)) {
-                    log.e(TAG) { "❌ Audio line not supported" }
-                    return@launch
-                }
-
-                targetDataLine = AudioSystem.getLine(dataLineInfo) as TargetDataLine
+                targetDataLine = JavaSoundDevices.openTargetLine(audioFormat)
                 targetDataLine?.open(audioFormat)
                 targetDataLine?.start()
 
@@ -146,7 +147,7 @@ class DesktopCallRecorder : CallRecorder {
                     val bytesRead = targetDataLine?.read(buffer, 0, buffer.size) ?: 0
 
                     if (bytesRead > 0) {
-                        val chunk = buffer.copyOf(bytesRead)
+                        val chunk = if (localMuted) ByteArray(bytesRead) else buffer.copyOf(bytesRead)
 
                         // Guardar en buffer si está grabando
                         if (isRecording) {
@@ -179,7 +180,6 @@ class DesktopCallRecorder : CallRecorder {
 
             } catch (e: Exception) {
                 log.e(TAG) { "❌ Error capturing microphone: ${e.message}" }
-                e.printStackTrace()
             }
         }
     }
@@ -282,22 +282,12 @@ class DesktopCallRecorder : CallRecorder {
         }
 
         // Enviar al listener si está haciendo streaming
-        if (remoteCallbackCount == 1 || remoteCallbackCount % 500 == 0) {
-            println("[CallRecorder] captureRemoteAudio #$remoteCallbackCount: isStreamingActive=$isStreamingActive, audioStreamListener=${if (audioStreamListener != null) "SET" else "NULL"}")
-        }
         if (isStreamingActive && audioStreamListener != null) {
             try {
-                if (remoteCallbackCount == 1) {
-                    println("[CallRecorder] CALLING onRemoteAudioData on listener: ${audioStreamListener!!::class.simpleName}")
-                }
                 audioStreamListener?.onRemoteAudioData(
                     normalized, sampleRate, 1, 16
                 )
-                if (remoteCallbackCount == 1) {
-                    println("[CallRecorder] onRemoteAudioData RETURNED OK")
-                }
             } catch (e: Exception) {
-                println("[CallRecorder] onRemoteAudioData EXCEPTION: ${e::class.simpleName}: ${e.message}")
                 log.e(TAG) { "Error sending remote audio stream: ${e.message}" }
                 audioStreamListener?.onStreamError(e.message ?: "Error sending remote audio")
             }
@@ -355,7 +345,6 @@ class DesktopCallRecorder : CallRecorder {
     // ==================== STREAMING EN TIEMPO REAL ====================
 
     override fun setAudioStreamListener(listener: AudioStreamListener?) {
-        println("[CallRecorder] setAudioStreamListener: ${if (listener != null) "SET" else "NULL"} (was ${if (audioStreamListener != null) "SET" else "NULL"})")
         audioStreamListener = listener
     }
 
@@ -370,7 +359,6 @@ class DesktopCallRecorder : CallRecorder {
         }
 
         log.d(TAG) { "Starting audio streaming for: $callId" }
-        println("[CallRecorder] startStreaming: audioStreamListener=${if (audioStreamListener != null) "SET" else "NULL"}, isRecording=$isRecording")
         currentCallId = callId
         isStreamingActive = true
         remoteCallbackCount = 0
@@ -473,7 +461,6 @@ class DesktopCallRecorder : CallRecorder {
             file
         } catch (e: Exception) {
             log.e(TAG) { "❌ Error saving audio: ${e.message}" }
-            e.printStackTrace()
             null
         }
     }
@@ -518,7 +505,6 @@ class DesktopCallRecorder : CallRecorder {
             file
         } catch (e: Exception) {
             log.e(TAG) { "❌ Error mixing audio: ${e.message}" }
-            e.printStackTrace()
             null
         }
     }

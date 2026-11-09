@@ -1,5 +1,6 @@
 package com.eddyslarez.kmpsiprtc.core
 
+import com.eddyslarez.kmpsiprtc.platform.log
 import kotlinx.coroutines.*
 import java.net.NetworkInterface
 
@@ -28,18 +29,21 @@ class DesktopNetworkManager : NetworkManager {
     // Si entre dos ticks pasa mas de este umbral, el SO estuvo suspendido
     private val SUSPEND_THRESHOLD = CHECK_INTERVAL + 25_000L
 
+    @Volatile
     private var isNetworkAvailable = false
+    @Volatile
     private var connectivityListener: NetworkConnectivityListener? = null
     private val networkScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var monitorJob: Job? = null
 
     override fun initialize() {
+        if (monitorJob?.isActive == true) return
         try {
             checkInitialNetworkState()
             startNetworkMonitoring()
-            println("$TAG: NetworkManager initialized successfully on Desktop")
+            log.d(tag = TAG) { "NetworkManager initialized on Desktop" }
         } catch (e: Exception) {
-            println("$TAG: Error initializing NetworkManager: ${e.message}")
+            log.e(tag = TAG) { "Error initializing NetworkManager: ${e.message}" }
         }
     }
 
@@ -58,7 +62,7 @@ class DesktopNetworkManager : NetworkManager {
                         // aunque la red local reporte disponible. Forzar ciclo
                         // lost -> restored para que toda la cadena de reconexion
                         // (SipReconnectionManager -> re-REGISTER) se dispare ya.
-                        println("$TAG: System suspend detected (${elapsed}ms gap) - forcing reconnection cycle")
+                        log.i(tag = TAG) { "System suspend detected (${elapsed}ms gap) - forcing reconnection cycle" }
                         isNetworkAvailable = false
                         connectivityListener?.onNetworkLost()
                         // Pequeña espera a que el SO re-levante las interfaces tras el wake
@@ -84,7 +88,7 @@ class DesktopNetworkManager : NetworkManager {
                         }
                     }
                 } catch (e: Exception) {
-                    println("$TAG: Error monitoring network: ${e.message}")
+                    log.w(tag = TAG) { "Error monitoring network: ${e.message}" }
                 }
             }
         }
@@ -142,9 +146,9 @@ class DesktopNetworkManager : NetworkManager {
             monitorJob?.cancel()
             networkScope.cancel()
             connectivityListener = null
-            println("$TAG: NetworkManager disposed")
+            log.d(tag = TAG) { "NetworkManager disposed" }
         } catch (e: Exception) {
-            println("$TAG: Error disposing NetworkManager: ${e.message}")
+            log.w(tag = TAG) { "Error disposing NetworkManager: ${e.message}" }
         }
     }
 }

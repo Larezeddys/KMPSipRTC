@@ -22,8 +22,8 @@ version = "1.0.10"
 // Versión de Trixnity
 val trixnityVersion = "4.22.7" // Última versión disponible
 
-// API y nativo de webrtc-java deben ir siempre en la misma versión.
-val webrtcJavaVersion = "0.14.0"
+// Misma versión que la app consumidora: Gradle resuelve a la mayor y la API debe coincidir con el nativo.
+val webrtcJavaVersion = "0.19.0"
 
 kotlin {
     androidTarget {
@@ -177,8 +177,9 @@ kotlin {
         // Desktop
         val desktopMain by getting {
             dependencies {
-                implementation(compose.desktop.currentOs)
-                implementation("dev.onvoid.webrtc:webrtc-java:$webrtcJavaVersion")
+                // Solo la API, independiente de plataforma. Los nativos por SO/arquitectura
+                // (classifier) los declara la app según el target que empaqueta.
+                api("dev.onvoid.webrtc:webrtc-java:$webrtcJavaVersion")
                 implementation("io.ktor:ktor-client-okhttp:3.3.1")
                 implementation("org.jetbrains.kotlinx:kotlinx-datetime:0.7.1")
                 implementation("com.googlecode.soundlibs:mp3spi:1.9.5.4")
@@ -191,25 +192,12 @@ kotlin {
                 implementation("com.github.hypfvieh:dbus-java-core:5.2.0")
                 runtimeOnly("com.github.hypfvieh:dbus-java-transport-native-unixsocket:5.2.0")
                 implementation("org.freedesktop.gstreamer:gst1-java-core:1.4.0")
+            }
+        }
 
-                // El nativo debe ir en la MISMA versión que la API: declarar una distinta
-                // no la baja (Gradle resuelve al mayor), solo despista.
-                val osName = System.getProperty("os.name").lowercase()
-                val osArch = System.getProperty("os.arch").lowercase()
-                val webrtcClassifier = when {
-                    osName.contains("mac") ->
-                        if (osArch.contains("aarch64") || osArch.contains("arm")) "macos-aarch64"
-                        else "macos-x86_64"
-                    osName.contains("win") -> "windows-x86_64"
-                    osName.contains("linux") -> "linux-x86_64"
-                    else -> null
-                }
-                webrtcClassifier?.let {
-                    runtimeOnly("dev.onvoid.webrtc:webrtc-java:$webrtcJavaVersion:$it")
-                }
-
-                // Motor Ktor para Desktop
-                // Ya lo tienes con ktor-client-okhttp
+        val desktopTest by getting {
+            dependencies {
+                implementation(kotlin("test-junit"))
             }
         }
     }

@@ -10,4 +10,11 @@ object DatabaseConfig {
      * Ejemplo: "-mcn", "-kompaas"
      */
     var brandSuffix: String = ""
+
+    /**
+     * Solo escritorio: nombre de la carpeta de datos dentro del directorio estándar del SO
+     * (`%APPDATA%`, `~/Library/Application Support`, `$XDG_DATA_HOME`). Con `null` se usa
+     * `KMPSipRTC` + [brandSuffix].
+     */
+    var desktopAppDataName: String? = null
 }

@@ -9,6 +9,7 @@ import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 import com.eddyslarez.kmpsiprtc.services.audio.AudioTrackCapture
 import com.eddyslarez.kmpsiprtc.services.audio.createRemoteAudioCapture
 import com.eddyslarez.kmpsiprtc.services.recording.CallRecorder
+import com.eddyslarez.kmpsiprtc.services.recording.DesktopCallRecorder
 import com.eddyslarez.kmpsiprtc.services.recording.createCallRecorder
 import dev.onvoid.webrtc.*
 import dev.onvoid.webrtc.media.*
@@ -60,17 +61,22 @@ class DesktopPeerConnectionController(
     private var peerConnection: RTCPeerConnection? = null
     private var audioDeviceModule: AudioDeviceModule? = null
     private var localAudioTrack: AudioTrack? = null
+    private var localAudioSource: AudioTrackSource? = null
     private var remoteAudioTrack: AudioTrack? = null
     private var dtmfSender: RTCDtmfSender? = null
 
     // === INYECCIÓN DE AUDIO PARA TRADUCCIÓN ===
-    // CustomAudioSource permite inyectar PCM directamente como fuente de audio
+    // webrtc-java 0.19 fija cada factoría a micro del ADM o a CustomAudioSource: la pista inyectada
+    // sale de una factoría propia sin dispositivos y se pone en el mismo sender con replaceTrack.
+    private var injectionAudioModule: HeadlessAudioDeviceModule? = null
+    private var injectionFactory: PeerConnectionFactory? = null
+    @Volatile
     private var customAudioSource: CustomAudioSource? = null
-    // Track creado desde el CustomAudioSource para reemplazar el mic real
     private var injectionAudioTrack: AudioTrack? = null
-    // AudioResampler para convertir 24kHz→48kHz (el ADM de WebRTC opera a 48kHz)
-    private var audioResampler: AudioResampler? = null
-    // Flag que indica si la inyección de audio local está activa
+    private var injectionPipeline: PcmInjectionPipeline? = null
+    // Captura del ADM parada mientras se inyecta: el sender no admite dos productores.
+    @Volatile
+    private var deviceCaptureSuspended = false
     @Volatile
     private var localAudioInjectionActive = false
 
@@ -115,12 +121,16 @@ class DesktopPeerConnectionController(
     @Volatile
     private var pacerFramesPushed = 0L
     private val injectionStateLock = Any()
+    private val injectionSilence = PcmInjectionPipeline.silenceFrame()
+    private val INJECTION_FRAME_NANOS = 10_000_000L
+    private val INJECTION_MAX_LAG_FRAMES = 10L
 
     // Recording
     private val callRecorder: CallRecorder by lazy { createCallRecorder() }
     private var remoteAudioCapture: AudioTrackCapture? = null
 
     // State
+    @Volatile
     private var isMuted = false
     @Volatile
     private var remoteAudioEnabled = true
@@ -170,6 +180,7 @@ class DesktopPeerConnectionController(
 
     // ==================== INITIALIZATION ====================
 
+    /** Lanza la causa original si la factoría o el ADM no arrancan (p. ej. `UnsatisfiedLinkError`). */
     fun initialize() {
         log.d(TAG) { "Initializing PeerConnectionController..." }
 
@@ -181,13 +192,18 @@ class DesktopPeerConnectionController(
             // PulseAudio sí mezcla, igual que WASAPI/CoreAudio en Windows/Mac.
             val isLinux = System.getProperty("os.name").orEmpty().lowercase().contains("linux")
             val audioLayer = if (isLinux) AudioLayer.kLinuxPulseAudio else AudioLayer.kPlatformDefaultAudio
-            audioDeviceModule = AudioDeviceModule(audioLayer)
-            peerConnectionFactory = PeerConnectionFactory(audioDeviceModule, null)
+            val adm = AudioDeviceModule(audioLayer)
+            audioDeviceModule = adm
+            peerConnectionFactory = PeerConnectionFactory(adm, null)
 
             log.d(TAG) { "✅ PeerConnectionController initialized (audioLayer=$audioLayer)" }
-        } catch (e: Exception) {
-            log.e(TAG) { "Error initializing: ${e.message}" }
-            e.printStackTrace()
+        } catch (t: Throwable) {
+            log.e(TAG) { "Error initializing WebRTC: ${t::class.simpleName}: ${t.message}" }
+            runCatching { peerConnectionFactory?.dispose() }
+            runCatching { audioDeviceModule?.dispose() }
+            peerConnectionFactory = null
+            audioDeviceModule = null
+            throw t
         }
     }
 
@@ -207,22 +223,9 @@ class DesktopPeerConnectionController(
     fun createNewPeerConnection() {
         log.d(TAG) { "Creating new PeerConnection" }
 
-        // Limpiar recursos del PeerConnection anterior antes de crear uno nuevo.
-        // Evita acumulación de audio tracks al cambiar entre llamadas múltiples veces.
-        try {
-            peerConnection?.senders?.forEach { sender ->
-                try { peerConnection?.removeTrack(sender) } catch (_: Throwable) {}
-            }
-        } catch (_: Throwable) {}
-        peerConnection?.close()
-        peerConnection = null
-
-        // Disponer el audio track anterior para liberar recursos del ADM
-        try {
-            localAudioTrack?.setEnabled(false)
-            localAudioTrack?.dispose()
-        } catch (_: Throwable) {}
-        localAudioTrack = null
+        if (peerConnection != null) {
+            closePeerConnection()
+        }
 
         val factory = peerConnectionFactory
             ?: throw IllegalStateException("Factory not initialized")
@@ -353,12 +356,14 @@ class DesktopPeerConnectionController(
             val pc = peerConnection ?: return
 
             val audioOptions = AudioOptions().apply {
+                echoCancellation = true
                 noiseSuppression = true
                 autoGainControl = true
                 highpassFilter = true
             }
 
             val audioSource = factory.createAudioSource(audioOptions)
+            localAudioSource = audioSource
             localAudioTrack = factory.createAudioTrack(LocalTrackIds.AUDIO, audioSource)
             // Un MediaStreamTrack nace HABILITADO. Si ya se pidio silencio antes de que existiera
             // -que es lo normal: se entra a la conferencia en mute y el PeerConnection no se crea
@@ -373,16 +378,14 @@ class DesktopPeerConnectionController(
             log.d(TAG) { "✅ Local audio track added" }
         } catch (e: Exception) {
             log.e(TAG) { "Error adding local audio track: ${e.message}" }
-            e.printStackTrace()
         }
     }
 
     // ==================== INYECCIÓN DE AUDIO PARA TRADUCCIÓN ====================
 
     /**
-     * Habilitar/deshabilitar el audio local (micrófono) que se envía al peer remoto.
-     * Cuando se deshabilita, se reemplaza el track del mic con un CustomAudioSource
-     * que acepta PCM inyectado via injectLocalAudio().
+     * Con `false` el sender deja de enviar el micrófono y envía lo que llegue por [injectLocalAudio]
+     * (silencio mientras no llega nada); con `true` vuelve el micrófono.
      */
     fun setLocalAudioEnabled(enabled: Boolean) {
         val shouldApply = synchronized(injectionStateLock) {
@@ -398,136 +401,135 @@ class DesktopPeerConnectionController(
         log.d(TAG) { "setLocalAudioEnabled: $enabled" }
 
         if (!enabled) {
-            // Activar inyección: crear CustomAudioSource y reemplazar el track del mic
             activateLocalAudioInjection()
         } else {
-            // Desactivar inyección: restaurar el track original del mic
             deactivateLocalAudioInjection()
         }
     }
 
     fun isLocalAudioEnabled(): Boolean = localAudioEnabled
 
-    /**
-     * Activa la inyección de audio local reemplazando el track del mic real
-     * con un CustomAudioSource que acepta datos PCM via pushAudio().
-     */
+    fun isDeviceCaptureSuspended(): Boolean = deviceCaptureSuspended
+
+    private fun ensureInjectionFactory(): PeerConnectionFactory {
+        injectionFactory?.let { return it }
+        val module = HeadlessAudioDeviceModule()
+        val factory = try {
+            PeerConnectionFactory(module)
+        } catch (t: Throwable) {
+            runCatching { module.dispose() }
+            throw t
+        }
+        injectionAudioModule = module
+        injectionFactory = factory
+        return factory
+    }
+
     private fun activateLocalAudioInjection() {
+        val sender = audioSender ?: run {
+            log.e(TAG) { "Cannot activate injection: audioSender is null" }
+            synchronized(injectionStateLock) { localAudioEnabled = true }
+            return
+        }
+
+        stopInjectionPacer()
+        var source: CustomAudioSource? = null
+        var track: AudioTrack? = null
         try {
-            val factory = peerConnectionFactory ?: run {
-                log.e(TAG) { "Cannot activate injection: factory is null" }
-                return
+            val factory = ensureInjectionFactory()
+            source = CustomAudioSource()
+            track = factory.createAudioTrack(LocalTrackIds.INJECTION, source)
+            // Primero se corta el ADM y después se cambia la pista: nunca hay dos productores a la vez.
+            suspendDeviceCapture()
+            sender.replaceTrack(track)
+            reassertCaptureSuspension()
+            synchronized(injectionStateLock) {
+                injectionPipeline = null
+                injectionFrameQueue.clear()
+                customAudioSource = source
+                injectionAudioTrack = track
+                localAudioInjectionActive = true
             }
-            val sender = audioSender ?: run {
-                log.e(TAG) { "Cannot activate injection: audioSender is null" }
-                return
+            startInjectionPacer()
+            log.d(TAG) { "Local audio injection active" }
+        } catch (t: Throwable) {
+            log.e(TAG) { "Error activating local audio injection: ${t::class.simpleName}: ${t.message}" }
+            synchronized(injectionStateLock) {
+                localAudioInjectionActive = false
+                customAudioSource = null
+                injectionAudioTrack = null
             }
-
-            stopInjectionPacer()
-
-            // Importante: evitar doble productor (mic nativo + custom source)
-            // en AudioSendStream, que dispara RaceChecker en WebRTC.
+            localAudioTrack?.let { mic -> runCatching { sender.replaceTrack(mic) } }
+            resumeDeviceCapture()
             runCatching { localAudioTrack?.setEnabled(false) }
-
-            // Crear CustomAudioSource (fuente programática de audio)
-            customAudioSource = CustomAudioSource()
-
-            // Crear un nuevo AudioTrack basado en el CustomAudioSource
-            injectionAudioTrack = factory.createAudioTrack(LocalTrackIds.INJECTION, customAudioSource)
-            injectionAudioTrack?.setEnabled(true)
-
-            // Reemplazar el track del mic real con el de inyección en el sender RTP
-            sender.replaceTrack(injectionAudioTrack)
-
-            localAudioInjectionActive = true
-            // El pacer se inicia de forma perezosa al llegar el primer chunk traducido.
-            // Evita empujar audio antes de que replaceTrack termine de estabilizarse.
-            log.d(TAG) { "Local audio injection armed - waiting first chunk" }
-        } catch (e: Exception) {
-            log.e(TAG) { "Error activating local audio injection: ${e.message}" }
-            e.printStackTrace()
-            // Fallback: simplemente deshabilitar el track
-            localAudioTrack?.setEnabled(false)
+            runCatching { track?.dispose() }
+            runCatching { source?.dispose() }
         }
     }
 
-    /**
-     * Desactiva la inyección de audio local y restaura el track original del mic.
-     */
     private fun deactivateLocalAudioInjection() {
-        try {
-            val sender = audioSender ?: return
-
-            // Primero detener el productor custom para no solaparlo con el mic al restaurar.
-            stopInjectionPacer()
+        stopInjectionPacer()
+        val released = synchronized(injectionStateLock) {
             localAudioInjectionActive = false
-
-            // Restaurar el track original del mic
-            if (localAudioTrack != null) {
-                sender.replaceTrack(localAudioTrack)
-                localAudioTrack?.setEnabled(!isMuted)
-            }
-
-            try {
-                injectionAudioTrack?.setEnabled(false)
-                injectionAudioTrack?.dispose()
-            } catch (_: Throwable) {}
+            val pair = injectionAudioTrack to customAudioSource
             injectionAudioTrack = null
-
-            try {
-                customAudioSource?.dispose()
-            } catch (_: Throwable) {}
             customAudioSource = null
-
-            try {
-                audioResampler?.dispose()
-            } catch (_: Throwable) {}
-            audioResampler = null
-
-            log.d(TAG) { "✅ Local audio injection deactivated - mic restored" }
-        } catch (e: Exception) {
-            log.e(TAG) { "Error deactivating local audio injection: ${e.message}" }
-            e.printStackTrace()
+            injectionPipeline = null
+            pair
         }
+
+        val sender = audioSender
+        val mic = localAudioTrack
+        if (sender != null && mic != null) {
+            runCatching { sender.replaceTrack(mic) }
+                .onFailure { log.e(TAG) { "Error restoring microphone track: ${it.message}" } }
+        }
+        runCatching { mic?.setEnabled(!isMuted) }
+        resumeDeviceCapture()
+
+        runCatching { released.first?.dispose() }
+        runCatching { released.second?.dispose() }
+        log.d(TAG) { "Local audio injection deactivated - mic restored" }
+    }
+
+    private fun suspendDeviceCapture() {
+        val adm = audioDeviceModule ?: return
+        adm.stopRecording()
+        deviceCaptureSuspended = true
     }
 
     /**
-     * Inyecta datos de audio PCM que se enviarán al peer remoto.
-     * Los datos deben ser PCM 16-bit little-endian mono.
-     * Se resamplea automáticamente si el sampleRate difiere de 48kHz.
-     *
-     * @param pcmData Audio PCM 16-bit LE mono
-     * @param sampleRate Frecuencia de muestreo (ej: 24000)
-     * @param channels Número de canales (1 = mono)
-     * @param bitsPerSample Bits por muestra (16)
+     * WebRTC vuelve a abrir la captura del ADM al reiniciar el envío de audio (re-INVITE de
+     * retener/reanudar, cambio de pista); mientras se inyecta hay que cerrarla otra vez para que el
+     * micrófono y la traducción nunca alimenten el mismo sender.
      */
-    // Tamaño máximo de un frame de audio WebRTC: 10ms a 48kHz mono 16-bit = 480 frames = 960 bytes
-    // El AudioFrame nativo tiene un buffer de 3840 samples (7680 bytes), pero usamos 10ms
-    // para máxima compatibilidad y mínima latencia.
-    private val WEBRTC_FRAME_SAMPLES = 480  // 10ms @ 48kHz
-    private val WEBRTC_FRAME_BYTES = WEBRTC_FRAME_SAMPLES * 2  // 16-bit mono
+    private fun reassertCaptureSuspension() {
+        if (!deviceCaptureSuspended) return
+        runCatching { audioDeviceModule?.stopRecording() }
+    }
 
+    private fun resumeDeviceCapture() {
+        if (!deviceCaptureSuspended) return
+        deviceCaptureSuspended = false
+        val adm = audioDeviceModule ?: return
+        runCatching {
+            adm.initRecording()
+            adm.startRecording()
+        }.onFailure { log.e(TAG) { "Error restarting microphone capture: ${it.message}" } }
+    }
+
+    /**
+     * Encola PCM entero little-endian intercalado (8, 16, 24 o 32 bits, cualquier frecuencia y número
+     * de canales); el pacer lo envía a ritmo real en bloques de 10 ms a 48 kHz mono.
+     */
     fun injectLocalAudio(pcmData: ByteArray, sampleRate: Int, channels: Int, bitsPerSample: Int) {
         if (!localAudioInjectionActive) return
-        if (customAudioSource == null) return
-
         try {
-            ensureInjectionPacerStarted()
-
-            val targetSampleRate = 48000
-            val data: ByteArray = if (sampleRate != targetSampleRate) {
-                resamplePcm16(pcmData, sampleRate, targetSampleRate)
-            } else {
-                pcmData
-            }
-
-            // Encolar frames de 10ms para que el scheduler los empuje a ritmo real
-            var offset = 0
-            while (offset < data.size) {
-                val chunkBytes = minOf(WEBRTC_FRAME_BYTES, data.size - offset)
-                val chunk = data.copyOfRange(offset, offset + chunkBytes)
-                injectionFrameQueue.offer(chunk)
-                offset += chunkBytes
+            synchronized(injectionStateLock) {
+                if (!localAudioInjectionActive) return
+                val pipeline = injectionPipeline?.takeIf { it.matches(sampleRate, channels, bitsPerSample) }
+                    ?: PcmInjectionPipeline(sampleRate, channels, bitsPerSample).also { injectionPipeline = it }
+                pipeline.process(pcmData).forEach { injectionFrameQueue.offer(it) }
             }
         } catch (e: Exception) {
             log.e(TAG) { "Error enqueuing local audio: ${e.message}" }
@@ -535,100 +537,63 @@ class DesktopPeerConnectionController(
     }
 
     /**
-     * Inicia un scheduler que empuja frames al CustomAudioSource de forma adaptativa.
-     * En Windows, ScheduledExecutorService tiene ~15.6ms de resolución real en vez de 10ms.
-     * Para compensar, cada tick calcula cuántos frames DEBERÍAN haberse empujado basándose
-     * en el tiempo real transcurrido, y empuja los que falten de una vez.
-     * Esto mantiene la velocidad correcta del audio independientemente de la resolución del timer.
+     * Cada tick calcula cuántos bloques de 10 ms tocaban según el reloj (el temporizador de Windows va a
+     * ~15,6 ms) y los empuja. Sin audio pendiente envía silencio para que el RTP no se corte.
      */
     private fun startInjectionPacer() {
-        // Detener pacer anterior sin modificar localAudioInjectionActive
-        injectionScheduler?.shutdownNow()
-        injectionScheduler = null
         pacerStartNanos = System.nanoTime()
         pacerFramesPushed = 0L
         val scheduler = Executors.newSingleThreadScheduledExecutor { r ->
             Thread(r, "audio-injection-pacer").apply { isDaemon = true }
         }
         injectionScheduler = scheduler
-        scheduler.scheduleAtFixedRate({
-            try {
-                val source = customAudioSource ?: return@scheduleAtFixedRate
-                val now = System.nanoTime()
-                val elapsedNanos = now - pacerStartNanos
-                // Cuántos frames de 10ms deberían haberse empujado hasta ahora
-                val targetFrames = elapsedNanos / 10_000_000L
-
-                // Empujar los frames pendientes (máximo 5 por tick para evitar burst excesivo)
-                var pushed = 0
-                while (pacerFramesPushed < targetFrames && pushed < 5) {
-                    val frame = injectionFrameQueue.poll()
-                    if (frame == null) {
-                        // Cola vacía: resetear el reloj lógico para que cuando lleguen
-                        // nuevos frames se empujen a ritmo real sin burst ni delay.
-                        // Sin esto, el reloj avanzaría en vacío y los nuevos frames
-                        // se empujarían como burst instantáneo → audio distorsionado.
-                        pacerStartNanos = now
-                        pacerFramesPushed = 0L
-                        break
-                    }
-                    val chunkFrames = frame.size / 2  // 16-bit mono
-                    source.pushAudio(frame, 16, 48000, 1, chunkFrames)
-                    pacerFramesPushed++
-                    pushed++
-                }
-            } catch (_: Exception) {}
-        }, 0, 5, TimeUnit.MILLISECONDS) // 5ms schedule → fires cada ~8-15ms en Windows
-        log.d(TAG) { "Injection pacer started (adaptive timing)" }
+        scheduler.scheduleAtFixedRate({ pushDueInjectionFrames() }, 0, 5, TimeUnit.MILLISECONDS)
+        log.d(TAG) { "Injection pacer started" }
     }
 
-    private fun ensureInjectionPacerStarted() {
-        if (injectionScheduler != null) return
-        synchronized(injectionStateLock) {
-            if (injectionScheduler != null) return
-            if (!localAudioInjectionActive) return
-            if (customAudioSource == null) return
-            startInjectionPacer()
+    private fun pushDueInjectionFrames() {
+        try {
+            val source = customAudioSource ?: return
+            val now = System.nanoTime()
+            var due = (now - pacerStartNanos) / INJECTION_FRAME_NANOS - pacerFramesPushed
+            if (due > INJECTION_MAX_LAG_FRAMES) {
+                pacerStartNanos = now - INJECTION_FRAME_NANOS
+                pacerFramesPushed = 0L
+                due = 1L
+            }
+            while (due > 0) {
+                val frame = nextInjectionFrame()
+                source.pushAudio(
+                    if (isMuted) injectionSilence else frame,
+                    16,
+                    PcmInjectionPipeline.TARGET_SAMPLE_RATE,
+                    1,
+                    PcmInjectionPipeline.FRAME_SAMPLES,
+                )
+                pacerFramesPushed++
+                due--
+            }
+        } catch (e: Exception) {
+            log.e(TAG) { "Injection pacer error: ${e::class.simpleName}: ${e.message}" }
         }
     }
 
+    private fun nextInjectionFrame(): ByteArray =
+        injectionFrameQueue.poll()
+            ?: synchronized(injectionStateLock) {
+                injectionFrameQueue.poll() ?: injectionPipeline?.drainPadded()
+            }
+            ?: injectionSilence
+
+    /** Espera al tick en curso: después se libera la fuente nativa a la que empuja. */
     private fun stopInjectionPacer() {
-        injectionScheduler?.shutdownNow()
+        val scheduler = injectionScheduler
         injectionScheduler = null
-        injectionFrameQueue.clear()
-        log.d(TAG) { "Injection pacer stopped" }
-    }
-
-    /** Resamplea PCM16 little-endian mono con interpolación lineal */
-    private fun resamplePcm16(pcm: ByteArray, fromRate: Int, toRate: Int): ByteArray {
-        if (fromRate == toRate) return pcm
-        val bytesPerSample = 2
-        val inputFrames = pcm.size / bytesPerSample
-        val ratio = toRate.toDouble() / fromRate.toDouble()
-        val outputFrames = (inputFrames * ratio).toInt()
-        val output = ByteArray(outputFrames * bytesPerSample)
-
-        for (i in 0 until outputFrames) {
-            val srcPos = i / ratio
-            val srcIdx = srcPos.toInt()
-            val frac = srcPos - srcIdx
-
-            val s0 = if (srcIdx < inputFrames) pcm16At(pcm, srcIdx) else 0
-            val s1 = if (srcIdx + 1 < inputFrames) pcm16At(pcm, srcIdx + 1) else s0
-
-            val interpolated = (s0 + (s1 - s0) * frac).toInt().coerceIn(-32768, 32767)
-            output[i * 2] = (interpolated and 0xFF).toByte()
-            output[i * 2 + 1] = (interpolated shr 8).toByte()
+        if (scheduler != null) {
+            scheduler.shutdownNow()
+            runCatching { scheduler.awaitTermination(200, TimeUnit.MILLISECONDS) }
         }
-        return output
-    }
-
-    /** Lee una muestra PCM16 little-endian signed por índice de frame */
-    private fun pcm16At(buf: ByteArray, frameIdx: Int): Int {
-        val off = frameIdx * 2
-        val lo = buf[off].toInt() and 0xFF
-        val hi = buf[off + 1].toInt()
-        return (hi shl 8) or lo
+        injectionFrameQueue.clear()
     }
 
     /**
@@ -661,6 +626,7 @@ class DesktopPeerConnectionController(
                         pc.setLocalDescription(description, object : SetSessionDescriptionObserver {
                             override fun onSuccess() {
                                 log.d(TAG) { "✅ Offer created" }
+                                reassertCaptureSuspension()
                                 continuation.resume(description.sdp)
                             }
 
@@ -699,6 +665,7 @@ class DesktopPeerConnectionController(
                                 pc.setLocalDescription(description, object : SetSessionDescriptionObserver {
                                     override fun onSuccess() {
                                         log.d(TAG) { "✅ Answer created" }
+                                        reassertCaptureSuspension()
                                         continuation.resume(description.sdp)
                                     }
 
@@ -741,6 +708,7 @@ class DesktopPeerConnectionController(
                 val sessionDescription = RTCSessionDescription(sdpType, sdp)
                 pc.setRemoteDescription(sessionDescription, object : SetSessionDescriptionObserver {
                     override fun onSuccess() {
+                        reassertCaptureSuspension()
                         continuation.resume(Unit)
                     }
 
@@ -766,6 +734,7 @@ class DesktopPeerConnectionController(
                 val newDescription = RTCSessionDescription(currentDesc.sdpType, sdp)
                 pc.setLocalDescription(newDescription, object : SetSessionDescriptionObserver {
                     override fun onSuccess() {
+                        reassertCaptureSuspension()
                         continuation.resume(Unit)
                     }
 
@@ -789,7 +758,6 @@ class DesktopPeerConnectionController(
             peerConnection?.addIceCandidate(iceCandidate)
         } catch (e: Exception) {
             log.e(TAG) { "Error adding ICE candidate: ${e.message}" }
-            e.printStackTrace()
         }
     }
 
@@ -808,6 +776,7 @@ class DesktopPeerConnectionController(
     fun setMuted(muted: Boolean) {
         isMuted = muted
         localAudioTrack?.setEnabled(!muted)
+        (callRecorder as? DesktopCallRecorder)?.setLocalMuted(muted)
     }
 
     fun isMuted(): Boolean = isMuted
@@ -1049,7 +1018,6 @@ class DesktopPeerConnectionController(
             return videoTrack
         } catch (e: Exception) {
             log.e(TAG) { "Error adding local video track: ${e.message}" }
-            e.printStackTrace()
             return null
         }
     }
@@ -1141,7 +1109,6 @@ class DesktopPeerConnectionController(
                 "Error adding screen share track (os=${System.getProperty("os.name")}): " +
                     "${e::class.simpleName}: ${e.message}"
             }
-            e.printStackTrace()
             removeLocalScreenShareTrack()
             null
         } finally {
@@ -1238,101 +1205,81 @@ class DesktopPeerConnectionController(
     private fun isMacHost(): Boolean =
         System.getProperty("os.name").lowercase().let { it.contains("mac") || it.contains("darwin") }
 
+    /** Cierra la conexión y libera sus pistas y fuentes; factoría y ADM siguen vivos para la siguiente. */
     fun closePeerConnection() {
         log.d(TAG) { "Closing PeerConnection" }
 
         stopInjectionPacer()
+        localAudioInjectionActive = false
 
-        // Limpiar video
         removeLocalScreenShareTrack()
         removeLocalVideoTrack()
 
-        try {
-            localAudioTrack?.setEnabled(false)
-            remoteAudioCapture?.stopCapture()
-        } catch (e: Exception) {
-            log.w(TAG) { "Error disabling track: ${e.message}" }
-        }
+        runCatching { remoteAudioCapture?.stopCapture() }
+        remoteAudioCapture = null
 
-        peerConnection?.close()
+        runCatching { localAudioTrack?.setEnabled(false) }
+
+        try {
+            peerConnection?.senders?.forEach { sender ->
+                runCatching { peerConnection?.removeTrack(sender) }
+            }
+        } catch (e: Throwable) {
+            log.w(TAG) { "Error removing senders: ${e.message}" }
+        }
+        audioSender = null
+        dtmfSender = null
+
+        try {
+            peerConnection?.close()
+        } catch (e: Throwable) {
+            log.w(TAG) { "Error closing peer connection: ${e.message}" }
+        }
         peerConnection = null
+        publisherDataChannel = null
+        receivedDataChannel = null
         remoteAudioTrack = null
+
+        releaseInjectionResources()
+        runCatching { localAudioTrack?.dispose() }
+        localAudioTrack = null
+        runCatching { localAudioSource?.dispose() }
+        localAudioSource = null
+
         currentConnectionState = WebRtcConnectionState.DISCONNECTED
 
         log.d(TAG) { "PeerConnection closed" }
     }
 
+    /** Sin reiniciar la captura: la próxima llamada la arranca WebRTC al añadir su sender. */
+    private fun releaseInjectionResources() {
+        remoteAudioInjectionActive = false
+        remoteInjectionBuffer.clear()
+        val released = synchronized(injectionStateLock) {
+            localAudioEnabled = true
+            localAudioInjectionActive = false
+            val pair = injectionAudioTrack to customAudioSource
+            injectionAudioTrack = null
+            customAudioSource = null
+            injectionPipeline = null
+            pair
+        }
+        deviceCaptureSuspended = false
+
+        runCatching { released.first?.dispose() }
+        runCatching { released.second?.dispose() }
+    }
+
+    /** Libera todo: conexión, factoría y ADM. La instancia no se reutiliza después. */
     fun dispose() {
         log.d(TAG) { "Disposing PeerConnectionController" }
 
-        remoteAudioCapture?.stopCapture()
-        remoteAudioCapture = null
+        closePeerConnection()
 
-        // Detener hilo de inyección y limpiar recursos
-        stopInjectionPacer()
-        localAudioInjectionActive = false
-        remoteAudioInjectionActive = false
-        remoteInjectionBuffer.clear()
-
-        try {
-            injectionAudioTrack?.setEnabled(false)
-            injectionAudioTrack?.dispose()
-        } catch (_: Throwable) {}
-        injectionAudioTrack = null
-
-        try {
-            customAudioSource?.dispose()
-        } catch (_: Throwable) {}
-        customAudioSource = null
-
-        try {
-            audioResampler?.dispose()
-        } catch (_: Throwable) {}
-        audioResampler = null
-
-        try {
-            localAudioTrack?.setEnabled(false)
-        } catch (e: Throwable) {
-            log.w(TAG) { "Error disabling track: ${e.message}" }
-        }
-
-        // Remover senders del PeerConnection antes de cerrar para liberar referencias a tracks
-        try {
-            peerConnection?.senders?.forEach { sender ->
-                try {
-                    peerConnection?.removeTrack(sender)
-                } catch (_: Throwable) {}
-            }
-        } catch (e: Throwable) {
-            log.w(TAG) { "Error removing senders: ${e.message}" }
-        }
-
-        audioSender = null
-
-        try {
-            peerConnection?.close()
-            peerConnection = null
-        } catch (e: Throwable) {
-            log.w(TAG) { "Error closing peer connection: ${e.message}" }
-        }
-
-        remoteAudioTrack = null
-
-        Thread.sleep(200)
-
-        try {
-            localAudioTrack?.dispose()
-        } catch (e: Throwable) {
-            log.w(TAG) { "Error disposing track: ${e.message}" }
-        }
-        localAudioTrack = null
-
-        try {
-            audioDeviceModule?.dispose()
-        } catch (e: Throwable) {
-            log.w(TAG) { "Error releasing audio module: ${e.message}" }
-        }
-        audioDeviceModule = null
+        runCatching { injectionFactory?.dispose() }
+        injectionFactory = null
+        runCatching { injectionAudioModule?.dispose() }
+        injectionAudioModule = null
 
         try {
             peerConnectionFactory?.dispose()
@@ -1341,10 +1288,15 @@ class DesktopPeerConnectionController(
         }
         peerConnectionFactory = null
 
+        try {
+            audioDeviceModule?.dispose()
+        } catch (e: Throwable) {
+            log.w(TAG) { "Error releasing audio module: ${e.message}" }
+        }
+        audioDeviceModule = null
+
         callRecorder.dispose()
         scope.cancel()
-
-        currentConnectionState = WebRtcConnectionState.DISCONNECTED
 
         log.d(TAG) { "All resources disposed" }
     }

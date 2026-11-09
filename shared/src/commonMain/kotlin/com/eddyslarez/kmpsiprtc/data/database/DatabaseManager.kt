@@ -70,6 +70,8 @@ class DatabaseManager private constructor() {
             scope.launch {
                 try {
                     // Forzar apertura de la base de datos
+                    runCatching { repository.migratePlaintextPasswords() }
+                        .onFailure { log.w(tag = TAG) { "No se pudieron cifrar contraseñas antiguas: ${it.message}" } }
                     val stats = getGeneralStatistics()
                     log.d(tag = TAG) { "Database initialized with ${stats.totalAccounts} accounts" }
                     isInitialized = true

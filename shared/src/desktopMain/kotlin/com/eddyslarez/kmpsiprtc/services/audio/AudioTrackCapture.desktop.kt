@@ -23,7 +23,7 @@ class DesktopAudioTrackCapture(
     private val sink = AudioTrackSink { data, bitsPerSample, sampleRate, channels, frames ->
         sinkCallbackCount++
         if (sinkCallbackCount == 1 || sinkCallbackCount % 500 == 0) {
-            println("[AudioCapture] SINK callback #$sinkCallbackCount: data=${data.size}b, rate=$sampleRate, ch=$channels, frames=$frames, isCapturing=$isCapturing")
+            log.d(tag = "AudioCapture") { "SINK callback #$sinkCallbackCount: data=${data.size}b, rate=$sampleRate, ch=$channels, frames=$frames, isCapturing=$isCapturing" }
         }
         if (isCapturing) {
             callback.onAudioData(data, bitsPerSample, sampleRate, channels, frames, System.currentTimeMillis())
@@ -31,30 +31,30 @@ class DesktopAudioTrackCapture(
     }
 
     override fun startCapture() {
-        println("[AudioCapture] startCapture() called. isCapturing=$isCapturing, audioTrack=$audioTrack")
+        log.d(tag = "AudioCapture") { "startCapture() called. isCapturing=$isCapturing, audioTrack=$audioTrack" }
         if (isCapturing) {
-            println("[AudioCapture] ALREADY CAPTURING — skipping")
+            log.d(tag = "AudioCapture") { "ALREADY CAPTURING — skipping" }
             return
         }
         isCapturing = true
         sinkCallbackCount = 0
         try {
             audioTrack.addSink(sink)
-            println("[AudioCapture] addSink OK. signalLevel=${try { audioTrack.getSignalLevel() } catch (_: Exception) { "ERROR" }}")
+            log.d(tag = "AudioCapture") { "addSink OK" }
         } catch (e: Exception) {
-            println("[AudioCapture] addSink FAILED: ${e.message}")
+            log.w(tag = "AudioCapture") { "addSink FAILED: ${e.message}" }
             e.printStackTrace()
         }
     }
 
     override fun stopCapture() {
-        println("[AudioCapture] stopCapture() called. isCapturing=$isCapturing, totalCallbacks=$sinkCallbackCount")
+        log.d(tag = "AudioCapture") { "stopCapture() called. isCapturing=$isCapturing, totalCallbacks=$sinkCallbackCount" }
         if (!isCapturing) return
         isCapturing = false
         try {
             audioTrack.removeSink(sink)
         } catch (e: Exception) {
-            println("[AudioCapture] removeSink FAILED: ${e.message}")
+            log.w(tag = "AudioCapture") { "removeSink FAILED: ${e.message}" }
         }
     }
 
@@ -75,7 +75,7 @@ actual fun createRemoteAudioCapture(
             null
         }
     } catch (e: Exception) {
-        println("Error creating Desktop capture: ${e.message}")
+        log.w(tag = "AudioCapture") { "Error creating Desktop capture: ${e.message}" }
         null
     }
 }

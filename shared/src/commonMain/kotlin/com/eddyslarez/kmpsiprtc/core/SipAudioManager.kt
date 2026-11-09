@@ -14,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
@@ -335,7 +336,9 @@ class SipAudioManager(
      * Limpiar recursos de audio
      */
     fun dispose() {
-        scope.cancel()
+        // CallManager lo llama al terminar cada llamada: cancelar el scope dejaría sin efecto
+        // los cambios de dispositivo y el guardado de tonos de las llamadas siguientes.
+        scope.coroutineContext.cancelChildren()
         audioManager.stopAllRingtones()
         webRtcManager.closePeerConnection()
     }

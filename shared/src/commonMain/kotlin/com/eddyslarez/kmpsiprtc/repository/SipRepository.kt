@@ -13,10 +13,12 @@ import com.eddyslarez.kmpsiprtc.data.models.CallErrorReason
 import com.eddyslarez.kmpsiprtc.data.models.CallState
 import com.eddyslarez.kmpsiprtc.data.models.CallTypes
 import com.eddyslarez.kmpsiprtc.data.models.RegistrationState
+import com.eddyslarez.kmpsiprtc.data.security.SecretProtector
 import com.eddyslarez.kmpsiprtc.utils.generateId
 import kotlinx.coroutines.flow.map
 import com.eddyslarez.kmpsiprtc.data.database.SipDatabase
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlin.time.ExperimentalTime
 
 class SipRepository(private val database: SipDatabase) {
@@ -102,16 +104,32 @@ class SipRepository(private val database: SipDatabase) {
     // === OPERACIONES DE CUENTAS SIP ===
 
     fun getActiveAccounts(): Flow<List<SipAccountEntity>> {
-        return sipAccountDao.getActiveAccounts()
+        return sipAccountDao.getActiveAccounts().map { accounts -> accounts.map { it.withRevealedPassword() } }
     }
 
     fun getRegisteredAccounts(): Flow<List<SipAccountEntity>> {
-        return sipAccountDao.getRegisteredAccounts()
+        return sipAccountDao.getRegisteredAccounts().map { accounts -> accounts.map { it.withRevealedPassword() } }
     }
 
     suspend fun getAccountByCredentials(username: String, domain: String): SipAccountEntity? {
-        return sipAccountDao.getAccountByCredentials(username, domain)
+        return sipAccountDao.getAccountByCredentials(username, domain)?.let { migrateIfPlaintext(it) }
     }
+
+    /** Cifra las contraseñas que aún estén en claro. Idempotente. */
+    suspend fun migratePlaintextPasswords() {
+        sipAccountDao.getAllAccounts().first().forEach { migrateIfPlaintext(it) }
+    }
+
+    private suspend fun migrateIfPlaintext(stored: SipAccountEntity): SipAccountEntity {
+        if (stored.password.isNotEmpty() && !SecretProtector.isProtected(stored.password)) {
+            val encrypted = SecretProtector.protect(stored.password)
+            if (encrypted != stored.password) sipAccountDao.updatePassword(stored.id, encrypted)
+        }
+        return stored.withRevealedPassword()
+    }
+
+    private fun SipAccountEntity.withRevealedPassword(): SipAccountEntity =
+        if (password.isEmpty()) this else copy(password = SecretProtector.reveal(password))
 
     @OptIn(ExperimentalTime::class)
     suspend fun createOrUpdateAccount(
@@ -150,7 +168,7 @@ class SipRepository(private val database: SipDatabase) {
             )
         }
 
-        sipAccountDao.insertAccount(account)
+        sipAccountDao.insertAccount(account.copy(password = SecretProtector.protect(account.password)))
         return account
     }
 

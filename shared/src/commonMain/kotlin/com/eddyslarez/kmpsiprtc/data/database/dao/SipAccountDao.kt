@@ -47,6 +47,9 @@ interface SipAccountDao {
     @Query("DELETE FROM sip_accounts WHERE id = :accountId")
     suspend fun deleteAccountById(accountId: String)
 
+    @Query("UPDATE sip_accounts SET password = :password WHERE id = :accountId")
+    suspend fun updatePassword(accountId: String, password: String)
+
     // === OPERACIONES DE REGISTRO ===
 
     @Query("SELECT * FROM sip_accounts WHERE registrationState = :state")

@@ -20,7 +20,9 @@ import com.eddyslarez.kmpsiprtc.data.models.SipConfig
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
 import com.eddyslarez.kmpsiprtc.platform.AppLifecycleEvent
 import com.eddyslarez.kmpsiprtc.platform.AppLifecycleListener
+import com.eddyslarez.kmpsiprtc.platform.KmpSipRtcThreading
 import com.eddyslarez.kmpsiprtc.platform.PlatformRegistration
+import com.eddyslarez.kmpsiprtc.platform.platformSharesNetworkManager
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.services.calls.CallStateManager
 import com.eddyslarez.kmpsiprtc.services.calls.MultiCallManager
@@ -57,7 +59,7 @@ class SipCoreManager private constructor(
     private val config: SipConfig,
 ) {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val mainScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private val mainScope = CoroutineScope(KmpSipRtcThreading.dispatcher + SupervisorJob())
 
     lateinit var sharedWebSocketManager: SharedWebSocketManager
      var databaseManager: DatabaseManager? = null
@@ -239,7 +241,8 @@ class SipCoreManager private constructor(
         try {
             registrationGuardian = RegistrationGuardianManager(
                 sipCoreManager = this,
-                databaseManager = getDatabaseManager()!!
+                databaseManager = getDatabaseManager()!!,
+                sharedNetworkManager = networkManager.takeIf { platformSharesNetworkManager() }
             )
             registrationGuardian.initialize()
             log.d(tag = TAG) { "RegistrationGuardian initialized successfully" }
@@ -345,6 +348,14 @@ class SipCoreManager private constructor(
         return webRtcManager.selectAudioOutputDeviceByName(deviceName)
     }
 
+    fun selectAudioInputDeviceById(deviceId: String): Boolean {
+        return webRtcManager.selectAudioInputDeviceById(deviceId)
+    }
+
+    fun selectAudioOutputDeviceById(deviceId: String): Boolean {
+        return webRtcManager.selectAudioOutputDeviceById(deviceId)
+    }
+
     // ==================== STREAMING DE AUDIO EN TIEMPO REAL ====================
 
     /**
@@ -426,7 +437,8 @@ class SipCoreManager private constructor(
             // IMPORTANTE: Pasar referencia de SipCoreManager al constructor
             reconnectionManager = SipReconnectionManager(
                 messageHandler = messageHandler,
-                sipCoreManager = this // Esto permite acceso a activeAccounts
+                sipCoreManager = this, // Esto permite acceso a activeAccounts
+                sharedNetworkManager = networkManager.takeIf { platformSharesNetworkManager() }
             )
 
             // Configurar listener de reconexión mejorado

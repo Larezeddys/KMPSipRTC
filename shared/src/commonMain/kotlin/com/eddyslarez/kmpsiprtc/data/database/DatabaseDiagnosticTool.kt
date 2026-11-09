@@ -560,10 +560,10 @@ class DatabaseInspector(
                 appendLine("  Test 1: Creating test account...")
                 val account = databaseManager.createOrUpdateSipAccount(
                     username = "test_user",
-                    password = "test_pass",
+                    password = "placeholder-not-a-secret",
                     domain = "test.domain",
                     displayName = "Test User",
-                    pushToken = "test_token",
+                    pushToken = "placeholder-token",
                     pushProvider = "fcm"
                 )
                 appendLine("  [OK] Account created: ${account.id}")
@@ -1090,10 +1090,10 @@ class DatabaseInspector(
 //                appendLine("  Test 1: Creating test account...")
 //                val account = databaseManager.createOrUpdateSipAccount(
 //                    username = "test_user",
-//                    password = "test_pass",
+//                    password = "placeholder-not-a-secret",
 //                    domain = "test.domain",
 //                    displayName = "Test User",
-//                    pushToken = "test_token",
+//                    pushToken = "placeholder-token",
 //                    pushProvider = "fcm"
 //                )
 //                appendLine("  [OK] Account created: ${account.id}")

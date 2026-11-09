@@ -170,6 +170,11 @@ sealed class SipEvent {
         val deviceName: String,
         override val timestamp: Long = currentTimeMs()
     ) : SipEvent()
+
+    data class EngineInitFailed(
+        val error: SipEngineInitError,
+        override val timestamp: Long = currentTimeMs()
+    ) : SipEvent()
 }
 
 /**

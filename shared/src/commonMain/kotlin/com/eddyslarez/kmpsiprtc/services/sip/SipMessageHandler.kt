@@ -852,8 +852,8 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                         // En multi-línea NO se debe disponer WebRTC si otra llamada sigue activa.
                         val remainingActiveCalls = MultiCallManager.getActiveCalls()
                         if (remainingActiveCalls.isEmpty()) {
-                            log.d(tag = TAG) { "[BYE] No more active calls — disposing WebRTC" }
-                            sipCoreManager.webRtcManager.dispose()
+                            log.d(tag = TAG) { "[BYE] No more active calls — releasing call media" }
+                            sipCoreManager.webRtcManager.releaseCallResources()
                             accountInfo.resetCallState()
                         } else {
                             log.d(tag = TAG) { "[BYE] ${remainingActiveCalls.size} call(s) still active — keeping WebRTC alive" }
@@ -1248,8 +1248,7 @@ class SipMessageHandler(private val sipCoreManager: SipCoreManager) {
                 // Detener todos los ringtones
                 sipCoreManager.audioManager.stopAllRingtones()
 
-                // Limpiar WebRTC
-                sipCoreManager.webRtcManager.dispose()
+                sipCoreManager.webRtcManager.releaseCallResources()
 
                 // Limpiar datos de cuenta
                 sipCoreManager.currentAccountInfo?.resetCallState()

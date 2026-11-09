@@ -6,6 +6,8 @@ import com.eddyslarez.kmpsiprtc.data.database.*
 import com.eddyslarez.kmpsiprtc.data.database.converters.toCallLogs
 import com.eddyslarez.kmpsiprtc.data.database.entities.*
 import com.eddyslarez.kmpsiprtc.data.models.*
+import com.eddyslarez.kmpsiprtc.platform.KmpSipRtcThreading
+import com.eddyslarez.kmpsiprtc.platform.LogRedactor
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.repository.*
 import com.eddyslarez.kmpsiprtc.services.calls.*
@@ -95,7 +97,11 @@ class KmpSipRtc private constructor() {
 
     // === GESTIÓN DE CONCURRENCIA ===
     private val initMutex = Mutex()
-    private val internalScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val internalScope = CoroutineScope(SupervisorJob() + KmpSipRtcThreading.dispatcher)
+
+    init {
+        SipEngineErrors.listener = { error -> emitEvent(SipEvent.EngineInitFailed(error)) }
+    }
 
     companion object {
         @Volatile
@@ -873,7 +879,7 @@ class KmpSipRtc private constructor() {
      * Notifica que se recibió una notificación push (para uso interno o externo)
      */
     fun onPushNotificationReceived(data: Map<String, Any>? = null) {
-        log.d(tag = TAG) { "onPushNotificationReceived: inicio data : $data" }
+        log.d(tag = TAG) { "onPushNotificationReceived: inicio, claves=${data?.keys}" }
 
         checkInitialized()
 
@@ -884,7 +890,8 @@ class KmpSipRtc private constructor() {
             val callId = data["callId"] as? String
 
             log.d(tag = TAG) {
-                "Push notification for specific account: sipName=$sipName, phoneNumber=$phoneNumber, callId=$callId"
+                "Push notification for specific account: sipName#${sipName?.let { LogRedactor.shortHash(it) }}, " +
+                    "callId#${callId?.let { LogRedactor.shortHash(it) }}"
             }
 
             if (sipName != null) {
@@ -2016,6 +2023,21 @@ class KmpSipRtc private constructor() {
         return sipCoreManager?.selectAudioOutputDeviceByName(deviceName) ?: false
     }
 
+    /** Selecciona la entrada por id estable del dispositivo; acepta también un nombre guardado antes. */
+    fun selectAudioInputDeviceById(deviceId: String): Boolean {
+        return sipCoreManager?.selectAudioInputDeviceById(deviceId) ?: false
+    }
+
+    /** Selecciona la salida por id estable del dispositivo; acepta también un nombre guardado antes. */
+    fun selectAudioOutputDeviceById(deviceId: String): Boolean {
+        return sipCoreManager?.selectAudioOutputDeviceById(deviceId) ?: false
+    }
+
+    /** Último fallo de arranque del motor de medios (p. ej. nativos de WebRTC ausentes), o `null`. */
+    fun getEngineInitError(): SipEngineInitError? = SipEngineErrors.lastError.value
+
+    fun observeEngineInitError(): StateFlow<SipEngineInitError?> = SipEngineErrors.lastError
+
     // === API PÚBLICA - TONOS DE LLAMADA ===
 
     /**
@@ -2979,7 +3001,7 @@ class KmpSipRtc private constructor() {
      * Libera recursos de la biblioteca
      */
     /** Cierra recursos y permite inicializar otra sesión en el mismo singleton. */
-    suspend fun disposeSuspend(): Unit = withContext(Dispatchers.Main + NonCancellable) {
+    suspend fun disposeSuspend(): Unit = withContext(KmpSipRtcThreading.dispatcher + NonCancellable) {
         incomingCallSystemAudio.clear()
         internalScope.coroutineContext.cancelChildren()
         initMutex.withLock {
@@ -3025,7 +3047,7 @@ class KmpSipRtc private constructor() {
     }
 
     fun dispose(onComplete: (() -> Unit)? = null) {
-        val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+        val cleanupScope = CoroutineScope(SupervisorJob() + KmpSipRtcThreading.dispatcher)
         cleanupScope.launch {
             try { disposeSuspend() }
             catch (error: Exception) { log.e(tag = "KmpSipRtc") { "Error al cerrar: ${error.message}" } }

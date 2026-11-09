@@ -31,6 +31,7 @@ import net.folivo.trixnity.client.store.eventId
 import net.folivo.trixnity.client.store.originTimestamp
 import net.folivo.trixnity.client.store.TimelineEvent
 import net.folivo.trixnity.utils.toByteArrayFlow
+import net.folivo.trixnity.core.ClientEventEmitter
 import net.folivo.trixnity.core.model.EventId
 import net.folivo.trixnity.core.model.UserId
 import net.folivo.trixnity.core.model.RoomId
@@ -257,6 +258,9 @@ class MatrixManager(
     private val _messages = MutableStateFlow<Map<String, List<MatrixMessage>>>(emptyMap())
     val messages: StateFlow<Map<String, List<MatrixMessage>>> = _messages.asStateFlow()
 
+    private val _highlightCounts = MutableStateFlow<Map<String, Int>>(emptyMap())
+    private var highlightCountsUnsubscribe: (() -> Unit)? = null
+
     // Mensajes entrantes EN VIVO (de otros usuarios), para notificaciones locales.
     // Solo emite desde el observer de sync (no en la carga histórica).
     private val _incomingMessages = MutableSharedFlow<MatrixMessage>(
@@ -359,6 +363,7 @@ class MatrixManager(
         followedRoom = null
         spaceChildJobs.values.forEach { it.cancel() }
         spaceChildJobs.clear()
+        stopHighlightCounts()
 
         runCatching { matrixClient?.close() }
             .onFailure { log.w(TAG) { "No se pudo cerrar el cliente Matrix anterior: ${it.message}" } }
@@ -1092,6 +1097,7 @@ class MatrixManager(
             syncWatchdogJob = null
             syncConnectionJob?.cancel()
             syncConnectionJob = null
+            stopHighlightCounts()
             // Si el server rechaza el logout (token caducado, sin red), la
             // limpieza local debe ocurrir igualmente.
             runCatching { kotlinx.coroutines.withTimeoutOrNull(3_000) { matrixClient?.logout() } }
@@ -1193,9 +1199,43 @@ class MatrixManager(
     /**
      * Observa cambios en Matrix (rooms, mensajes, eventos de llamada)
      */
+    private fun highlightCountsPath() = "${matrixStoragePath()}/highlight_counts.json".toPath()
+
+    private fun startHighlightCounts(client: MatrixClient) {
+        highlightCountsUnsubscribe?.invoke()
+        _highlightCounts.value = runCatching {
+            MatrixHighlightCounts.decode(FileSystem.SYSTEM.read(highlightCountsPath()) { readUtf8() })
+        }.getOrDefault(emptyMap())
+        highlightCountsUnsubscribe = client.api.sync.subscribe(ClientEventEmitter.Priority.AFTER_DEFAULT) { syncEvents ->
+            val syncRooms = syncEvents.syncResponse.room ?: return@subscribe
+            val current = _highlightCounts.value
+            val next = MatrixHighlightCounts.merge(
+                current = current,
+                joined = syncRooms.join.orEmpty().entries.associate { (roomId, joinedRoom) ->
+                    roomId.full to joinedRoom.unreadNotifications?.highlightCount
+                },
+                left = syncRooms.leave.orEmpty().keys.map { it.full },
+            )
+            if (next !== current) {
+                _highlightCounts.value = next
+                runCatching {
+                    FileSystem.SYSTEM.write(highlightCountsPath()) { writeUtf8(MatrixHighlightCounts.encode(next)) }
+                }.onFailure { log.w(TAG) { "No se pudo guardar highlight_counts: ${it.message}" } }
+            }
+        }
+    }
+
+    private fun stopHighlightCounts() {
+        highlightCountsUnsubscribe?.invoke()
+        highlightCountsUnsubscribe = null
+        _highlightCounts.value = emptyMap()
+    }
+
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private fun observeMatrixChanges() {
         val client = matrixClient ?: return
+
+        startHighlightCounts(client)
 
         // Sincronizar salas silenciadas (push rules) al iniciar sesión
         scope.launch { refreshMutedRooms() }
@@ -1222,7 +1262,12 @@ class MatrixManager(
                         // `_messages` (un único StateFlow, ligero) y con `_spaceChildren`
                         // (jerarquía de grupos). Así el preview y los hijos de un grupo se
                         // actualizan reactivamente SIN crear un flow pesado por sala.
-                        combine(roomFlow, _messages, _spaceChildren) { room, messagesMap, spaceChildren ->
+                        combine(
+                            roomFlow,
+                            _messages,
+                            _spaceChildren,
+                            _highlightCounts,
+                        ) { room, messagesMap, spaceChildren, highlightCounts ->
                             room?.let {
                                 // ¿Es un Space (grupo) en lugar de una sala de chat?
                                 val isSpace = it.createEventContent?.type is CreateEventContent.RoomType.Space
@@ -1270,6 +1315,7 @@ class MatrixManager(
                                     lastMessageTime = cachedLast?.timestamp,
                                     isSpace = isSpace,
                                     childRoomIds = if (isSpace) spaceChildren[roomId.full].orEmpty() else emptyList(),
+                                    highlightCount = highlightCounts[roomId.full] ?: 0,
                                 )
                             }
                         }

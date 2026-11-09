@@ -20,12 +20,15 @@ class DesktopWebSocket(private val url: String, private val headers: Map<String,
     private val expirationLock = Any()
     private val expirationMap = mutableMapOf<String, Long>()
     private var client: OkHttpClient? = null
+    @Volatile
     private var isConnecting = false
 
     // Estado real de conexion (como iOS usa isConnectedFlag)
+    @Volatile
     private var isOpen = false
 
     // Timestamp del ultimo ping enviado para calcular latencia
+    @Volatile
     private var lastPingSentTime = 0L
 
     // OkHttp puede invocar onClosing Y onClosed para el mismo cierre: solo se notifica una vez.
@@ -59,7 +62,7 @@ class DesktopWebSocket(private val url: String, private val headers: Map<String,
             // Anadir todos los headers recibidos
             headers.forEach { (key, value) ->
                 requestBuilder.addHeader(key, value)
-                log.d(tag = "DesktopWebSocket") { "Added header $key = $value" }
+                log.d(tag = "DesktopWebSocket") { "Added header $key" }
             }
 
             val request = requestBuilder.build()
@@ -73,7 +76,7 @@ class DesktopWebSocket(private val url: String, private val headers: Map<String,
                 }
 
                 override fun onMessage(ws: WebSocket, text: String) {
-                    log.d(tag = "DesktopWebSocket") { "Text message received: ${text.take(120)}..." }
+                    log.d(tag = "DesktopWebSocket") { "Text message received (${text.length} chars)" }
                     listener?.onMessage(text)
                 }
 

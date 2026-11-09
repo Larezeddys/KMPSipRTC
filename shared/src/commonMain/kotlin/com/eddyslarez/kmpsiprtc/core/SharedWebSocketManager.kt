@@ -3,6 +3,7 @@ package com.eddyslarez.kmpsiprtc.core
 import com.eddyslarez.kmpsiprtc.data.models.AccountInfo
 import com.eddyslarez.kmpsiprtc.data.models.RegistrationState
 import com.eddyslarez.kmpsiprtc.data.models.SipConfig
+import com.eddyslarez.kmpsiprtc.platform.LogRedactor
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.services.sip.SipMessageHandler
 import com.eddyslarez.kmpsiprtc.services.webSocket.MultiplatformWebSocket
@@ -768,7 +769,7 @@ class SharedWebSocketManager(
             }
         }
         return try {
-            log.d(TAG) { "Determining account from SIP message:\n$message" }
+            log.d(TAG) { "Determining account from SIP message ${LogRedactor.summarizeSipMessage(message)}" }
 
             val lines = message.lines()
 

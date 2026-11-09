@@ -26,6 +26,11 @@ data class MatrixRoom(
      * desde los state events `m.space.child`. Vacío para salas normales.
      */
     val childRoomIds: List<String> = emptyList(),
+    /**
+     * `unread_notifications.highlight_count` del servidor; [unreadCount] es su `notification_count`.
+     * 0 mientras ninguna sincronización haya traído la sala.
+     */
+    val highlightCount: Int = 0,
 )
 
 /**
