@@ -97,6 +97,8 @@ internal actual object SecretProtector {
                 AclEntryPermission.READ_DATA,
                 AclEntryPermission.WRITE_DATA,
                 AclEntryPermission.APPEND_DATA,
+                AclEntryPermission.READ_NAMED_ATTRS,
+                AclEntryPermission.WRITE_NAMED_ATTRS,
                 AclEntryPermission.READ_ATTRIBUTES,
                 AclEntryPermission.WRITE_ATTRIBUTES,
                 AclEntryPermission.READ_ACL,

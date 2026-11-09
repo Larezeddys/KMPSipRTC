@@ -59,7 +59,7 @@ object DesktopDataDirs {
             os.contains("mac") || os.contains("darwin") ->
                 File(File(File(userHome, "Library"), "Application Support"), appName)
             else -> {
-                val dataHome = env["XDG_DATA_HOME"]?.takeIf { it.isNotBlank() && File(it).isAbsolute }
+                val dataHome = env["XDG_DATA_HOME"]?.takeIf { it.isNotBlank() && (it.startsWith("/") || File(it).isAbsolute) }
                     ?: File(File(userHome, ".local"), "share").path
                 File(dataHome, linuxDirName(appName))
             }
