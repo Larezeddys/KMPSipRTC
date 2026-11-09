@@ -17,6 +17,7 @@ import dev.onvoid.webrtc.media.audio.*
 import dev.onvoid.webrtc.media.video.*
 import dev.onvoid.webrtc.media.video.desktop.ScreenCapturer
 import com.eddyslarez.kmpsiprtc.services.screencapture.DesktopScreenCaptureSupport
+import com.eddyslarez.kmpsiprtc.services.screencapture.DesktopShareSources
 import com.eddyslarez.kmpsiprtc.services.screencapture.PipeWireVideoCapture
 import com.eddyslarez.kmpsiprtc.services.screencapture.PortalScreenCastSession
 import com.eddyslarez.kmpsiprtc.services.screencapture.ScreenShareUnavailableException
@@ -218,6 +219,14 @@ class DesktopPeerConnectionController(
             val track = transceiver.receiver?.track as? VideoTrack ?: return@mapNotNull null
             if (track.state == MediaStreamTrackState.ENDED) return@mapNotNull null
             track to transceiver.mid
+        }
+
+    fun remoteAudioTracks(): List<AudioTrack> =
+        peerConnection?.transceivers.orEmpty().mapNotNull { transceiver ->
+            if (transceiver.stopped()) return@mapNotNull null
+            val track = transceiver.receiver?.track as? AudioTrack ?: return@mapNotNull null
+            if (track.state == MediaStreamTrackState.ENDED) return@mapNotNull null
+            track
         }
 
     fun createNewPeerConnection() {
@@ -1070,11 +1079,15 @@ class DesktopPeerConnectionController(
             )
         }
 
+        val requested = DesktopShareSources.parse(sourceId)
+        if (requested != null && requested.second) {
+            return addWindowShareTrack(factory, pc, requested.first)
+        }
         var capturer: ScreenCapturer? = null
         return try {
             capturer = ScreenCapturer()
             val sources = capturer.getDesktopSources()
-            val screen = sources.firstOrNull { it.id.toString() == sourceId } ?: sources.firstOrNull()
+            val screen = sources.firstOrNull { it.id == requested?.first } ?: sources.firstOrNull()
             if (screen == null) {
                 if (isMacHost()) {
                     log.e(TAG) {
@@ -1116,6 +1129,29 @@ class DesktopPeerConnectionController(
                 capturer?.dispose()
             } catch (_: Throwable) {}
         }
+    }
+
+    private fun addWindowShareTrack(
+        factory: PeerConnectionFactory,
+        pc: RTCPeerConnection,
+        windowId: Long,
+    ): VideoTrack? = try {
+        val source = VideoDesktopSource().apply {
+            setSourceId(windowId, true)
+            setFrameRate(15)
+            setMaxFrameSize(1280, 720)
+        }
+        screenVideoSource = source
+        val track = factory.createVideoTrack(LocalTrackIds.SCREEN, source)
+        localScreenTrack = track
+        screenSender = pc.addTrack(track, listOf("stream0"))
+        source.start()
+        log.d(TAG) { "✅ Window share track added ($windowId)" }
+        track
+    } catch (e: Throwable) {
+        log.e(TAG) { "Error adding window share track: ${e::class.simpleName}: ${e.message}" }
+        removeLocalScreenShareTrack()
+        null
     }
 
     /**

@@ -147,6 +147,15 @@ actual class ConferenceLiveKitManager actual constructor() {
     // garantiza: el sid del emisor no viaja en el paquete de datos.
     private val platformByIdentity = ConcurrentHashMap<String, String>()
 
+    // Volumen local por identity durante la sesión; sobrevive a reconexiones y se borra al salir.
+    private val playbackVolumes = ConcurrentHashMap<String, Int>()
+    private val remoteAudioSidsByIdentity = ConcurrentHashMap<String, Set<String>>()
+    private val audioGainLock = Any()
+    private val audioGains = HashMap<String, DesktopRemoteAudioGain>()
+    // Bajo audioGainLock: desde que se sueltan las ganancias hasta el subscriber nuevo, sus pistas
+    // pueden ser de un PeerConnection que se está cerrando.
+    @Volatile private var remoteAudioClosing = false
+
     @OptIn(ExperimentalTime::class)
     private fun currentTimeMs(): Long = Clock.System.now().toEpochMilliseconds()
 
@@ -233,6 +242,7 @@ actual class ConferenceLiveKitManager actual constructor() {
             log.w(tag = TAG) { "Error en disconnect signaling: ${e.message}" }
         }
         cleanup()
+        playbackVolumes.clear()
         _participants.value = emptyList()
         _videoTracks.value = emptyList()
         _chatMessages.value = emptyList()
@@ -622,7 +632,44 @@ actual class ConferenceLiveKitManager actual constructor() {
     }
 
     actual suspend fun setRemotePlaybackVolume(participantIdentity: String, volumePercent: Int) {
-        // Desktop mezcla los tracks remotos en PeerConnection y no expone ganancia por participante.
+        if (participantIdentity.isBlank() || participantIdentity == localIdentity) return
+        val percent = volumePercent.coerceIn(0, MAX_PLAYBACK_VOLUME_PERCENT)
+        if (percent == DEFAULT_PLAYBACK_VOLUME_PERCENT) {
+            playbackVolumes.remove(participantIdentity)
+        } else {
+            playbackVolumes[participantIdentity] = percent
+        }
+        // Abrir la línea de JavaSound puede bloquear; no debe hacerlo el hilo de la UI.
+        withContext(Dispatchers.IO) { applyRemotePlaybackVolumes() }
+        rebuildParticipantList()
+    }
+
+    private fun applyRemotePlaybackVolumes() {
+        val sub = subscriberWebRtc ?: return
+        synchronized(audioGainLock) {
+            if (remoteAudioClosing || subscriberWebRtc !== sub) return
+            val tracks = runCatching { sub.remoteAudioTracks() }.getOrNull().orEmpty()
+            val present = mutableSetOf<String>()
+            tracks.forEach { track ->
+                val trackId = runCatching { track.id }.getOrNull()?.takeIf { it.isNotBlank() } ?: return@forEach
+                present += trackId
+                val identity = remoteAudioSidsByIdentity.entries.firstOrNull { trackId in it.value }?.key
+                val percent = identity?.let { playbackVolumes[it] } ?: DEFAULT_PLAYBACK_VOLUME_PERCENT
+                val gain = audioGains[trackId]
+                if (gain == null && percent == DEFAULT_PLAYBACK_VOLUME_PERCENT) return@forEach
+                (gain ?: DesktopRemoteAudioGain(track).also { audioGains[trackId] = it }).setPercent(percent)
+            }
+            val gone = audioGains.keys.filterNot { it in present }
+            gone.forEach { trackId -> audioGains.remove(trackId)?.release() }
+        }
+    }
+
+    private fun releaseRemoteAudioGains() {
+        synchronized(audioGainLock) {
+            remoteAudioClosing = true
+            audioGains.values.forEach { it.release() }
+            audioGains.clear()
+        }
     }
 
     actual fun getVideoTrackHandle(participantIdentity: String): LkVideoTrackHandle? {
@@ -879,6 +926,7 @@ actual class ConferenceLiveKitManager actual constructor() {
         // 1. Crear subscriber PRIMERO (el offer puede llegar durante setupPublisher)
         val sub = DesktopWebRtcManager()
         subscriberWebRtc = sub
+        synchronized(audioGainLock) { remoteAudioClosing = false }
         subscriberIceReady = false
         sub.initialize()
         if (iceServersTriples.isNotEmpty()) sub.setIceServers(iceServersTriples)
@@ -894,6 +942,7 @@ actual class ConferenceLiveKitManager actual constructor() {
             }
             override fun onRemoteAudioTrack() {
                 log.d(tag = TAG) { "Audio remoto recibido via subscriber" }
+                if (playbackVolumes.isNotEmpty()) scope.launch { applyRemotePlaybackVolumes() }
             }
             override fun onAudioDeviceChanged(device: AudioDevice?) {}
         })
@@ -1070,7 +1119,13 @@ actual class ConferenceLiveKitManager actual constructor() {
             remoteParticipants.remove(info.identity)
             raisedHands.remove(info.identity)
             platformByIdentity.remove(info.identity)
+            remoteAudioSidsByIdentity.remove(info.identity)
             return
+        }
+        val audioSids = info.tracks.filter { it.type == LiveKitTrackType.AUDIO.value && it.sid.isNotEmpty() }
+            .map { it.sid }.toSet()
+        if (remoteAudioSidsByIdentity.put(info.identity, audioSids) != audioSids && playbackVolumes.isNotEmpty()) {
+            scope.launch { applyRemotePlaybackVolumes() }
         }
         handRaisedFromParticipant(info)?.let { raised ->
             if (raised) raisedHands.putIfAbsent(info.identity, currentTimeMs())
@@ -1129,6 +1184,8 @@ actual class ConferenceLiveKitManager actual constructor() {
                     isHandRaised = raisedHands.containsKey(participant.identity),
                     handRaisedAt = raisedHands[participant.identity],
                     platform = platformByIdentity[participant.identity],
+                    playbackVolumePercent = playbackVolumes[participant.identity] ?: DEFAULT_PLAYBACK_VOLUME_PERCENT,
+                    canAdjustPlaybackVolume = true,
                 )
             }
         )
@@ -1384,6 +1441,7 @@ actual class ConferenceLiveKitManager actual constructor() {
                 publisherWebRtc?.closePeerConnection()
                 publisherWebRtc?.dispose()
                 publisherWebRtc = null
+                releaseRemoteAudioGains()
                 val oldSubscriber = synchronized(remoteMediaLock) {
                     val current = subscriberWebRtc
                     subscriberWebRtc = null
@@ -1406,6 +1464,7 @@ actual class ConferenceLiveKitManager actual constructor() {
                 remoteParticipants.clear()
                 raisedHands.clear()
                 platformByIdentity.clear()
+                remoteAudioSidsByIdentity.clear()
                 localHandRaised = false
                 // Se conservan las preferencias de cámara, micrófono, altavoz y pantalla entre reconexiones.
             }
@@ -1446,4 +1505,6 @@ actual class ConferenceLiveKitManager actual constructor() {
 }
 
 private const val PLATFORM_ANNOUNCE_ATTEMPTS = 4
+private const val DEFAULT_PLAYBACK_VOLUME_PERCENT = 100
+private const val MAX_PLAYBACK_VOLUME_PERCENT = 150
 private const val PLATFORM_ANNOUNCE_RETRY_INTERVAL_MS = 1500L

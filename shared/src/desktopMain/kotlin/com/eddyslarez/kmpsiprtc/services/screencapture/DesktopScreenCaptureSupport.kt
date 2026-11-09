@@ -31,16 +31,24 @@ object DesktopScreenCaptureSupport {
 
     fun isPortalAvailable(): Boolean {
         if (!isLinux()) return false
-        val runtimeDir = System.getenv("XDG_RUNTIME_DIR") ?: return false
+        val runtimeDir = System.getenv("XDG_RUNTIME_DIR")?.takeIf { it.isNotBlank() }
         // El portal habla por el bus de sesión y PipeWire por su socket propio.
         val hasBus = !System.getenv("DBUS_SESSION_BUS_ADDRESS").isNullOrBlank() ||
-            File(runtimeDir, "bus").exists()
-        val hasPipeWire = File(runtimeDir, "pipewire-0").exists()
-        return hasBus && hasPipeWire
+            (runtimeDir != null && File(runtimeDir, "bus").exists())
+        return hasBus && hasPipeWireSocket(runtimeDir)
     }
 
+    // PipeWire puede publicar el socket fuera de XDG_RUNTIME_DIR o con otro nombre.
+    private fun hasPipeWireSocket(runtimeDir: String?): Boolean {
+        if (!System.getenv("PIPEWIRE_REMOTE").isNullOrBlank()) return true
+        val dirs = listOfNotNull(System.getenv("PIPEWIRE_RUNTIME_DIR")?.takeIf { it.isNotBlank() }, runtimeDir)
+        return dirs.any { dir -> File(dir, "pipewire-0").exists() || File(dir, "pipewire-0-manager").exists() }
+    }
+
+    // Sin inicializar la clase: su inicializador estático carga la librería nativa y un
+    // fallo ahí no significa que falte el jar.
     fun isGStreamerAvailable(): Boolean = runCatching {
-        Class.forName("org.freedesktop.gstreamer.Gst")
+        Class.forName("org.freedesktop.gstreamer.Gst", false, DesktopScreenCaptureSupport::class.java.classLoader)
         true
     }.getOrDefault(false)
 

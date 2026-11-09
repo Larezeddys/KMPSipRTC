@@ -11,6 +11,7 @@ import com.eddyslarez.kmpsiprtc.data.models.SipEngineInitError
 import com.eddyslarez.kmpsiprtc.data.models.WebRtcConnectionState
 import com.eddyslarez.kmpsiprtc.platform.log
 import com.eddyslarez.kmpsiprtc.services.screencapture.DesktopScreenCaptureSupport
+import com.eddyslarez.kmpsiprtc.services.screencapture.DesktopShareSources
 import com.eddyslarez.kmpsiprtc.services.audio.AudioStreamListener
 import com.eddyslarez.kmpsiprtc.services.audio.DesktopAudioController
 import dev.onvoid.webrtc.media.video.VideoDevice
@@ -202,36 +203,17 @@ class DesktopWebRtcManager : WebRtcManager {
             DesktopScreenCaptureSupport.Backend.WEBRTC_DESKTOP -> Unit
         }
 
-        var capturer: ScreenCapturer? = null
-        return try {
-            capturer = ScreenCapturer()
-            val sources = capturer.getDesktopSources().mapIndexed { index, source ->
-                source.id.toString() to (source.title?.takeIf { it.isNotBlank() } ?: "Screen ${index + 1}")
+        val screens = DesktopShareSources.screens()
+        if (screens.isEmpty() && isMacHost()) {
+            // En macOS getDesktopSources() suele devolver vacío cuando la app NO tiene
+            // permiso de "Grabación de pantalla" (System Settings > Privacy & Security >
+            // Screen Recording).
+            log.w(TAG) {
+                "macOS: getDesktopSources() devolvió 0 pantallas. Revisa el permiso de " +
+                    "'Grabación de pantalla' para la app (o el JDK) en Ajustes del Sistema."
             }
-            if (sources.isEmpty() && isMacHost()) {
-                // En macOS getDesktopSources() suele devolver vacío cuando la app NO tiene
-                // permiso de "Grabación de pantalla" (System Settings > Privacy & Security >
-                // Screen Recording). También puede fallar si el native de webrtc-java (0.10.0)
-                // no implementa el desktop capturer de macOS. Log explícito para diagnóstico.
-                log.w(TAG) {
-                    "macOS: getDesktopSources() devolvió 0 pantallas. Revisa el permiso de " +
-                        "'Grabación de pantalla' para la app (o el JDK) en Ajustes del Sistema. " +
-                        "Si el permiso está concedido y sigue vacío, el capturer nativo de " +
-                        "webrtc-java 0.10.0/macOS no soporta captura de escritorio."
-                }
-            }
-            sources
-        } catch (e: Throwable) {
-            log.e(TAG) {
-                "Error enumerando pantallas (os=${System.getProperty("os.name")}): " +
-                    "${e::class.simpleName}: ${e.message}"
-            }
-            emptyList()
-        } finally {
-            try {
-                capturer?.dispose()
-            } catch (_: Throwable) {}
         }
+        return (screens + DesktopShareSources.windows()).map { it.id to it.title }
     }
 
     private fun isMacHost(): Boolean =
@@ -267,6 +249,8 @@ class DesktopWebRtcManager : WebRtcManager {
     }
 
     fun remoteVideoReceivers(): List<Pair<VideoTrack, String?>> = peerConnectionController.remoteVideoReceivers()
+
+    fun remoteAudioTracks(): List<dev.onvoid.webrtc.media.audio.AudioTrack> = peerConnectionController.remoteAudioTracks()
 
     // ==================== CONNECTION MANAGEMENT ====================
 
